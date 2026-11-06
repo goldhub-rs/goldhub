@@ -5,6 +5,7 @@ members = [
     "crates/goldhub-vfs",
     "crates/goldhub-formats",
     "crates/goldhub-net",
+    "crates/goldhub-app",
 ]
 
 [workspace.package]
@@ -28,6 +29,17 @@ blake3 = "1.5"
 zerocopy = { version = "0.8", features = ["derive"] }
 bytemuck = { version = "1.21", features = ["derive"] }
 proptest = "1.6"
+bevy = { version = "0.15", default-features = false, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_asset",
+    "bevy_window",
+    "tonemapping_luts",
+    "x11",
+    "multi_threaded",
+] }
 
 # Low-level ecosystem crates
 proc-safety = { git = "https://github.com/ulquiorracode/proc-safety-rs.git", branch = "dev" }
