@@ -1,0 +1,29 @@
+[package]
+name = "goldhub-formats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical Data IR and pluggable asset codecs for GoldHub (Modern glTF/KTX2 & GoldSrc legacy)"
+
+[features]
+default = ["goldsrc"]
+goldsrc = []
+modern = []
+
+[dependencies]
+zerocopy = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+memmap2 = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true

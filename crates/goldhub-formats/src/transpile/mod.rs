@@ -1,0 +1,7 @@
+//! Transpilers converting legacy format representations into modern GPU-ready Canonical IR.
+
+pub mod bsp_transpile;
+pub mod collision_transpile;
+
+pub use bsp_transpile::compile_bsp_geometry;
+pub use collision_transpile::compile_bsp_collision;
