@@ -15,7 +15,10 @@ pub mod protocol;
 pub mod transport;
 
 pub use buffer::{AdaptiveJitterBuffer, NetworkRingChannel};
-pub use connection::{ConnectionState, FlowStats, IncomingPacket, NetConnection};
+pub use connection::{
+    ActiveChannelProfile, CapabilityNegotiator, ClientCapabilities, ConnectionState, FlowStats,
+    IncomingPacket, NetConnection, ServerMode,
+};
 pub use error::NetError;
 pub use lagcomp::{
     EntitySnapshot, LagCompHistoryRing, interpolate_subtick_snapshot, ray_intersects_aabb,
@@ -78,6 +81,42 @@ mod tests {
         // Visual render origin is smoothly offset, avoiding snapping
         let visual_origin = engine.visual_render_origin();
         assert!(visual_origin[0].is_finite());
+    }
+
+    #[test]
+    fn test_server_mode_capability_negotiation() {
+        let legacy_client = ClientCapabilities::legacy_protocol_48();
+        let nextgen_client = ClientCapabilities::nextgen_goldhub();
+
+        // 1. LegacyStrict Mode
+        let negotiator_legacy = CapabilityNegotiator::new(ServerMode::LegacyStrict);
+        assert_eq!(
+            negotiator_legacy.negotiate(legacy_client).unwrap(),
+            ActiveChannelProfile::LegacyProtocol48
+        );
+        assert_eq!(
+            negotiator_legacy.negotiate(nextgen_client).unwrap(),
+            ActiveChannelProfile::LegacyProtocol48
+        );
+
+        // 2. HybridDualStack Mode
+        let negotiator_hybrid = CapabilityNegotiator::new(ServerMode::HybridDualStack);
+        assert_eq!(
+            negotiator_hybrid.negotiate(legacy_client).unwrap(),
+            ActiveChannelProfile::LegacyProtocol48
+        );
+        assert_eq!(
+            negotiator_hybrid.negotiate(nextgen_client).unwrap(),
+            ActiveChannelProfile::NextGenFastPath
+        );
+
+        // 3. NextGenPure Mode
+        let negotiator_nextgen = CapabilityNegotiator::new(ServerMode::NextGenPure);
+        assert!(negotiator_nextgen.negotiate(legacy_client).is_err());
+        assert_eq!(
+            negotiator_nextgen.negotiate(nextgen_client).unwrap(),
+            ActiveChannelProfile::NextGenFastPath
+        );
     }
 
     #[test]
