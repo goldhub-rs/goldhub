@@ -1,22 +1,44 @@
 //! Dynamic window mode, diagnostics, and display management.
 
+use std::thread;
+use std::time::{Duration, Instant};
+
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
 
-/// Plugin managing full-screen, VSync toggling, and real-time title bar diagnostics.
+/// Plugin managing full-screen, VSync toggling, CPU pacing, and real-time title bar diagnostics.
 pub struct WindowControlPlugin;
 
 impl Plugin for WindowControlPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DiagnosticsTracker>();
+        app.init_resource::<FramePacer>();
         app.add_systems(
             Update,
             (
                 toggle_fullscreen_mode,
                 toggle_vsync_mode,
+                frame_pacing_system,
                 update_window_title_diagnostics,
             ),
         );
+    }
+}
+
+#[derive(Resource)]
+struct FramePacer {
+    last_frame_instant: Instant,
+    target_frame_duration: Duration,
+    pacing_enabled: bool,
+}
+
+impl Default for FramePacer {
+    fn default() -> Self {
+        Self {
+            last_frame_instant: Instant::now(),
+            target_frame_duration: Duration::from_nanos(6_060_606), // ~165.0 Hz (1 / 165s)
+            pacing_enabled: true,
+        }
     }
 }
 
@@ -59,21 +81,49 @@ fn toggle_fullscreen_mode(
 
 fn toggle_vsync_mode(
     keyboard: Res<ButtonInput<KeyCode>>,
+    mut pacer: ResMut<FramePacer>,
     mut window_query: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    // Press V to toggle VSync on/off (AutoVsync vs AutoNoVsync)
-    if keyboard.just_pressed(KeyCode::KeyV)
-        && let Ok(mut window) = window_query.get_single_mut()
-    {
-        window.present_mode = match window.present_mode {
-            PresentMode::AutoVsync => PresentMode::AutoNoVsync,
-            _ => PresentMode::AutoVsync,
-        };
+    // Press V to toggle VSync on/off (Fifo vs Immediate) + CPU Pacing
+    if keyboard.just_pressed(KeyCode::KeyV) {
+        pacer.pacing_enabled = !pacer.pacing_enabled;
+
+        if let Ok(mut window) = window_query.get_single_mut() {
+            window.present_mode = if pacer.pacing_enabled {
+                PresentMode::Fifo
+            } else {
+                PresentMode::Immediate
+            };
+        }
     }
+}
+
+fn frame_pacing_system(mut pacer: ResMut<FramePacer>) {
+    if !pacer.pacing_enabled {
+        pacer.last_frame_instant = Instant::now();
+        return;
+    }
+
+    let elapsed = pacer.last_frame_instant.elapsed();
+    if let Some(sleep_duration) = pacer.target_frame_duration.checked_sub(elapsed) {
+        // Yield CPU thread slices to bring core utilization down to 1-3%
+        if let Some(safe_sleep) = sleep_duration.checked_sub(Duration::from_micros(250))
+            && safe_sleep > Duration::from_micros(500)
+        {
+            thread::sleep(safe_sleep);
+        }
+        // Micro-spin wait for sub-millisecond precision
+        while pacer.last_frame_instant.elapsed() < pacer.target_frame_duration {
+            thread::yield_now();
+        }
+    }
+
+    pacer.last_frame_instant = Instant::now();
 }
 
 fn update_window_title_diagnostics(
     time: Res<Time>,
+    pacer: Res<FramePacer>,
     mut tracker: ResMut<DiagnosticsTracker>,
     mut window_query: Query<&mut Window, With<PrimaryWindow>>,
 ) {
@@ -87,13 +137,14 @@ fn update_window_title_diagnostics(
         tracker.timer = 0.0;
 
         if let Ok(mut window) = window_query.get_single_mut() {
-            let vsync_str = match window.present_mode {
-                PresentMode::AutoVsync => "ON (165Hz target / sync)",
-                _ => "OFF (Uncapped / Full Core Load)",
+            let vsync_str = if pacer.pacing_enabled {
+                "ON (165 FPS Hard Lock / Low CPU Load)"
+            } else {
+                "OFF (Uncapped / Full Core Load)"
             };
 
             window.title = format!(
-                "GoldHub | FPS: {:.1} ({:.2} ms) | VSync [V]: {} | Toggle Fullscreen: [F11]",
+                "GoldHub | FPS: {:.1} ({:.2} ms) | VSync [V]: {} | Fullscreen: [F11]",
                 tracker.current_fps, tracker.frame_time_ms, vsync_str
             );
         }

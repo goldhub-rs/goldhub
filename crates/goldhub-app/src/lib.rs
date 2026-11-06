@@ -28,7 +28,7 @@ pub fn build_goldhub_app() -> App {
                     resolution: WindowResolution::new(1280.0, 720.0),
                     mode: WindowMode::Windowed,
                     resizable: true,
-                    present_mode: bevy::window::PresentMode::AutoVsync,
+                    present_mode: bevy::window::PresentMode::Fifo,
                     ..default()
                 }),
                 ..default()
