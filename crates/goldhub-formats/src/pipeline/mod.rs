@@ -51,22 +51,21 @@ impl AssetPipeline {
     /// On cache miss: parses, triangulates, commits to cache, and returns the compiled mesh.
     #[cfg(feature = "goldsrc")]
     pub fn load_bsp_mesh(&self, raw_bytes: &[u8]) -> Result<MeshBuffer, FormatError> {
-        let (mesh, _) = self.load_bsp_mesh_and_atlas(raw_bytes)?;
+        let (mesh, _) = self.load_bsp_level_raw(raw_bytes)?;
         Ok(mesh)
     }
 
-    /// Ingests a BSP30 level and extracts its embedded texture atlas.
+    /// Ingests a BSP30 level, compiles geometry and returns its raw texture descriptors for separate materials.
     #[cfg(feature = "goldsrc")]
-    pub fn load_bsp_mesh_and_atlas(
+    pub fn load_bsp_level_raw(
         &self,
         raw_bytes: &[u8],
-    ) -> Result<(MeshBuffer, crate::ir::TextureAtlas), FormatError> {
+    ) -> Result<(MeshBuffer, Vec<crate::ir::TextureDescriptor>), FormatError> {
         let decoder = Bsp30Decoder;
         let bsp = decoder.decode(raw_bytes)?;
         let textures = bsp.extract_embedded_textures();
-        let atlas = crate::ir::TextureAtlas::build(&textures, 2);
-        let mesh = crate::transpile::compile_bsp_geometry_with_atlas(&bsp, Some(&atlas))?;
+        let mesh = crate::transpile::compile_bsp_geometry_submeshes(&bsp, &textures)?;
 
-        Ok((mesh, atlas))
+        Ok((mesh, textures))
     }
 }

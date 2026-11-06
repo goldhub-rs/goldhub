@@ -25,6 +25,77 @@ pub fn to_bevy_mesh(mesh_buffer: &MeshBuffer) -> Mesh {
     mesh
 }
 
+/// Partitioned submesh ready for multi-material rendering.
+#[derive(Debug)]
+pub struct PartitionedMesh {
+    pub material_id: u32,
+    pub mesh: Mesh,
+}
+
+/// Converts a Canonical Data IR `MeshBuffer` into partitioned Bevy `Mesh`es grouped by `material_id`.
+pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
+    use std::collections::HashMap;
+
+    // Group submesh index ranges by material_id
+    let mut material_groups: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    for submesh in &mesh_buffer.submeshes {
+        let entry = material_groups.entry(submesh.material_id).or_default();
+        let start = submesh.index_start as usize;
+        let end = start + submesh.index_count as usize;
+        if end <= mesh_buffer.indices.len() {
+            entry.extend_from_slice(&mesh_buffer.indices[start..end]);
+        }
+    }
+
+    let mut result = Vec::with_capacity(material_groups.len());
+
+    for (mat_id, sub_indices) in material_groups {
+        if sub_indices.is_empty() {
+            continue;
+        }
+
+        // Remap only the vertices referenced by this submesh
+        let mut vertex_remap: HashMap<u32, u32> = HashMap::new();
+        let mut sub_positions = Vec::new();
+        let mut sub_normals = Vec::new();
+        let mut sub_tangents = Vec::new();
+        let mut sub_uvs = Vec::new();
+        let mut new_indices = Vec::with_capacity(sub_indices.len());
+
+        for &orig_idx in &sub_indices {
+            let remapped = *vertex_remap.entry(orig_idx).or_insert_with(|| {
+                let new_idx = sub_positions.len() as u32;
+                if let Some(v) = mesh_buffer.vertices.get(orig_idx as usize) {
+                    sub_positions.push(v.position);
+                    sub_normals.push(v.normal);
+                    sub_tangents.push(v.tangent);
+                    sub_uvs.push(v.uv0);
+                }
+                new_idx
+            });
+            new_indices.push(remapped);
+        }
+
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, sub_positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, sub_normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, sub_tangents);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub_uvs);
+        mesh.insert_indices(Indices::U32(new_indices));
+
+        result.push(PartitionedMesh {
+            material_id: mat_id,
+            mesh,
+        });
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

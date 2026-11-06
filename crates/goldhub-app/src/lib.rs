@@ -10,7 +10,7 @@ pub mod window;
 
 pub use camera::{SpectatorCamera, SpectatorCameraPlugin};
 pub use level::LevelPlugin;
-pub use mesh_bridge::to_bevy_mesh;
+pub use mesh_bridge::{PartitionedMesh, to_bevy_mesh, to_bevy_submeshes};
 pub use window::WindowControlPlugin;
 
 use bevy::prelude::*;

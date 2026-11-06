@@ -6,10 +6,89 @@ use crate::ir::{MeshBuffer, SubMesh, Vertex};
 
 /// Compiles raw BSP30 level lumps into a contiguous, cache-line aligned Canonical `MeshBuffer`.
 pub fn compile_bsp_geometry(bsp: &BspLevel<'_>) -> Result<MeshBuffer, FormatError> {
-    compile_bsp_geometry_with_atlas(bsp, None)
+    compile_bsp_geometry_submeshes(bsp, &[])
 }
 
-/// Compiles raw BSP30 level lumps with atlas-mapped UV coordinates.
+/// Compiles raw BSP30 level into partitioned submeshes with unconstrained, repeating UV coordinates.
+pub fn compile_bsp_geometry_submeshes(
+    bsp: &BspLevel<'_>,
+    textures: &[crate::ir::TextureDescriptor],
+) -> Result<MeshBuffer, FormatError> {
+    let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(bsp.faces.len() * 6);
+    let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
+
+    for (face_idx, face) in bsp.faces.iter().enumerate() {
+        let face_positions = collect_face_positions(face, bsp);
+        if face_positions.len() < 3 {
+            continue;
+        }
+
+        let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
+        let normal = compute_face_normal(&face_positions);
+        let tangent = [s_vec[0], s_vec[1], s_vec[2], 1.0];
+
+        let submesh_start = indices.len() as u32;
+        let base_vert_idx = vertices.len() as u32;
+
+        let (tex_w, tex_h) = textures
+            .get(tex_id as usize)
+            .map_or((128.0, 128.0), |t| (t.width as f32, t.height as f32));
+
+        // Triangulate convex polygon fan: (0, 1, 2), (0, 2, 3), (0, 3, 4), ...
+        for (i, &pos) in face_positions.iter().enumerate() {
+            // Correct GoldSrc texture projection in world coordinates:
+            let raw_u =
+                ((pos[0] * s_vec[0] + pos[1] * s_vec[1] + pos[2] * s_vec[2]) + s_shift) / tex_w;
+            let raw_v =
+                ((pos[0] * t_vec[0] + pos[1] * t_vec[1] + pos[2] * t_vec[2]) + t_shift) / tex_h;
+
+            // Coordinate system transformation:
+            // GoldSrc: X = Right, Y = Forward, Z = Up
+            // Bevy / Modern: X = Right, Y = Up, Z = -Forward (or -Y)
+            let bevy_pos = [pos[0], pos[2], -pos[1]];
+            let bevy_normal = [normal[0], normal[2], -normal[1]];
+            let bevy_tangent = [tangent[0], tangent[2], -tangent[1], 1.0];
+
+            vertices.push(Vertex {
+                position: bevy_pos,
+                normal: bevy_normal,
+                tangent: bevy_tangent,
+                uv0: [raw_u, raw_v],
+                uv1_lightmap: [0.0, 0.0],
+                style_indices: face.styles,
+                style_weights: [255, 0, 0, 0],
+            });
+
+            if i >= 2 {
+                indices.push(base_vert_idx);
+                indices.push(base_vert_idx + (i as u32) - 1);
+                indices.push(base_vert_idx + (i as u32));
+            }
+        }
+
+        let submesh_count = (indices.len() as u32) - submesh_start;
+        submeshes.push(SubMesh {
+            name: format!("face_{face_idx}"),
+            index_start: submesh_start,
+            index_count: submesh_count,
+            material_id: tex_id,
+        });
+    }
+
+    let mut mesh = MeshBuffer {
+        vertices,
+        indices,
+        submeshes,
+        aabb_min: [0.0; 3],
+        aabb_max: [0.0; 3],
+    };
+
+    mesh.recompute_bounds();
+    Ok(mesh)
+}
+
+/// Compiles raw BSP30 level lumps with atlas-mapped UV coordinates (Legacy Fallback).
 pub fn compile_bsp_geometry_with_atlas(
     bsp: &BspLevel<'_>,
     atlas: Option<&crate::ir::TextureAtlas>,

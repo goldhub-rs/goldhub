@@ -1,13 +1,15 @@
 //! Level loading, asset pipeline integration, and scene illumination.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use goldhub_formats::pipeline::AssetPipeline;
 
 use crate::camera::SpectatorCamera;
-use crate::mesh_bridge::to_bevy_mesh;
+use crate::mesh_bridge::to_bevy_submeshes;
 
 const SAMPLE_BSP_PATH: &str = "D:/Repo/CS16/hlmsl/test_maps/de_inferno.bsp";
 const FALLBACK_BSP_PATH: &str =
@@ -21,6 +23,7 @@ impl Plugin for LevelPlugin {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn setup_level(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -54,44 +57,78 @@ fn setup_level(
         && let Ok(raw_bytes) = fs::read(bsp_path)
     {
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
-        if let Ok((mesh_buffer, atlas)) = pipeline.load_bsp_mesh_and_atlas(&raw_bytes) {
-            let bevy_mesh = to_bevy_mesh(&mesh_buffer);
-            let mesh_handle = meshes.add(bevy_mesh);
+        if let Ok((mesh_buffer, textures)) = pipeline.load_bsp_level_raw(&raw_bytes) {
+            // 1. Create native GPU Images for each texture with Repeating wrap sampler
+            let mut texture_materials: HashMap<u32, Handle<StandardMaterial>> = HashMap::new();
 
-            // Construct Bevy GPU Image from RGBA8 Texture Atlas
-            let atlas_image = Image::new(
-                bevy::render::render_resource::Extent3d {
-                    width: atlas.width,
-                    height: atlas.height,
-                    depth_or_array_layers: 1,
-                },
-                bevy::render::render_resource::TextureDimension::D2,
-                atlas.rgba_data,
-                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
-                bevy::render::render_asset::RenderAssetUsages::default(),
-            );
-            let atlas_handle = images.add(atlas_image);
+            for (idx, tex_desc) in textures.iter().enumerate() {
+                let data = tex_desc
+                    .mips
+                    .first()
+                    .map(|m| m.data.clone())
+                    .unwrap_or_default();
+                let mut img = Image::new(
+                    bevy::render::render_resource::Extent3d {
+                        width: tex_desc.width,
+                        height: tex_desc.height,
+                        depth_or_array_layers: 1,
+                    },
+                    bevy::render::render_resource::TextureDimension::D2,
+                    data,
+                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                    bevy::render::render_asset::RenderAssetUsages::default(),
+                );
 
-            let material_handle = materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                base_color_texture: Some(atlas_handle),
+                // Hardware repeating sampler enables infinite tiling on roofs and walls
+                img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                    address_mode_u: ImageAddressMode::Repeat,
+                    address_mode_v: ImageAddressMode::Repeat,
+                    address_mode_w: ImageAddressMode::Repeat,
+                    ..default()
+                });
+
+                let img_handle = images.add(img);
+                let mat_handle = materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: Some(img_handle),
+                    perceptual_roughness: 0.85,
+                    reflectance: 0.15,
+                    cull_mode: None,
+                    ..default()
+                });
+
+                texture_materials.insert(idx as u32, mat_handle);
+            }
+
+            // Fallback material for textures without diffuse image
+            let fallback_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.6, 0.6, 0.6),
                 perceptual_roughness: 0.85,
-                reflectance: 0.15,
                 cull_mode: None,
                 ..default()
             });
 
-            commands.spawn((
-                Mesh3d(mesh_handle),
-                MeshMaterial3d(material_handle),
-                Transform::from_xyz(0.0, 0.0, 0.0),
-            ));
+            // 2. Spawn partitioned submeshes by material_id
+            let partitioned = to_bevy_submeshes(&mesh_buffer);
+            for part in partitioned {
+                let mesh_handle = meshes.add(part.mesh);
+                let mat_handle = texture_materials
+                    .get(&part.material_id)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_mat.clone());
+
+                commands.spawn((
+                    Mesh3d(mesh_handle),
+                    MeshMaterial3d(mat_handle),
+                    Transform::from_xyz(0.0, 0.0, 0.0),
+                ));
+            }
 
             tracing::info!(
                 vertex_count = mesh_buffer.vertex_count(),
                 index_count = mesh_buffer.index_count(),
-                atlas_res = format!("{}x{}", atlas.width, atlas.height),
-                "Spawned BSP30 Level into Viewport"
+                texture_count = textures.len(),
+                "Spawned BSP30 Level with Repeat Tiling into Viewport"
             );
             spawned_bsp = true;
         }
