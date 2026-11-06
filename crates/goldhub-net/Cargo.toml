@@ -1,0 +1,29 @@
+[package]
+name = "goldhub-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Next-gen zero-allocation rollback netcode, sub-tick input, and GoldSrc Protocol 48 transport"
+
+[features]
+default = ["goldsrc"]
+goldsrc = []
+nextgen = []
+
+[dependencies]
+wire-ring = { workspace = true }
+zerocopy = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+odd-int = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

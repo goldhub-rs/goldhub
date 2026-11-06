@@ -4,6 +4,7 @@ members = [
     "crates/goldhub-manifest",
     "crates/goldhub-vfs",
     "crates/goldhub-formats",
+    "crates/goldhub-net",
 ]
 
 [workspace.package]
@@ -74,3 +75,13 @@ lto = "thin"
 codegen-units = 1
 panic = "unwind"
 strip = "debuginfo"
+
+[patch."https://github.com/ulquiorracode/wire-ring-rs.git"]
+wire-ring = { path = "../wire-ring-rs/crates/wire-ring" }
+wire-ring-core = { path = "../wire-ring-rs/crates/wire-ring-core" }
+
+[patch."https://github.com/ulquiorracode/proc-safety-rs.git"]
+proc-safety = { path = "../proc-safety-rs" }
+
+[patch."https://github.com/ulquiorracode/odd-int-rs.git"]
+odd-int = { path = "../odd-int-rs" }
