@@ -1,0 +1,20 @@
+[package]
+name = "goldhub-vfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "High-performance sandboxed Zero-Copy Virtual File System (VFS) for GoldHub"
+
+[dependencies]
+goldhub-manifest = { path = "../goldhub-manifest" }
+memmap2 = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = "3.17"
