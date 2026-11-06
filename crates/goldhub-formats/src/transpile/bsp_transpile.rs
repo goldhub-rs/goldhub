@@ -6,6 +6,14 @@ use crate::ir::{MeshBuffer, SubMesh, Vertex};
 
 /// Compiles raw BSP30 level lumps into a contiguous, cache-line aligned Canonical `MeshBuffer`.
 pub fn compile_bsp_geometry(bsp: &BspLevel<'_>) -> Result<MeshBuffer, FormatError> {
+    compile_bsp_geometry_with_atlas(bsp, None)
+}
+
+/// Compiles raw BSP30 level lumps with atlas-mapped UV coordinates.
+pub fn compile_bsp_geometry_with_atlas(
+    bsp: &BspLevel<'_>,
+    atlas: Option<&crate::ir::TextureAtlas>,
+) -> Result<MeshBuffer, FormatError> {
     let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(bsp.faces.len() * 6);
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
@@ -23,16 +31,30 @@ pub fn compile_bsp_geometry(bsp: &BspLevel<'_>) -> Result<MeshBuffer, FormatErro
         let submesh_start = indices.len() as u32;
         let base_vert_idx = vertices.len() as u32;
 
+        let region = atlas.and_then(|a| a.regions.get(tex_id as usize));
+        let (tex_w, tex_h) = region.map_or((128.0, 128.0), |r| (r.width as f32, r.height as f32));
+
         // Triangulate convex polygon fan: (0, 1, 2), (0, 2, 3), (0, 3, 4), ...
         for (i, &pos) in face_positions.iter().enumerate() {
-            let uv_u = (pos[0] * s_vec[0] + pos[1] * s_vec[1] + pos[2] * s_vec[2]) + s_shift;
-            let uv_v = (pos[0] * t_vec[0] + pos[1] * t_vec[1] + pos[2] * t_vec[2]) + t_shift;
+            let raw_u =
+                ((pos[0] * s_vec[0] + pos[1] * s_vec[1] + pos[2] * s_vec[2]) + s_shift) / tex_w;
+            let raw_v =
+                ((pos[0] * t_vec[0] + pos[1] * t_vec[1] + pos[2] * t_vec[2]) + t_shift) / tex_h;
+
+            let [uv_u, uv_v] = region.map_or([raw_u, raw_v], |r| {
+                let u_fract = raw_u.rem_euclid(1.0);
+                let v_fract = raw_v.rem_euclid(1.0);
+                [
+                    r.u_min + u_fract * (r.u_max - r.u_min),
+                    r.v_min + v_fract * (r.v_max - r.v_min),
+                ]
+            });
 
             vertices.push(Vertex {
                 position: pos,
                 normal,
                 tangent,
-                uv0: [uv_u / 128.0, uv_v / 128.0],
+                uv0: [uv_u, uv_v],
                 uv1_lightmap: [0.0, 0.0],
                 style_indices: face.styles,
                 style_weights: [255, 0, 0, 0],

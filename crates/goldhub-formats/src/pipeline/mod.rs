@@ -14,8 +14,6 @@ use crate::ir::MeshBuffer;
 
 #[cfg(feature = "goldsrc")]
 use crate::codecs::legacy::Bsp30Decoder;
-#[cfg(feature = "goldsrc")]
-use crate::transpile::compile_bsp_geometry;
 
 /// Unified asset pipeline facade.
 #[derive(Debug, Clone)]
@@ -53,21 +51,22 @@ impl AssetPipeline {
     /// On cache miss: parses, triangulates, commits to cache, and returns the compiled mesh.
     #[cfg(feature = "goldsrc")]
     pub fn load_bsp_mesh(&self, raw_bytes: &[u8]) -> Result<MeshBuffer, FormatError> {
-        let hash = AssetCache::hash(raw_bytes);
+        let (mesh, _) = self.load_bsp_mesh_and_atlas(raw_bytes)?;
+        Ok(mesh)
+    }
 
-        // 1. Check warm cache hit
-        if let Some(cached) = self.cache.lookup_mesh(&hash) {
-            return Ok(cached);
-        }
-
-        // 2. Cold cache miss: parse and transpile
+    /// Ingests a BSP30 level and extracts its embedded texture atlas.
+    #[cfg(feature = "goldsrc")]
+    pub fn load_bsp_mesh_and_atlas(
+        &self,
+        raw_bytes: &[u8],
+    ) -> Result<(MeshBuffer, crate::ir::TextureAtlas), FormatError> {
         let decoder = Bsp30Decoder;
         let bsp = decoder.decode(raw_bytes)?;
-        let mesh = compile_bsp_geometry(&bsp)?;
+        let textures = bsp.extract_embedded_textures();
+        let atlas = crate::ir::TextureAtlas::build(&textures, 2);
+        let mesh = crate::transpile::compile_bsp_geometry_with_atlas(&bsp, Some(&atlas))?;
 
-        // 3. Persist to cache for subsequent instant loads
-        let _ = self.cache.store_mesh(&hash, &mesh);
-
-        Ok(mesh)
+        Ok((mesh, atlas))
     }
 }

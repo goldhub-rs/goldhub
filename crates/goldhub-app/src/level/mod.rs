@@ -9,7 +9,8 @@ use goldhub_formats::pipeline::AssetPipeline;
 use crate::camera::SpectatorCamera;
 use crate::mesh_bridge::to_bevy_mesh;
 
-const SAMPLE_BSP_PATH: &str =
+const SAMPLE_BSP_PATH: &str = "D:/Repo/CS16/hlmsl/test_maps/de_inferno.bsp";
+const FALLBACK_BSP_PATH: &str =
     "D:/Repo/GoldSrc.rs/references/regamedll/regamedll/extra/Test Maps/regamedll_test_map_v8.bsp";
 
 pub struct LevelPlugin;
@@ -24,38 +25,59 @@ fn setup_level(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     // 1. Illumination: Sun + Ambient Light
     commands.spawn((
         DirectionalLight {
-            illuminance: 15_000.0,
+            illuminance: 18_000.0,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(500.0, 1000.0, 500.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(500.0, 1500.0, 500.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.9, 0.92, 1.0),
-        brightness: 350.0,
+        brightness: 450.0,
     });
 
-    // 2. Geometry Loading: Load BSP Level or Fallback Arena
-    let bsp_path = Path::new(SAMPLE_BSP_PATH);
+    // 2. Geometry Loading: Load BSP Level (de_inferno.bsp or fallback)
+    let bsp_path = if Path::new(SAMPLE_BSP_PATH).exists() {
+        Path::new(SAMPLE_BSP_PATH)
+    } else {
+        Path::new(FALLBACK_BSP_PATH)
+    };
     let mut spawned_bsp = false;
 
     if bsp_path.exists()
         && let Ok(raw_bytes) = fs::read(bsp_path)
     {
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
-        if let Ok(mesh_buffer) = pipeline.load_bsp_mesh(&raw_bytes) {
+        if let Ok((mesh_buffer, atlas)) = pipeline.load_bsp_mesh_and_atlas(&raw_bytes) {
             let bevy_mesh = to_bevy_mesh(&mesh_buffer);
             let mesh_handle = meshes.add(bevy_mesh);
+
+            // Construct Bevy GPU Image from RGBA8 Texture Atlas
+            let atlas_image = Image::new(
+                bevy::render::render_resource::Extent3d {
+                    width: atlas.width,
+                    height: atlas.height,
+                    depth_or_array_layers: 1,
+                },
+                bevy::render::render_resource::TextureDimension::D2,
+                atlas.rgba_data,
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                bevy::render::render_asset::RenderAssetUsages::default(),
+            );
+            let atlas_handle = images.add(atlas_image);
+
             let material_handle = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.72, 0.74, 0.78),
+                base_color: Color::WHITE,
+                base_color_texture: Some(atlas_handle),
                 perceptual_roughness: 0.85,
                 reflectance: 0.15,
-                cull_mode: None, // Dual-sided to view map geometry without backface culling issues
+                cull_mode: None,
                 ..default()
             });
 
@@ -68,6 +90,7 @@ fn setup_level(
             tracing::info!(
                 vertex_count = mesh_buffer.vertex_count(),
                 index_count = mesh_buffer.index_count(),
+                atlas_res = format!("{}x{}", atlas.width, atlas.height),
                 "Spawned BSP30 Level into Viewport"
             );
             spawned_bsp = true;

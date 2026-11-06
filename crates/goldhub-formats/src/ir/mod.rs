@@ -13,4 +13,4 @@ pub use collision::{ClipNode, CollisionHull, CollisionModel, CollisionPlane};
 pub use lightmap::{DynamicLightStyles, LightmapAtlas};
 pub use mesh::{MeshBuffer, SubMesh, Vertex};
 pub use skeleton::{BoneData, SequenceData, SkeletalRig};
-pub use texture::{MipLevel, TextureDescriptor, TextureFormat};
+pub use texture::{AtlasRegion, MipLevel, TextureAtlas, TextureDescriptor, TextureFormat};

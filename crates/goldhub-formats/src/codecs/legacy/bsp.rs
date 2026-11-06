@@ -94,6 +94,7 @@ pub struct BspLevel<'a> {
     pub lighting: &'a [u8],
     pub visdata: &'a [u8],
     pub entities: &'a [u8],
+    pub textures_lump: &'a [u8],
 }
 
 fn extract_lump_slice<'a, T: FromBytes + Immutable + KnownLayout>(
@@ -167,6 +168,7 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
         let clip_nodes = extract_lump_slice(bytes, &header.lumps[LUMP_CLIPNODES], "clipnodes")?;
         let edges = extract_lump_slice(bytes, &header.lumps[LUMP_EDGES], "edges")?;
         let surfedges = extract_lump_slice(bytes, &header.lumps[LUMP_SURFEDGES], "surfedges")?;
+        let textures_lump = extract_lump_raw(bytes, &header.lumps[LUMP_TEXTURES], "textures")?;
 
         Ok(BspLevel {
             planes,
@@ -179,6 +181,124 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
             lighting,
             visdata,
             entities,
+            textures_lump,
         })
+    }
+}
+
+impl BspLevel<'_> {
+    /// Extracts all embedded miptex textures into RGBA8 TextureDescriptors.
+    pub fn extract_embedded_textures(&self) -> Vec<crate::ir::TextureDescriptor> {
+        let lump = self.textures_lump;
+        if lump.len() < 4 {
+            return Vec::new();
+        }
+
+        let num_textures = u32::from_le_bytes([lump[0], lump[1], lump[2], lump[3]]) as usize;
+        let mut descriptors = Vec::with_capacity(num_textures);
+
+        for i in 0..num_textures {
+            let offset_pos = 4 + i * 4;
+            if offset_pos + 4 > lump.len() {
+                break;
+            }
+            let tex_offset = u32::from_le_bytes([
+                lump[offset_pos],
+                lump[offset_pos + 1],
+                lump[offset_pos + 2],
+                lump[offset_pos + 3],
+            ]) as usize;
+
+            if tex_offset == 0 || tex_offset >= lump.len() {
+                // External WAD texture reference (no embedded pixels)
+                descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                    format!("external_tex_{i}"),
+                    crate::ir::TextureFormat::Rgba8Unorm,
+                    16,
+                    16,
+                    vec![180; 16 * 16 * 4],
+                ));
+                continue;
+            }
+
+            let miptex_bytes = &lump[tex_offset..];
+            if miptex_bytes.len() < core::mem::size_of::<crate::codecs::legacy::wad::MiptexHeader>()
+            {
+                continue;
+            }
+
+            let Ok((mip_header, _)) =
+                crate::codecs::legacy::wad::MiptexHeader::ref_from_prefix(miptex_bytes)
+            else {
+                continue;
+            };
+
+            let tw = mip_header.width;
+            let th = mip_header.height;
+            let pixel_count = (tw * th) as usize;
+
+            if mip_header.offsets[0] == 0 || tw == 0 || th == 0 {
+                descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                    format!("missing_tex_{i}"),
+                    crate::ir::TextureFormat::Rgba8Unorm,
+                    16,
+                    16,
+                    vec![200; 16 * 16 * 4],
+                ));
+                continue;
+            }
+
+            let offset0 = mip_header.offsets[0] as usize;
+            let offset3 = mip_header.offsets[3] as usize;
+            let mip3_len = (tw / 8) * (th / 8);
+            let palette_offset = offset3 + (mip3_len as usize) + 2;
+
+            if offset0 + pixel_count > miptex_bytes.len()
+                || palette_offset + 768 > miptex_bytes.len()
+            {
+                descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                    format!("corrupt_tex_{i}"),
+                    crate::ir::TextureFormat::Rgba8Unorm,
+                    16,
+                    16,
+                    vec![220; 16 * 16 * 4],
+                ));
+                continue;
+            }
+
+            let pixel_indices = &miptex_bytes[offset0..offset0 + pixel_count];
+            let palette = &miptex_bytes[palette_offset..palette_offset + 768];
+
+            let mut rgba = Vec::with_capacity(pixel_count * 4);
+            for &idx in pixel_indices {
+                let p_idx = (idx as usize) * 3;
+                let r = palette[p_idx];
+                let g = palette[p_idx + 1];
+                let b = palette[p_idx + 2];
+                let is_transparent = mip_header.name[0] == b'{' && idx == 255;
+                let a = if is_transparent { 0 } else { 255 };
+                rgba.push(r);
+                rgba.push(g);
+                rgba.push(b);
+                rgba.push(a);
+            }
+
+            let name_len = mip_header
+                .name
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(mip_header.name.len());
+            let name_str = String::from_utf8_lossy(&mip_header.name[..name_len]).into_owned();
+
+            descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                name_str,
+                crate::ir::TextureFormat::Rgba8Unorm,
+                tw,
+                th,
+                rgba,
+            ));
+        }
+
+        descriptors
     }
 }
