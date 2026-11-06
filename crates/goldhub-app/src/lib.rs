@@ -14,7 +14,7 @@ pub use mesh_bridge::to_bevy_mesh;
 pub use window::WindowControlPlugin;
 
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, WindowMode, WindowResolution};
+use bevy::window::{WindowMode, WindowResolution};
 
 /// Assembles the complete GoldHub Bevy application.
 pub fn build_goldhub_app() -> App {
@@ -24,9 +24,10 @@ pub fn build_goldhub_app() -> App {
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "GoldHub".into(),
-                    resolution: WindowResolution::new(1920.0, 1080.0),
-                    mode: WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+                    title: "GoldHub Engine Viewport".into(),
+                    resolution: WindowResolution::new(1280.0, 720.0),
+                    mode: WindowMode::Windowed,
+                    resizable: true,
                     present_mode: bevy::window::PresentMode::AutoVsync,
                     ..default()
                 }),
@@ -35,7 +36,8 @@ pub fn build_goldhub_app() -> App {
             .set(AssetPlugin {
                 file_path: "assets".into(),
                 ..default()
-            }),
+            })
+            .disable::<bevy::log::LogPlugin>(),
     );
 
     app.add_plugins((WindowControlPlugin, SpectatorCameraPlugin, LevelPlugin));

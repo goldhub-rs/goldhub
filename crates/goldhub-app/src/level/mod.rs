@@ -94,6 +94,13 @@ fn setup_level(
     // 3. Spawn Spectator Camera
     commands.spawn((
         Camera3d::default(),
+        Camera {
+            clear_color: bevy::render::camera::ClearColorConfig::Custom(Color::srgb(
+                0.1, 0.1, 0.15,
+            )),
+            ..default()
+        },
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
         Transform::from_xyz(0.0, 150.0, 400.0).looking_at(Vec3::new(0.0, 50.0, 0.0), Vec3::Y),
         SpectatorCamera::default(),
     ));
