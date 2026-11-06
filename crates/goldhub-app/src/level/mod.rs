@@ -88,12 +88,23 @@ fn setup_level(
                 });
 
                 let img_handle = images.add(img);
+                let is_cutout = tex_desc.name.starts_with('{')
+                    || tex_desc
+                        .mips
+                        .first()
+                        .is_some_and(|m| m.data.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
+
                 let mat_handle = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(img_handle),
                     perceptual_roughness: 0.85,
                     reflectance: 0.15,
                     cull_mode: None,
+                    alpha_mode: if is_cutout {
+                        AlphaMode::Mask(0.5)
+                    } else {
+                        AlphaMode::Opaque
+                    },
                     ..default()
                 });
 

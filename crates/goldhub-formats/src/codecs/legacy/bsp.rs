@@ -270,12 +270,16 @@ impl BspLevel<'_> {
             let palette = &miptex_bytes[palette_offset..palette_offset + 768];
 
             let mut rgba = Vec::with_capacity(pixel_count * 4);
+            let is_transparent_tex = mip_header.name[0] == b'{'
+                || (palette[255 * 3] == 0
+                    && palette[255 * 3 + 1] == 0
+                    && palette[255 * 3 + 2] == 255);
             for &idx in pixel_indices {
                 let p_idx = (idx as usize) * 3;
                 let r = palette[p_idx];
                 let g = palette[p_idx + 1];
                 let b = palette[p_idx + 2];
-                let is_transparent = mip_header.name[0] == b'{' && idx == 255;
+                let is_transparent = is_transparent_tex && idx == 255;
                 let a = if is_transparent { 0 } else { 255 };
                 rgba.push(r);
                 rgba.push(g);
