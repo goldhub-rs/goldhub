@@ -50,10 +50,17 @@ pub fn compile_bsp_geometry_with_atlas(
                 ]
             });
 
+            // Coordinate system transformation:
+            // GoldSrc: X = Right, Y = Forward, Z = Up
+            // Bevy / Modern: X = Right, Y = Up, Z = -Forward (or -Y)
+            let bevy_pos = [pos[0], pos[2], -pos[1]];
+            let bevy_normal = [normal[0], normal[2], -normal[1]];
+            let bevy_tangent = [tangent[0], tangent[2], -tangent[1], 1.0];
+
             vertices.push(Vertex {
-                position: pos,
-                normal,
-                tangent,
+                position: bevy_pos,
+                normal: bevy_normal,
+                tangent: bevy_tangent,
                 uv0: [uv_u, uv_v],
                 uv1_lightmap: [0.0, 0.0],
                 style_indices: face.styles,
