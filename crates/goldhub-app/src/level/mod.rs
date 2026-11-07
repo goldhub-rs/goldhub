@@ -217,8 +217,8 @@ fn setup_level(
                             base_color_texture: img_handle,
                             perceptual_roughness: 0.95,
                             reflectance: 0.02,
-                            cull_mode: None,
-                            double_sided: true,
+                            cull_mode: Some(bevy::render::render_resource::Face::Back),
+                            double_sided: false,
                             alpha_mode: AlphaMode::Mask(0.5),
                             lightmap_exposure: 2.2,
                             ..default()

@@ -23,6 +23,8 @@ pub const VEC_VIEW_DUCKING: f32 = 12.0;
 
 /// Standard GoldSrc duck transition duration in seconds (400 ms).
 pub const TIME_TO_DUCK: f32 = 0.4;
+/// Standard GoldSrc unduck transition duration in seconds (200 ms).
+pub const TIME_TO_UNDUCK: f32 = 0.2;
 
 /// Tournament-grade sub-tick physics rate (128 Hz).
 pub const SUBTICK_HZ: f32 = 128.0;

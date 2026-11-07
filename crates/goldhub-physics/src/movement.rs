@@ -8,8 +8,8 @@
 use crate::constants::MoveVars;
 use crate::constants::{
     BUNNYJUMP_MAX_SPEED_FACTOR, HULL_STANDING, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT,
-    IN_MOVERIGHT, IN_SPEED, JUMP_IMPULSE, STOP_EPSILON, TIME_TO_DUCK, VEC_VIEW_DUCKING,
-    VEC_VIEW_STANDING,
+    IN_MOVERIGHT, IN_SPEED, JUMP_IMPULSE, STOP_EPSILON, TIME_TO_DUCK, TIME_TO_UNDUCK,
+    VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
 };
 use crate::player::{PlayerCmd, PlayerState};
 use crate::trace::WorldTrace;
@@ -571,11 +571,17 @@ pub fn pm_duck(
         state.old_buttons &= !IN_DUCK;
     }
 
-    if state.dead || ((cmd.buttons & IN_DUCK) == 0 && !state.in_duck && !state.is_ducking) {
+    if state.dead
+        || ((cmd.buttons & IN_DUCK) == 0
+            && !state.in_duck
+            && !state.is_ducking
+            && state.unduck_time_ms <= 0.0)
+    {
         return;
     }
 
     if (cmd.buttons & IN_DUCK) != 0 {
+        state.unduck_time_ms = 0.0;
         if (button_pressed & IN_DUCK) != 0 && !state.is_ducking {
             state.duck_time_ms = 1000.0;
             state.in_duck = true;
@@ -618,7 +624,7 @@ pub fn pm_duck(
 /// Attempts to stand up from a crouch (`PM_UnDuck`).
 pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
     let mut new_origin = state.origin;
-    if state.on_ground {
+    if state.on_ground && state.is_ducking {
         new_origin[2] += 18.0;
     }
 
@@ -628,17 +634,33 @@ pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
         // Obstructed by ceiling or archway overhead! Must remain ducked.
         state.is_ducking = true;
         state.in_duck = false;
+        state.unduck_time_ms = 0.0;
         state.view_height = VEC_VIEW_DUCKING;
         return;
     }
 
-    // Has clearance: stand up safely
-    state.is_ducking = false;
-    state.in_duck = false;
-    state.view_height = VEC_VIEW_STANDING;
-    state.duck_time_ms = 0.0;
-    state.origin = new_origin;
-    pm_categorize_position(state, world);
+    // Trigger smooth unduck animation if transitioning from crouching
+    if state.is_ducking {
+        state.is_ducking = false;
+        state.in_duck = false;
+        state.origin = new_origin;
+        state.unduck_time_ms = TIME_TO_UNDUCK * 1000.0;
+        pm_categorize_position(state, world);
+    }
+
+    if state.unduck_time_ms > 0.0 {
+        // Smoothly interpolate view height up from VEC_VIEW_DUCKING to VEC_VIEW_STANDING
+        let time = 1.0 - (state.unduck_time_ms / (TIME_TO_UNDUCK * 1000.0));
+        let fraction = if time >= 0.0 {
+            pm_spline_fraction(time, 1.0)
+        } else {
+            0.0
+        };
+        state.view_height = VEC_VIEW_DUCKING * (1.0 - fraction) + VEC_VIEW_STANDING * fraction;
+    } else {
+        state.view_height = VEC_VIEW_STANDING;
+        state.duck_time_ms = 0.0;
+    }
 }
 
 /// Canonical ladder movement physics (ReGameDLL `PM_LadderMove`).
@@ -770,6 +792,9 @@ pub fn pm_player_move(
     let dt_ms = dt * 1000.0;
     if state.duck_time_ms > 0.0 {
         state.duck_time_ms = (state.duck_time_ms - dt_ms).max(0.0);
+    }
+    if state.unduck_time_ms > 0.0 {
+        state.unduck_time_ms = (state.unduck_time_ms - dt_ms).max(0.0);
     }
     if state.jump_penalty_ms > 0.0 {
         state.jump_penalty_ms = (state.jump_penalty_ms - dt_ms).max(0.0);
