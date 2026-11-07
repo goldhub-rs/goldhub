@@ -295,11 +295,10 @@ mod tests {
         }
 
         let speed = sim.current.horizontal_speed();
-        // In GoldSrc / ReGameDLL, ducking speed (0.333 * maxspeed = ~83.25 u/s) takes precedence
-        // over walking speed multiplier (0.52). They do not double-compound below friction threshold.
+        // Compound duck (0.333) and walk (0.52) speed yields slow creep speed (~43.29 u/s).
         assert!(
-            (speed - 83.25).abs() < 1.0,
-            "Duck + Shift speed must be capped at ducking speed ~83.25 u/s (got {speed})"
+            (speed - 43.29).abs() < 1.0,
+            "Duck + Shift speed must compound to slow creep speed ~43.29 u/s (got {speed})"
         );
 
         // 2. Release both Duck and Speed - speed must promptly recover to full running speed!

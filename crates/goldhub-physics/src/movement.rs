@@ -119,6 +119,7 @@ pub fn pm_accelerate(
     wishdir: [f32; 3],
     wishspeed: f32,
     accel: f32,
+    stopspeed: f32,
     dt: f32,
 ) {
     let currentspeed = dot(*velocity, wishdir);
@@ -128,7 +129,10 @@ pub fn pm_accelerate(
         return;
     }
 
-    let mut accelspeed = accel * dt * wishspeed;
+    // Scale acceleration against stopspeed to ensure slow walk/duck speeds
+    // (e.g. compound duck + shift) can overcome ground friction (friction * stopspeed * dt).
+    let wish_factor = wishspeed.max(stopspeed);
+    let mut accelspeed = accel * dt * wish_factor;
     if accelspeed > addspeed {
         accelspeed = addspeed;
     }
@@ -332,13 +336,13 @@ pub fn pm_walk_move(
     let mut smove = cmd.side_move;
 
     let is_duck_active = (cmd.buttons & IN_DUCK) != 0 || state.in_duck || state.is_ducking;
-    let speed_mult = if is_duck_active {
-        vars.ducking_speed_multiplier
-    } else if (cmd.buttons & IN_SPEED) != 0 {
-        vars.walking_speed_multiplier
-    } else {
-        1.0
-    };
+    let mut speed_mult = 1.0;
+    if is_duck_active {
+        speed_mult *= vars.ducking_speed_multiplier;
+    }
+    if (cmd.buttons & IN_SPEED) != 0 {
+        speed_mult *= vars.walking_speed_multiplier;
+    }
 
     fmove *= speed_mult;
     smove *= speed_mult;
@@ -357,7 +361,14 @@ pub fn pm_walk_move(
     }
 
     state.velocity[2] = 0.0;
-    pm_accelerate(&mut state.velocity, wishdir, wishspeed, vars.accelerate, dt);
+    pm_accelerate(
+        &mut state.velocity,
+        wishdir,
+        wishspeed,
+        vars.accelerate,
+        vars.stopspeed,
+        dt,
+    );
     state.velocity[2] = 0.0;
 
     let spd = length(state.velocity);
@@ -729,8 +740,46 @@ pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
     }
 
     // Check if player has clearance to stand up
-    let trace = world.trace_player_hull(new_origin, new_origin, HULL_STANDING);
-    if trace.startsolid {
+    // 1. Direct standing position test
+    let mut clear = world
+        .test_player_position(new_origin, HULL_STANDING)
+        .is_none();
+
+    // 2. If close to floor or slight penetration, test vertical micro-lift (+0.125 .. +2.0)
+    if !clear {
+        for lift in [0.125, 0.25, 0.5, 1.0, 2.0] {
+            let test_pos = [new_origin[0], new_origin[1], new_origin[2] + lift];
+            if world
+                .test_player_position(test_pos, HULL_STANDING)
+                .is_none()
+            {
+                new_origin = test_pos;
+                clear = true;
+                break;
+            }
+        }
+    }
+
+    // 3. If still blocked, test STUCK_TABLE micro-offsets
+    if !clear {
+        for offset in &STUCK_TABLE {
+            let test_pos = [
+                new_origin[0] + offset[0],
+                new_origin[1] + offset[1],
+                new_origin[2] + offset[2],
+            ];
+            if world
+                .test_player_position(test_pos, HULL_STANDING)
+                .is_none()
+            {
+                new_origin = test_pos;
+                clear = true;
+                break;
+            }
+        }
+    }
+
+    if !clear {
         // Obstructed by ceiling or archway overhead! Must remain ducked.
         state.is_ducking = true;
         state.in_duck = false;
