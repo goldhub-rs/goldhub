@@ -4,6 +4,55 @@ use crate::codecs::legacy::bsp::{BspFace, BspLevel};
 use crate::error::FormatError;
 use crate::ir::{MeshBuffer, SubMesh, Vertex};
 
+/// Parses entities lump string to collect face ranges of invisible entities (triggers, collision walls).
+fn collect_invisible_face_ranges(bsp: &BspLevel<'_>) -> std::collections::HashSet<usize> {
+    let mut invis_faces = std::collections::HashSet::new();
+    let Ok(entities_str) = std::str::from_utf8(bsp.entities) else {
+        return invis_faces;
+    };
+
+    for block in entities_str.split('}') {
+        let mut model_idx = None;
+        let mut rendermode = 0u32;
+        let mut is_trigger = false;
+
+        for line in block.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("\"model\"")
+                && let Some(m_str) = trimmed.split('"').nth(3)
+                && let Some(num) = m_str.strip_prefix('*')
+            {
+                model_idx = num.parse::<usize>().ok();
+            } else if trimmed.starts_with("\"rendermode\"") {
+                if let Some(r_str) = trimmed.split('"').nth(3) {
+                    rendermode = r_str.parse::<u32>().unwrap_or(0);
+                }
+            } else if trimmed.starts_with("\"classname\"")
+                && let Some(c_str) = trimmed.split('"').nth(3)
+                && (c_str == "func_ladder"
+                    || c_str == "func_bomb_target"
+                    || c_str.starts_with("trigger_"))
+            {
+                is_trigger = true;
+            }
+        }
+
+        // In GoldSrc: rendermode 2 (kRenderTransTexture) on func_wall is an invisible collision wall
+        if (is_trigger || rendermode == 2)
+            && let Some(m_idx) = model_idx
+            && let Some(model) = bsp.models.get(m_idx)
+        {
+            let first = model.first_face.max(0) as usize;
+            let num = model.num_faces.max(0) as usize;
+            for f in first..first + num {
+                invis_faces.insert(f);
+            }
+        }
+    }
+
+    invis_faces
+}
+
 /// Compiles raw BSP30 level lumps into a contiguous, cache-line aligned Canonical `MeshBuffer`.
 pub fn compile_bsp_geometry(bsp: &BspLevel<'_>) -> Result<MeshBuffer, FormatError> {
     compile_bsp_geometry_submeshes(bsp, &[])
@@ -14,11 +63,16 @@ pub fn compile_bsp_geometry_submeshes(
     bsp: &BspLevel<'_>,
     textures: &[crate::ir::TextureDescriptor],
 ) -> Result<MeshBuffer, FormatError> {
+    let invisible_faces = collect_invisible_face_ranges(bsp);
     let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(bsp.faces.len() * 6);
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
 
     for (face_idx, face) in bsp.faces.iter().enumerate() {
+        if invisible_faces.contains(&face_idx) {
+            continue;
+        }
+
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
 
         // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN)

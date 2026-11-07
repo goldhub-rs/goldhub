@@ -71,6 +71,18 @@ pub struct BspFace {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct BspModel {
+    pub mins: [f32; 3],
+    pub maxs: [f32; 3],
+    pub origin: [f32; 3],
+    pub headnode: [i32; 4],
+    pub visleafs: i32,
+    pub first_face: i32,
+    pub num_faces: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct BspClipNode {
     pub plane_index: u32,
     pub children: [i16; 2],
@@ -91,6 +103,7 @@ pub struct BspLevel<'a> {
     pub clip_nodes: &'a [BspClipNode],
     pub edges: &'a [BspEdge],
     pub surfedges: &'a [i32],
+    pub models: &'a [BspModel],
     pub lighting: &'a [u8],
     pub visdata: &'a [u8],
     pub entities: &'a [u8],
@@ -168,6 +181,7 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
         let clip_nodes = extract_lump_slice(bytes, &header.lumps[LUMP_CLIPNODES], "clipnodes")?;
         let edges = extract_lump_slice(bytes, &header.lumps[LUMP_EDGES], "edges")?;
         let surfedges = extract_lump_slice(bytes, &header.lumps[LUMP_SURFEDGES], "surfedges")?;
+        let models = extract_lump_slice(bytes, &header.lumps[LUMP_MODELS], "models")?;
         let textures_lump = extract_lump_raw(bytes, &header.lumps[LUMP_TEXTURES], "textures")?;
 
         Ok(BspLevel {
@@ -178,6 +192,7 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
             clip_nodes,
             edges,
             surfedges,
+            models,
             lighting,
             visdata,
             entities,
