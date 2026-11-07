@@ -55,9 +55,17 @@ fn setup_level(
     if bsp_path.exists()
         && let Ok(raw_bytes) = fs::read(bsp_path)
     {
+        let mut search_dirs = Vec::new();
+        if let Some(dir) = bsp_path.parent() {
+            search_dirs.push(dir);
+            if let Some(parent) = dir.parent() {
+                search_dirs.push(parent);
+            }
+        }
+
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
         if let Ok((mesh_buffer, textures, lightmap_atlas, sky_name)) =
-            pipeline.load_bsp_level_full(&raw_bytes)
+            pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs)
         {
             // 0. Spawn GoldSrc 6-sided Skybox cube
             let sky = sky_name.as_deref().unwrap_or("green");
@@ -89,28 +97,41 @@ fn setup_level(
             let mut texture_materials: HashMap<u32, Handle<StandardMaterial>> = HashMap::new();
 
             for (idx, tex_desc) in textures.iter().enumerate() {
-                let data = tex_desc
-                    .mips
-                    .first()
-                    .map(|m| m.data.clone())
-                    .unwrap_or_default();
+                let base_data = tex_desc.mips.first().map_or(&[][..], |m| m.data.as_slice());
+
+                let (mip_data, mip_count) =
+                    if !base_data.is_empty() && tex_desc.width > 0 && tex_desc.height > 0 {
+                        goldhub_formats::ir::generate_rgba8_mipmaps(
+                            tex_desc.width,
+                            tex_desc.height,
+                            base_data,
+                        )
+                    } else {
+                        (base_data.to_vec(), 1)
+                    };
+
                 let mut img = Image::new(
                     bevy::render::render_resource::Extent3d {
-                        width: tex_desc.width,
-                        height: tex_desc.height,
+                        width: tex_desc.width.max(1),
+                        height: tex_desc.height.max(1),
                         depth_or_array_layers: 1,
                     },
                     bevy::render::render_resource::TextureDimension::D2,
-                    data,
+                    mip_data,
                     bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                     bevy::render::render_asset::RenderAssetUsages::default(),
                 );
+                img.texture_descriptor.mip_level_count = mip_count;
 
-                // Hardware repeating sampler enables infinite tiling on roofs and walls
+                // Authentic GoldSrc GL_LINEAR_MIPMAP_LINEAR (trilinear) + 16x Anisotropic Filtering
                 img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                     address_mode_u: ImageAddressMode::Repeat,
                     address_mode_v: ImageAddressMode::Repeat,
                     address_mode_w: ImageAddressMode::Repeat,
+                    mag_filter: bevy::image::ImageFilterMode::Linear,
+                    min_filter: bevy::image::ImageFilterMode::Linear,
+                    mipmap_filter: bevy::image::ImageFilterMode::Linear,
+                    anisotropy_clamp: 16,
                     ..default()
                 });
 

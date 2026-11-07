@@ -37,10 +37,14 @@ fn find_skybox_file(sky_name: &str, suffix: &str) -> Option<PathBuf> {
     let candidate_dirs = [
         "assets/gfx/env",
         "cstrike/gfx/env",
+        "valve/gfx/env",
         "C:/Games/CS 1.6 GoldClient/cstrike/gfx/env",
+        "C:/Games/CS 1.6 GoldClient/valve/gfx/env",
         "C:/Games/Counter-Strike 1.6/cstrike/gfx/env",
+        "C:/Games/Counter-Strike 1.6/valve/gfx/env",
         "D:/Repo/CS16/hlmsl/gfx/env",
         "C:/Program Files (x86)/Steam/steamapps/common/Half-Life/cstrike/gfx/env",
+        "C:/Program Files (x86)/Steam/steamapps/common/Half-Life/valve/gfx/env",
     ];
 
     let filename = format!("{sky_name}{suffix}.tga");
@@ -94,98 +98,38 @@ pub fn spawn_skybox(
         // 0: Right (rt)
         (
             "rt",
-            [
-                [r, -r, -r],
-                [r,  r, -r],
-                [r,  r,  r],
-                [r, -r,  r],
-            ],
-            [
-                [0.0, 1.0],
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-            ],
+            [[r, -r, -r], [r, r, -r], [r, r, r], [r, -r, r]],
+            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         ),
         // 1: Left (lf)
         (
             "lf",
-            [
-                [-r, -r,  r],
-                [-r,  r,  r],
-                [-r,  r, -r],
-                [-r, -r, -r],
-            ],
-            [
-                [0.0, 1.0],
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-            ],
+            [[-r, -r, r], [-r, r, r], [-r, r, -r], [-r, -r, -r]],
+            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         ),
         // 2: Back (bk)
         (
             "bk",
-            [
-                [-r, -r, -r],
-                [-r,  r, -r],
-                [ r,  r, -r],
-                [ r, -r, -r],
-            ],
-            [
-                [0.0, 1.0],
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-            ],
+            [[-r, -r, -r], [-r, r, -r], [r, r, -r], [r, -r, -r]],
+            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         ),
         // 3: Front (ft)
         (
             "ft",
-            [
-                [ r, -r,  r],
-                [ r,  r,  r],
-                [-r,  r,  r],
-                [-r, -r,  r],
-            ],
-            [
-                [0.0, 1.0],
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-            ],
+            [[r, -r, r], [r, r, r], [-r, r, r], [-r, -r, r]],
+            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         ),
         // 4: Up (up)
         (
             "up",
-            [
-                [ r,  r, -r],
-                [-r,  r, -r],
-                [-r,  r,  r],
-                [ r,  r,  r],
-            ],
-            [
-                [0.0, 1.0],
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-            ],
+            [[r, r, -r], [-r, r, -r], [-r, r, r], [r, r, r]],
+            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         ),
         // 5: Down (dn)
         (
             "dn",
-            [
-                [-r, -r, -r],
-                [ r, -r, -r],
-                [ r, -r,  r],
-                [-r, -r,  r],
-            ],
-            [
-                [0.0, 1.0],
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-            ],
+            [[-r, -r, -r], [r, -r, -r], [r, -r, r], [-r, -r, r]],
+            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         ),
     ];
 

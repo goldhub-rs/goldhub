@@ -253,7 +253,10 @@ pub fn compile_bsp_geometry_and_lightmap(
             continue;
         }
 
-        let origin_offset = face_origins.get(&face_idx).copied().unwrap_or([0.0, 0.0, 0.0]);
+        let origin_offset = face_origins
+            .get(&face_idx)
+            .copied()
+            .unwrap_or([0.0, 0.0, 0.0]);
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
 
         // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN) and SKY brushes

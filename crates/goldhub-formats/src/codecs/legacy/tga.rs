@@ -36,7 +36,9 @@ pub fn decode_tga(bytes: &[u8]) -> Result<TgaImage, FormatError> {
 
     // Color map should be absent for type 2
     if color_map_type != 0 {
-        return Err(FormatError::UnsupportedFeature("Color-mapped TGA is not supported".into()));
+        return Err(FormatError::UnsupportedFeature(
+            "Color-mapped TGA is not supported".into(),
+        ));
     }
 
     let width = u32::from(u16::from_le_bytes([bytes[12], bytes[13]]));

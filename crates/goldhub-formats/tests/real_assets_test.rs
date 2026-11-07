@@ -92,7 +92,6 @@ fn test_decode_and_transpile_real_bsp30_level() {
     assert_eq!(warm_mesh.index_count(), mesh.index_count());
 }
 
-
 #[test]
 fn test_decode_real_skybox_tga() {
     let tga_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/gfx/env/greenup.tga");
@@ -122,4 +121,107 @@ fn test_transpile_submodel_origin_shift() {
     let mesh = compile_bsp_geometry(&bsp).unwrap();
 
     assert!(mesh.vertex_count() > 0);
+}
+
+#[test]
+fn test_inspect_de_dust2() {
+    let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps/de_dust2.bsp");
+    if !path.exists() {
+        return;
+    }
+
+    let bytes = fs::read(path).unwrap();
+    let temp_cache = tempdir().unwrap();
+    let pipeline = AssetPipeline::new(temp_cache.path());
+
+    let (mesh, textures, _atlas, sky) = pipeline
+        .load_bsp_level_full_with_search_dirs(
+            &bytes,
+            &[Path::new("C:/Games/CS 1.6 GoldClient/cstrike")],
+        )
+        .expect("load de_dust2 level full with wad resolution");
+
+    println!(
+        "de_dust2: mesh vertex_count = {}, submeshes = {}",
+        mesh.vertex_count(),
+        mesh.submeshes.len()
+    );
+    println!("de_dust2: skyname = {sky:?}");
+    println!("de_dust2: total textures = {}", textures.len());
+
+    let is_tool = |name: &str| {
+        let n = name.to_ascii_lowercase();
+        n == "aaatrigger"
+            || n == "clip"
+            || n == "sky"
+            || n == "origin"
+            || n == "null"
+            || n == "hint"
+            || n == "skip"
+    };
+
+    let unresolved_visual_stubs = textures
+        .iter()
+        .filter(|t| t.width <= 16 && t.height <= 16 && !is_tool(&t.name))
+        .count();
+    println!("de_dust2: unresolved non-tool stubs = {unresolved_visual_stubs}");
+
+    assert_eq!(
+        unresolved_visual_stubs, 0,
+        "All visible world textures on de_dust2 should be resolved!"
+    );
+}
+
+#[test]
+fn test_inspect_de_nuke_and_cs_assault() {
+    let temp_cache = tempdir().unwrap();
+    let pipeline = AssetPipeline::new(temp_cache.path());
+    let extra_dirs = [Path::new("C:/Games/CS 1.6 GoldClient/cstrike")];
+
+    let is_tool = |name: &str| {
+        let n = name.to_ascii_lowercase();
+        n == "aaatrigger"
+            || n == "clip"
+            || n == "sky"
+            || n == "origin"
+            || n == "null"
+            || n == "hint"
+            || n == "skip"
+    };
+
+    for map_name in ["de_nuke.bsp", "cs_assault.bsp", "cs_italy.bsp"] {
+        let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps").join(map_name);
+        if !path.exists() {
+            continue;
+        }
+
+        let bytes = fs::read(&path).unwrap();
+        let decoder = Bsp30Decoder;
+        let _bsp = decoder.decode(&bytes).unwrap();
+        let (mesh, textures, _atlas, sky) = pipeline
+            .load_bsp_level_full_with_search_dirs(&bytes, &extra_dirs)
+            .unwrap_or_else(|e| panic!("failed to load {map_name}: {e:?}"));
+
+        let dummy_data = vec![128; 16 * 16 * 4];
+        let mut unresolved_names = Vec::new();
+        for t in &textures {
+            if t.mips.first().is_some_and(|m| m.data == dummy_data) && !is_tool(&t.name) {
+                unresolved_names.push(t.name.clone());
+            }
+        }
+        let unresolved = unresolved_names.len();
+        println!("{map_name}: unresolved non-tool textures = {unresolved_names:?}");
+
+        println!(
+            "{map_name}: vertices = {}, submeshes = {}, textures = {}, sky = {sky:?}, unresolved = {unresolved}",
+            mesh.vertex_count(),
+            mesh.submeshes.len(),
+            textures.len(),
+        );
+
+        assert_eq!(
+            unresolved, 0,
+            "All visible world textures for {map_name} should be resolved!"
+        );
+    }
 }

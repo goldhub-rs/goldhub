@@ -248,18 +248,26 @@ impl BspLevel<'_> {
                 continue;
             };
 
+            let name_len = mip_header
+                .name
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(mip_header.name.len());
+            let name_str = String::from_utf8_lossy(&mip_header.name[..name_len]).into_owned();
+
             let tw = mip_header.width;
             let th = mip_header.height;
             let pixel_count = (tw * th) as usize;
 
             if mip_header.offsets[0] == 0 || tw == 0 || th == 0 {
-                descriptors.push(crate::ir::TextureDescriptor::new_2d(
-                    format!("missing_tex_{i}"),
-                    crate::ir::TextureFormat::Rgba8Unorm,
-                    16,
-                    16,
-                    vec![200; 16 * 16 * 4],
-                ));
+                // External WAD texture stub (to be resolved by WAD resolver)
+                descriptors.push(crate::ir::TextureDescriptor {
+                    name: name_str,
+                    format: crate::ir::TextureFormat::Rgba8Unorm,
+                    width: 0,
+                    height: 0,
+                    mips: Vec::new(),
+                });
                 continue;
             }
 
@@ -302,13 +310,6 @@ impl BspLevel<'_> {
                 rgba.push(a);
             }
 
-            let name_len = mip_header
-                .name
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(mip_header.name.len());
-            let name_str = String::from_utf8_lossy(&mip_header.name[..name_len]).into_owned();
-
             descriptors.push(crate::ir::TextureDescriptor::new_2d(
                 name_str,
                 crate::ir::TextureFormat::Rgba8Unorm,
@@ -334,5 +335,32 @@ impl BspLevel<'_> {
             }
         }
         None
+    }
+
+    /// Extracts the list of WAD filenames referenced in the worldspawn entity.
+    pub fn extract_wad_names(&self) -> Vec<String> {
+        let Ok(entities_str) = std::str::from_utf8(self.entities) else {
+            return Vec::new();
+        };
+        for line in entities_str.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("\"wad\"")
+                && let Some(val) = trimmed.split('"').nth(3)
+            {
+                return val
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        let path = s.replace('\\', "/");
+                        path.split('/')
+                            .next_back()
+                            .unwrap_or(s)
+                            .to_ascii_lowercase()
+                    })
+                    .collect();
+            }
+        }
+        Vec::new()
     }
 }

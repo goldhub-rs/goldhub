@@ -56,6 +56,93 @@ impl TextureDescriptor {
     }
 }
 
+/// Generates a full mipmap chain down to 1x1 for an uncompressed 2D RGBA8 image using a 2x2 box filter.
+/// Returns concatenated bytes of all mip levels (including mip 0) and the total number of mip levels.
+#[must_use]
+#[allow(clippy::many_single_char_names)]
+pub fn generate_rgba8_mipmaps(width: u32, height: u32, base_rgba: &[u8]) -> (Vec<u8>, u32) {
+    if width == 0 || height == 0 || base_rgba.len() != (width * height * 4) as usize {
+        return (base_rgba.to_vec(), 1);
+    }
+
+    // 1. Calculate total buffer capacity for all mip levels down to 1x1
+    let mut total_bytes = 0usize;
+    let mut w = width;
+    let mut h = height;
+    let mut mip_count = 0u32;
+    loop {
+        mip_count += 1;
+        total_bytes += (w * h * 4) as usize;
+        if w == 1 && h == 1 {
+            break;
+        }
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+
+    let mut output = Vec::with_capacity(total_bytes);
+    output.extend_from_slice(base_rgba);
+
+    // 2. Iteratively downsample from previous level
+    let mut prev_offset = 0usize;
+    let mut prev_w = width;
+    let mut prev_h = height;
+
+    for _ in 1..mip_count {
+        let next_w = (prev_w / 2).max(1);
+        let next_h = (prev_h / 2).max(1);
+        let curr_offset = output.len();
+
+        for ny in 0..next_h {
+            let py0 = (ny * 2).min(prev_h - 1);
+            let py1 = (ny * 2 + 1).min(prev_h - 1);
+
+            for nx in 0..next_w {
+                let px0 = (nx * 2).min(prev_w - 1);
+                let px1 = (nx * 2 + 1).min(prev_w - 1);
+
+                let i00 = prev_offset + ((py0 * prev_w + px0) * 4) as usize;
+                let i10 = prev_offset + ((py0 * prev_w + px1) * 4) as usize;
+                let i01 = prev_offset + ((py1 * prev_w + px0) * 4) as usize;
+                let i11 = prev_offset + ((py1 * prev_w + px1) * 4) as usize;
+
+                let r = ((u32::from(output[i00])
+                    + u32::from(output[i10])
+                    + u32::from(output[i01])
+                    + u32::from(output[i11])
+                    + 2)
+                    >> 2) as u8;
+                let g = ((u32::from(output[i00 + 1])
+                    + u32::from(output[i10 + 1])
+                    + u32::from(output[i01 + 1])
+                    + u32::from(output[i11 + 1])
+                    + 2)
+                    >> 2) as u8;
+                let b = ((u32::from(output[i00 + 2])
+                    + u32::from(output[i10 + 2])
+                    + u32::from(output[i01 + 2])
+                    + u32::from(output[i11 + 2])
+                    + 2)
+                    >> 2) as u8;
+                let a = ((u32::from(output[i00 + 3])
+                    + u32::from(output[i10 + 3])
+                    + u32::from(output[i01 + 3])
+                    + u32::from(output[i11 + 3])
+                    + 2)
+                    >> 2) as u8;
+
+                output.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+
+        prev_offset = curr_offset;
+        prev_w = next_w;
+        prev_h = next_h;
+    }
+
+    (output, mip_count)
+}
+
 /// A UV bounding rectangle inside a packed texture atlas.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtlasRegion {
@@ -173,5 +260,49 @@ impl TextureAtlas {
             rgba_data: atlas_pixels,
             regions,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_rgba8_mipmaps_4x4() {
+        let base = vec![
+            // row 0: 4 white pixels
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            // row 1: 4 black pixels
+            0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+            // row 2: 4 white pixels
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            // row 3: 4 black pixels
+            0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+        ];
+        assert_eq!(base.len(), 4 * 4 * 4);
+
+        let (all_mips, count) = generate_rgba8_mipmaps(4, 4, &base);
+        // Mip 0: 4x4 = 64 bytes
+        // Mip 1: 2x2 = 16 bytes
+        // Mip 2: 1x1 = 4 bytes
+        // Total bytes = 84, Total mips = 3
+        assert_eq!(count, 3);
+        assert_eq!(all_mips.len(), 64 + 16 + 4);
+
+        // Mip 1 (2x2): average of (white + white + black + black) = 128
+        let mip1 = &all_mips[64..64 + 16];
+        for pixel in mip1.as_chunks::<4>().0 {
+            assert_eq!(pixel[0], 128);
+            assert_eq!(pixel[1], 128);
+            assert_eq!(pixel[2], 128);
+            assert_eq!(pixel[3], 255);
+        }
+
+        // Mip 2 (1x1): average of 4 128 pixels = 128
+        let mip2 = &all_mips[80..84];
+        assert_eq!(mip2[0], 128);
+        assert_eq!(mip2[1], 128);
+        assert_eq!(mip2[2], 128);
+        assert_eq!(mip2[3], 255);
     }
 }

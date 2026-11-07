@@ -79,10 +79,29 @@ impl AssetPipeline {
         ),
         FormatError,
     > {
+        self.load_bsp_level_full_with_search_dirs(raw_bytes, &[])
+    }
+
+    /// Ingests a BSP30 level with optional extra search directories for external WAD archives.
+    #[cfg(feature = "goldsrc")]
+    pub fn load_bsp_level_full_with_search_dirs(
+        &self,
+        raw_bytes: &[u8],
+        extra_search_dirs: &[&std::path::Path],
+    ) -> Result<
+        (
+            MeshBuffer,
+            Vec<crate::ir::TextureDescriptor>,
+            crate::ir::LightmapAtlas,
+            Option<String>,
+        ),
+        FormatError,
+    > {
         let decoder = Bsp30Decoder;
         let bsp = decoder.decode(raw_bytes)?;
         let sky_name = bsp.extract_sky_name();
-        let textures = bsp.extract_embedded_textures();
+        let mut textures = bsp.extract_embedded_textures();
+        crate::codecs::legacy::resolve_bsp_wad_textures(&bsp, &mut textures, extra_search_dirs);
         let (mesh, atlas) = crate::transpile::compile_bsp_geometry_and_lightmap(&bsp, &textures)?;
 
         Ok((mesh, textures, atlas, sky_name))
