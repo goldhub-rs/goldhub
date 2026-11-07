@@ -26,26 +26,31 @@ mod tests {
     struct FlatWorld;
 
     impl WorldTrace for FlatWorld {
-        fn trace_player_hull(&self, start: [f32; 3], end: [f32; 3], _hull_idx: u32) -> TraceResult {
+        fn trace_player_hull(&self, start: [f32; 3], end: [f32; 3], hull_idx: u32) -> TraceResult {
             const DIST_EPSILON: f32 = 0.03125;
-            // Flat floor at Z = 0 (plane dist = 0, normal = [0, 0, 1])
-            if end[2] <= 0.0 {
-                let frac = if start[2] > 0.0 {
-                    (start[2] / (start[2] - end[2])).clamp(0.0, 1.0)
+            let floor_z = if hull_idx == crate::constants::HULL_DUCKING {
+                -18.0
+            } else {
+                0.0
+            };
+            // Flat floor at floor_z (normal = [0, 0, 1])
+            if end[2] <= floor_z {
+                let frac = if start[2] > floor_z {
+                    ((start[2] - floor_z) / (start[2] - end[2])).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
                 TraceResult {
-                    startsolid: start[2] < 0.0,
+                    startsolid: start[2] < floor_z,
                     allsolid: false,
                     fraction: frac,
                     endpos: [
                         start[0] + (end[0] - start[0]) * frac,
                         start[1] + (end[1] - start[1]) * frac,
-                        DIST_EPSILON,
+                        floor_z + DIST_EPSILON,
                     ],
                     plane_normal: [0.0, 0.0, 1.0],
-                    plane_dist: 0.0,
+                    plane_dist: floor_z,
                     hit_entity: None,
                 }
             } else {
@@ -61,8 +66,13 @@ mod tests {
             }
         }
 
-        fn test_player_position(&self, pos: [f32; 3], _hull_idx: u32) -> Option<u32> {
-            if pos[2] < 0.0 { Some(0) } else { None }
+        fn test_player_position(&self, pos: [f32; 3], hull_idx: u32) -> Option<u32> {
+            let floor_z = if hull_idx == crate::constants::HULL_DUCKING {
+                -18.0
+            } else {
+                0.0
+            };
+            if pos[2] < floor_z { Some(0) } else { None }
         }
     }
 
@@ -285,11 +295,11 @@ mod tests {
         }
 
         let speed = sim.current.horizontal_speed();
-        // ducking_speed_multiplier is 0.333, walking_speed_multiplier is 0.52
-        // Under ground friction (stopspeed 100), compound speed stabilizes at ~36 u/s
+        // In GoldSrc / ReGameDLL, ducking speed (0.333 * maxspeed = ~83.25 u/s) takes precedence
+        // over walking speed multiplier (0.52). They do not double-compound below friction threshold.
         assert!(
-            speed > 34.0 && speed < 38.0,
-            "Speed must compound to ~36 u/s (got {speed})"
+            (speed - 83.25).abs() < 1.0,
+            "Duck + Shift speed must be capped at ducking speed ~83.25 u/s (got {speed})"
         );
 
         // 2. Release both Duck and Speed - speed must promptly recover to full running speed!

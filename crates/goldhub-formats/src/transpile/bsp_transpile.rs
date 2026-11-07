@@ -162,7 +162,7 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
     for block in entities_str.split('}') {
         let mut model_idx = None;
         let mut rendermode = 0u32;
-        let mut renderamt = 0u32;
+        let mut renderamt = 255u32;
         let mut rendercolor = [0u8, 0u8, 0u8];
         let mut is_trigger = false;
         let mut origin = None;
@@ -180,7 +180,7 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
                 }
             } else if trimmed.starts_with("\"renderamt\"") {
                 if let Some(a_str) = trimmed.split('"').nth(3) {
-                    renderamt = a_str.parse::<u32>().unwrap_or(0);
+                    renderamt = a_str.parse::<u32>().unwrap_or(255);
                 }
             } else if trimmed.starts_with("\"rendercolor\"") {
                 if let Some(c_str) = trimmed.split('"').nth(3) {
@@ -364,8 +364,8 @@ pub fn compile_bsp_geometry_and_lightmap(
 
             if i >= 2 {
                 indices.push(base_vert_idx);
-                indices.push(base_vert_idx + (i as u32));
                 indices.push(base_vert_idx + (i as u32) - 1);
+                indices.push(base_vert_idx + (i as u32));
             }
         }
 
@@ -454,8 +454,8 @@ pub fn compile_bsp_geometry_with_atlas(
 
             if i >= 2 {
                 indices.push(base_vert_idx);
-                indices.push(base_vert_idx + (i as u32));
                 indices.push(base_vert_idx + (i as u32) - 1);
+                indices.push(base_vert_idx + (i as u32));
             }
         }
 

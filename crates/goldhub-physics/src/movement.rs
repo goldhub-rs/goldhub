@@ -296,11 +296,11 @@ pub fn pm_fly_move(
             velocity[0] = dir[0] * d;
             velocity[1] = dir[1] * d;
             velocity[2] = dir[2] * d;
-        }
 
-        if dot(*velocity, primal_velocity) <= 0.0 {
-            *velocity = [0.0; 3];
-            break;
+            if dot(*velocity, primal_velocity) <= 0.0 {
+                *velocity = [0.0; 3];
+                break;
+            }
         }
     }
 
@@ -332,14 +332,16 @@ pub fn pm_walk_move(
     let mut smove = cmd.side_move;
 
     let is_duck_active = (cmd.buttons & IN_DUCK) != 0 || state.in_duck || state.is_ducking;
-    if is_duck_active {
-        fmove *= vars.ducking_speed_multiplier;
-        smove *= vars.ducking_speed_multiplier;
-    }
-    if (cmd.buttons & IN_SPEED) != 0 {
-        fmove *= vars.walking_speed_multiplier;
-        smove *= vars.walking_speed_multiplier;
-    }
+    let speed_mult = if is_duck_active {
+        vars.ducking_speed_multiplier
+    } else if (cmd.buttons & IN_SPEED) != 0 {
+        vars.walking_speed_multiplier
+    } else {
+        1.0
+    };
+
+    fmove *= speed_mult;
+    smove *= speed_mult;
 
     let wishvel = [
         f[0] * fmove + r[0] * smove,
@@ -349,14 +351,7 @@ pub fn pm_walk_move(
 
     let (wishdir, mut wishspeed) = normalize(wishvel);
 
-    let mut max_speed = vars.maxspeed;
-    if is_duck_active {
-        max_speed *= vars.ducking_speed_multiplier;
-    }
-    if (cmd.buttons & IN_SPEED) != 0 {
-        max_speed *= vars.walking_speed_multiplier;
-    }
-
+    let max_speed = vars.maxspeed * speed_mult;
     if wishspeed > max_speed {
         wishspeed = max_speed;
     }
@@ -424,7 +419,7 @@ pub fn pm_walk_move(
     let down_tr = world.trace_player_hull(state.origin, down_dest, state.active_hull());
 
     let mut use_down = false;
-    if down_tr.fraction == 1.0 || down_tr.plane_normal[2] < 0.7 {
+    if down_tr.fraction < 1.0 && down_tr.plane_normal[2] < 0.7 {
         use_down = true;
     } else if !down_tr.startsolid && !down_tr.allsolid {
         state.origin = down_tr.endpos;
@@ -531,6 +526,88 @@ pub const HALF_HUMAN_HEIGHT: i32 = 18;
 pub const STUCK_MOVEUP: f32 = 1.0;
 pub const STUCK_MOVEDOWN: f32 = -1.0;
 
+/// Authentic 54-offset position nudge table from ReGameDLL `rgv3tStuckTable`.
+/// Consists of micro-nudges (+/- 0.125) and macro moves (+/- 2.0 XY, +1.0/+6.0 Z).
+pub const STUCK_TABLE: [[f32; 3]; 54] = [
+    [0.0, 0.0, -0.125],
+    [0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.125],
+    [0.0, -0.125, 0.0],
+    [0.0, 0.0, 0.0],
+    [0.0, 0.125, 0.0],
+    [-0.125, 0.0, 0.0],
+    [0.0, 0.0, 0.0],
+    [0.125, 0.0, 0.0],
+    [-0.125, -0.125, -0.125],
+    [-0.125, -0.125, 0.125],
+    [-0.125, 0.125, -0.125],
+    [-0.125, 0.125, 0.125],
+    [0.125, -0.125, -0.125],
+    [0.125, -0.125, 0.125],
+    [0.125, 0.125, -0.125],
+    [0.125, 0.125, 0.125],
+    [0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, 6.0],
+    [0.0, -2.0, 0.0],
+    [0.0, 0.0, 0.0],
+    [0.0, 2.0, 0.0],
+    [-2.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    [-2.0, -2.0, 0.0],
+    [-2.0, 0.0, 0.0],
+    [-2.0, 2.0, 0.0],
+    [0.0, -2.0, 0.0],
+    [0.0, 0.0, 0.0],
+    [0.0, 2.0, 0.0],
+    [2.0, -2.0, 0.0],
+    [2.0, 0.0, 0.0],
+    [2.0, 2.0, 0.0],
+    [-2.0, -2.0, 1.0],
+    [-2.0, 0.0, 1.0],
+    [-2.0, 2.0, 1.0],
+    [0.0, -2.0, 1.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 2.0, 1.0],
+    [2.0, -2.0, 1.0],
+    [2.0, 0.0, 1.0],
+    [2.0, 2.0, 1.0],
+    [-2.0, -2.0, 6.0],
+    [-2.0, 0.0, 6.0],
+    [-2.0, 2.0, 6.0],
+    [0.0, -2.0, 6.0],
+    [0.0, 0.0, 6.0],
+    [0.0, 2.0, 6.0],
+    [2.0, -2.0, 6.0],
+    [2.0, 0.0, 6.0],
+    [2.0, 2.0, 6.0],
+    [0.0, 0.0, 0.0],
+];
+
+/// Tests player position against solid geometry and tries all 54 multi-axis offsets from `STUCK_TABLE`.
+/// Returns `false` if the player is free (or successfully unstuck), or `true` if permanently trapped.
+pub fn pm_check_stuck(state: &mut PlayerState, world: &impl WorldTrace) -> bool {
+    let hull = state.active_hull();
+    if world.test_player_position(state.origin, hull).is_none() {
+        return false;
+    }
+
+    for offset in &STUCK_TABLE {
+        let test_pos = [
+            state.origin[0] + offset[0],
+            state.origin[1] + offset[1],
+            state.origin[2] + offset[2],
+        ];
+        if world.test_player_position(test_pos, hull).is_none() {
+            state.origin = test_pos;
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Resolves player collision penetration when ducking or standing near walls/bevels (`PM_FixPlayerCrouchStuck`).
 pub fn pm_fix_player_crouch_stuck(
     state: &mut PlayerState,
@@ -542,8 +619,13 @@ pub fn pm_fix_player_crouch_stuck(
         return;
     }
 
+    // First try the authentic 54-offset stuck table (micro-nudges and multi-axis shifts)
+    if !pm_check_stuck(state, world) {
+        return;
+    }
+
     let test_origin = state.origin;
-    // 1. Try preferred direction first
+    // 1. Try vertical shift in preferred direction
     for _ in 0..HALF_HUMAN_HEIGHT {
         state.origin[2] += direction;
         if world.test_player_position(state.origin, hull).is_none() {
@@ -551,7 +633,7 @@ pub fn pm_fix_player_crouch_stuck(
         }
     }
 
-    // 2. Try opposite direction
+    // 2. Try vertical shift in opposite direction
     state.origin = test_origin;
     for _ in 0..HALF_HUMAN_HEIGHT {
         state.origin[2] -= direction;
@@ -808,6 +890,11 @@ pub fn pm_player_move(
     world: &impl WorldTrace,
 ) {
     if state.dead {
+        return;
+    }
+
+    // 0. Always test and unstick player (PM_CheckStuck)
+    if pm_check_stuck(state, world) {
         return;
     }
 

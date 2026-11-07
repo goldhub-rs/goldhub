@@ -148,21 +148,22 @@ fn player_movement_system(
         let mut forward_move = 0.0f32;
         let mut side_move = 0.0f32;
         let mut buttons = 0u32;
+        let move_scale = player.sim.vars.maxspeed;
 
         if keyboard.pressed(KeyCode::KeyW) {
-            forward_move += 320.0;
+            forward_move += move_scale;
             buttons |= IN_FORWARD;
         }
         if keyboard.pressed(KeyCode::KeyS) {
-            forward_move -= 320.0;
+            forward_move -= move_scale;
             buttons |= IN_BACK;
         }
         if keyboard.pressed(KeyCode::KeyA) {
-            side_move -= 320.0;
+            side_move -= move_scale;
             buttons |= IN_MOVELEFT;
         }
         if keyboard.pressed(KeyCode::KeyD) {
-            side_move += 320.0;
+            side_move += move_scale;
             buttons |= IN_MOVERIGHT;
         }
         if keyboard.pressed(KeyCode::Space) {

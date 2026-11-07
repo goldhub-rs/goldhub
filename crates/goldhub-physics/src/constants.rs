@@ -65,11 +65,11 @@ pub const IN_WALK: u32 = 1 << 17;
 pub struct MoveVars {
     /// World gravity acceleration (default 800.0 u/s²).
     pub gravity: f32,
-    /// Velocity threshold below which friction applies proportionally (default 100.0 u/s).
+    /// Velocity threshold below which friction applies proportionally (default 75.0 u/s in CS 1.6).
     pub stopspeed: f32,
-    /// Maximum player horizontal ground speed (default 320.0 u/s for knife/scout).
+    /// Maximum player horizontal ground speed (default 250.0 u/s for knife/bare-hands in CS 1.6).
     pub maxspeed: f32,
-    /// Ground acceleration factor (default 10.0).
+    /// Ground acceleration factor (default 5.0 in CS 1.6, sv_accelerate 5.0).
     pub accelerate: f32,
     /// Air acceleration factor for strafes (default 10.0 in competitive CS 1.6).
     pub airaccelerate: f32,
@@ -89,9 +89,9 @@ impl Default for MoveVars {
     fn default() -> Self {
         Self {
             gravity: 800.0,
-            stopspeed: 100.0,
-            maxspeed: 320.0,
-            accelerate: 10.0,
+            stopspeed: 75.0,
+            maxspeed: 250.0,
+            accelerate: 5.0,
             airaccelerate: 10.0,
             friction: 4.0,
             stepsize: 18.0,

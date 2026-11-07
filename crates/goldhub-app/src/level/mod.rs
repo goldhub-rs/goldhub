@@ -17,6 +17,10 @@ const SAMPLE_BSP_PATH: &str = "D:/Repo/CS16/hlmsl/test_maps/de_inferno.bsp";
 const FALLBACK_BSP_PATH: &str =
     "D:/Repo/GoldSrc.rs/references/regamedll/regamedll/extra/Test Maps/regamedll_test_map_v8.bsp";
 
+/// Master lightmap exposure scaling factor converting normalized [0, 1] BSP luxels
+/// into Bevy's physical PBR photometric illuminance range (~1200 lux for full sun).
+const BSP_LIGHTMAP_EXPOSURE: f32 = 1200.0;
+
 pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
@@ -33,10 +37,10 @@ fn setup_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // 1. Illumination: Subtle ambient illumination to preserve high contrast BSP lightmaps
+    // 1. Illumination: Balanced ambient illumination matching GoldSrc daylight & shadow levels
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.75, 0.8, 0.85),
-        brightness: 45.0,
+        color: Color::srgb(0.82, 0.86, 0.92),
+        brightness: 140.0,
     });
 
     // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
@@ -187,10 +191,11 @@ fn setup_level(
                         .unwrap_or(false);
 
                     if part.render_mode == 2 {
-                        // GoldSrc rendermode 2 (kRenderTransTexture) with authentic renderamt alpha & rendercolor tinting
+                        // GoldSrc rendermode 2 (kRenderTransTexture) with authentic renderamt alpha & rendercolor tinting.
+                        // Per GoldSrc specification (R_HasLightmap() == false), translucent entities do not receive
+                        // baked lightmaps. Removing lightmap contribution prevents the washed-out milky white fog.
                         let alpha = f32::from(part.render_amt) / 255.0;
                         let base_col = if part.render_color == [0, 0, 0] {
-                            // If rendercolor is not specified (0, 0, 0), use neutral white modulation with glass alpha
                             Color::srgba(1.0, 1.0, 1.0, alpha)
                         } else {
                             Color::srgba(
@@ -204,12 +209,12 @@ fn setup_level(
                         materials.add(StandardMaterial {
                             base_color: base_col,
                             base_color_texture: img_handle,
-                            perceptual_roughness: 0.9,
-                            reflectance: 0.04,
-                            cull_mode: None,
-                            double_sided: true,
+                            perceptual_roughness: 0.1,
+                            reflectance: 0.5,
+                            cull_mode: Some(bevy::render::render_resource::Face::Back),
+                            double_sided: false,
                             alpha_mode: AlphaMode::Blend,
-                            lightmap_exposure: 1.1,
+                            lightmap_exposure: 0.0,
                             ..default()
                         })
                     } else if is_cutout || part.render_mode == 4 {
@@ -221,7 +226,7 @@ fn setup_level(
                             cull_mode: Some(bevy::render::render_resource::Face::Back),
                             double_sided: false,
                             alpha_mode: AlphaMode::Mask(0.5),
-                            lightmap_exposure: 1.1,
+                            lightmap_exposure: BSP_LIGHTMAP_EXPOSURE,
                             ..default()
                         })
                     } else {
@@ -232,7 +237,7 @@ fn setup_level(
                             reflectance: 0.02,
                             cull_mode: Some(bevy::render::render_resource::Face::Back),
                             alpha_mode: AlphaMode::Opaque,
-                            lightmap_exposure: 1.1,
+                            lightmap_exposure: BSP_LIGHTMAP_EXPOSURE,
                             ..default()
                         })
                     }
@@ -331,8 +336,6 @@ fn spawn_bsp_lights(commands: &mut Commands, entities_bytes: &[u8]) {
         let mut light_str = "";
         let mut rendercolor_str = "";
         let mut renderamt = 100u32;
-        let mut pitch = -90.0f32;
-        let mut angle = 0.0f32;
 
         for line in block.lines() {
             let trimmed = line.trim();
@@ -356,14 +359,6 @@ fn spawn_bsp_lights(commands: &mut Commands, entities_bytes: &[u8]) {
                 && let Some(ra) = trimmed.split('"').nth(3)
             {
                 renderamt = ra.parse::<u32>().unwrap_or(100);
-            } else if trimmed.starts_with("\"pitch\"")
-                && let Some(p) = trimmed.split('"').nth(3)
-            {
-                pitch = p.parse::<f32>().unwrap_or(-90.0);
-            } else if trimmed.starts_with("\"angle\"")
-                && let Some(a) = trimmed.split('"').nth(3)
-            {
-                angle = a.parse::<f32>().unwrap_or(0.0);
             }
         }
 
@@ -417,57 +412,23 @@ fn spawn_bsp_lights(commands: &mut Commands, entities_bytes: &[u8]) {
                 (b / 255.0).clamp(0.0, 1.0),
             );
 
-            // Scale to Bevy lumens: GoldSrc 200 intensity ~ 12,000 - 20,000 lumens
-            let lumens = (intensity * 60.0).clamp(4_000.0, 30_000.0);
-            let radius_range = (intensity * 1.8).clamp(120.0, 450.0);
+            // Scale to Bevy lumens for unscaled GoldSrc world dimensions:
+            // At GoldSrc room distance (d ~ 150-300 units), 250,000 lumens/intensity delivers ~300 lux locally
+            let lumens = (intensity * 250_000.0).clamp(5_000_000.0, 60_000_000.0);
+            let radius_range = (intensity * 4.0).clamp(300.0, 1000.0);
 
             commands.spawn((
                 PointLight {
                     color,
                     intensity: lumens,
                     range: radius_range,
-                    radius: 6.0,
+                    radius: 12.0,
                     shadows_enabled: false,
                     ..default()
                 },
                 Transform::from_translation(bevy_pos),
             ));
             light_count += 1;
-        } else if classname == "light_environment" {
-            let mut r = 240.0f32;
-            let mut g = 235.0f32;
-            let mut b = 220.0f32;
-
-            if !light_str.is_empty() {
-                let mut cparts = light_str.split_whitespace();
-                if let (Some(rs), Some(gs), Some(bs)) =
-                    (cparts.next(), cparts.next(), cparts.next())
-                {
-                    r = rs.parse::<f32>().unwrap_or(240.0);
-                    g = gs.parse::<f32>().unwrap_or(235.0);
-                    b = bs.parse::<f32>().unwrap_or(220.0);
-                }
-            }
-
-            let color = Color::srgb(
-                (r / 255.0).clamp(0.0, 1.0),
-                (g / 255.0).clamp(0.0, 1.0),
-                (b / 255.0).clamp(0.0, 1.0),
-            );
-
-            let pitch_rad = pitch.to_radians();
-            let yaw_rad = angle.to_radians();
-            let dir_quat = Quat::from_rotation_y(yaw_rad) * Quat::from_rotation_x(pitch_rad);
-
-            commands.spawn((
-                DirectionalLight {
-                    color,
-                    illuminance: 1200.0,
-                    shadows_enabled: false,
-                    ..default()
-                },
-                Transform::from_rotation(dir_quat),
-            ));
         }
     }
     tracing::info!(

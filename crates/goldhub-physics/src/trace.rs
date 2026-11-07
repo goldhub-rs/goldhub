@@ -138,6 +138,7 @@ impl<'a> BspWorldCollision<'a> {
     fn recursive_hull_check(
         &self,
         hull: &goldhub_formats::ir::CollisionHull,
+        root_node: i32,
         mut node_idx: i32,
         p1f: f32,
         p2f: f32,
@@ -207,6 +208,7 @@ impl<'a> BspWorldCollision<'a> {
             // Move up to the node on the near side
             if !self.recursive_hull_check(
                 hull,
+                root_node,
                 i32::from(node.children[side]),
                 p1f,
                 midf,
@@ -224,6 +226,7 @@ impl<'a> BspWorldCollision<'a> {
             {
                 return self.recursive_hull_check(
                     hull,
+                    root_node,
                     i32::from(node.children[other_side]),
                     midf,
                     p2f,
@@ -249,7 +252,7 @@ impl<'a> BspWorldCollision<'a> {
 
             // Step back if mid is still solid inside the root hull
             let mut back_frac = frac;
-            while self.hull_point_contents(hull, hull.root_node, mid) == CONTENTS_SOLID {
+            while self.hull_point_contents(hull, root_node, mid) == CONTENTS_SOLID {
                 back_frac -= 0.1;
                 if back_frac.is_nan() || back_frac < 0.0 {
                     trace.fraction = midf;
@@ -366,7 +369,16 @@ impl WorldTrace for BspWorldCollision<'_> {
                 trace.allsolid = false;
             }
         } else {
-            self.recursive_hull_check(hull, hull.root_node, 0.0, 1.0, start, end, &mut trace);
+            self.recursive_hull_check(
+                hull,
+                hull.root_node,
+                hull.root_node,
+                0.0,
+                1.0,
+                start,
+                end,
+                &mut trace,
+            );
             if trace.allsolid {
                 trace.startsolid = true;
             }
@@ -451,6 +463,7 @@ impl WorldTrace for BspWorldCollision<'_> {
             } else {
                 self.recursive_hull_check(
                     hull,
+                    root_node,
                     root_node,
                     0.0,
                     1.0,
@@ -590,10 +603,19 @@ impl WorldTrace for BspWorldCollision<'_> {
                     hit_entity: Some(ent.entity_id),
                 };
 
-                if root_node >= 0 {
+                let point_hull = self
+                    .model
+                    .hulls
+                    .iter()
+                    .find(|h| h.hull_index == 0)
+                    .unwrap_or(world_hull);
+                let point_root_node = ent.headnodes.first().copied().unwrap_or(root_node);
+
+                if point_root_node >= 0 {
                     self.recursive_hull_check(
-                        world_hull,
-                        root_node,
+                        point_hull,
+                        point_root_node,
+                        point_root_node,
                         0.0,
                         1.0,
                         local_origin,
