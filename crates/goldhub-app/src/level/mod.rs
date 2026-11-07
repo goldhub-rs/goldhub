@@ -33,10 +33,10 @@ fn setup_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // 1. Illumination: Pure GoldSrc Lightmap with warm ambient illumination
+    // 1. Illumination: Standard GoldSrc ambient illumination
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(1.0, 0.98, 0.95),
-        brightness: 900.0,
+        color: Color::WHITE,
+        brightness: 750.0,
     });
 
     // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
@@ -121,26 +121,13 @@ fn setup_level(
                         .first()
                         .is_some_and(|m| m.data.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
 
-                let is_lamp = {
-                    let n = tex_desc.name.to_lowercase();
-                    n.contains("lantern")
-                        || n.contains("lamp")
-                        || n.contains("glow")
-                        || n.starts_with("~light")
-                };
-
                 let mat_handle = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(img_handle),
                     perceptual_roughness: 0.95,
                     reflectance: 0.02,
                     cull_mode: Some(bevy::render::render_resource::Face::Back),
-                    lightmap_exposure: 4.2,
-                    emissive: if is_lamp {
-                        LinearRgba::rgb(3.5, 2.8, 1.6)
-                    } else {
-                        LinearRgba::BLACK
-                    },
+                    lightmap_exposure: 2.2,
                     alpha_mode: if is_cutout {
                         AlphaMode::Mask(0.5)
                     } else {
@@ -157,7 +144,7 @@ fn setup_level(
                 base_color: Color::srgb(0.6, 0.6, 0.6),
                 perceptual_roughness: 0.95,
                 reflectance: 0.02,
-                lightmap_exposure: 4.2,
+                lightmap_exposure: 2.2,
                 cull_mode: Some(bevy::render::render_resource::Face::Back),
                 ..default()
             });
@@ -180,40 +167,6 @@ fn setup_level(
                     },
                     Transform::from_xyz(0.0, 0.0, 0.0),
                 ));
-            }
-
-            // 4. Spawn local point lights at lamp fixtures (pi_lantern, etc.)
-            for submesh in &mesh_buffer.submeshes {
-                if let Some(tex) = textures.get(submesh.material_id as usize) {
-                    let n = tex.name.to_lowercase();
-                    if n.contains("lantern") || n.contains("lamp") || n.starts_with("~light") {
-                        let start = submesh.index_start as usize;
-                        let count = submesh.index_count as usize;
-                        if start + count <= mesh_buffer.indices.len() && count > 0 {
-                            let mut sum = Vec3::ZERO;
-                            let mut vert_count = 0.0f32;
-                            for &idx in &mesh_buffer.indices[start..start + count] {
-                                if let Some(v) = mesh_buffer.vertices.get(idx as usize) {
-                                    sum += Vec3::from(v.position);
-                                    vert_count += 1.0;
-                                }
-                            }
-                            if vert_count > 0.0 {
-                                let center = sum / vert_count;
-                                commands.spawn((
-                                    PointLight {
-                                        color: Color::srgb(1.0, 0.9, 0.65),
-                                        intensity: 12000.0,
-                                        range: 300.0,
-                                        shadows_enabled: false,
-                                        ..default()
-                                    },
-                                    Transform::from_translation(center),
-                                ));
-                            }
-                        }
-                    }
-                }
             }
 
             tracing::info!(
