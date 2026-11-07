@@ -55,7 +55,8 @@ fn collect_invisible_face_ranges(bsp: &BspLevel<'_>) -> std::collections::HashSe
 
 /// Compiles raw BSP30 level lumps into a contiguous, cache-line aligned Canonical `MeshBuffer`.
 pub fn compile_bsp_geometry(bsp: &BspLevel<'_>) -> Result<MeshBuffer, FormatError> {
-    compile_bsp_geometry_submeshes(bsp, &[])
+    let textures = bsp.extract_embedded_textures();
+    compile_bsp_geometry_submeshes(bsp, &textures)
 }
 
 /// Compiles raw BSP30 level into partitioned submeshes with unconstrained, repeating UV coordinates.
@@ -75,13 +76,14 @@ pub fn compile_bsp_geometry_submeshes(
 
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
 
-        // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN)
+        // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN) and SKY brushes
         if let Some(tex) = textures.get(tex_id as usize) {
             let tex_lower = tex.name.to_ascii_lowercase();
             if tex_lower == "aaatrigger"
                 || tex_lower == "clip"
                 || tex_lower == "origin"
                 || tex_lower == "{invisible"
+                || tex_lower == "sky"
             {
                 continue;
             }

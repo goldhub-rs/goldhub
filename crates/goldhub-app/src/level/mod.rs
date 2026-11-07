@@ -45,8 +45,13 @@ fn setup_level(
         brightness: 450.0,
     });
 
-    // 2. Geometry Loading: Load BSP Level (de_inferno.bsp or fallback)
-    let bsp_path = if Path::new(SAMPLE_BSP_PATH).exists() {
+    // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
+    let cli_map = std::env::args().nth(1);
+    let bsp_path = if let Some(ref arg) = cli_map
+        && Path::new(arg).exists()
+    {
+        Path::new(arg)
+    } else if Path::new(SAMPLE_BSP_PATH).exists() {
         Path::new(SAMPLE_BSP_PATH)
     } else {
         Path::new(FALLBACK_BSP_PATH)
