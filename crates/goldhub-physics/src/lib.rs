@@ -291,6 +291,31 @@ mod tests {
             speed > 34.0 && speed < 38.0,
             "Speed must compound to ~36 u/s (got {speed})"
         );
+
+        // 2. Release both Duck and Speed - speed must promptly recover to full running speed!
+        let run_cmd = PlayerCmd {
+            forward_move: 250.0,
+            buttons: 0,
+            ..Default::default()
+        };
+
+        for _ in 0..60 {
+            sim.advance(1.0 / 60.0, &run_cmd, &world);
+        }
+
+        assert!(
+            !sim.current.is_ducking,
+            "Player must not remain ducked after releasing duck"
+        );
+        assert!(
+            !sim.current.in_duck,
+            "Player in_duck flag must be cleared after releasing duck"
+        );
+        let recovered_speed = sim.current.horizontal_speed();
+        assert!(
+            recovered_speed > 240.0,
+            "Speed must recover to normal running speed (>240 u/s), got {recovered_speed}"
+        );
     }
 
     #[test]

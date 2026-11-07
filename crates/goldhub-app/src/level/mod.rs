@@ -33,10 +33,10 @@ fn setup_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // 1. Illumination: Standard GoldSrc ambient illumination
+    // 1. Illumination: Subtle ambient illumination to preserve high contrast BSP lightmaps
     commands.insert_resource(AmbientLight {
-        color: Color::WHITE,
-        brightness: 750.0,
+        color: Color::srgb(0.75, 0.8, 0.85),
+        brightness: 45.0,
     });
 
     // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
@@ -63,6 +63,7 @@ fn setup_level(
                 });
             }
             spawn_point = crate::player::parse_first_player_spawn(bsp.entities);
+            spawn_bsp_lights(&mut commands, bsp.entities);
         }
 
         let mut search_dirs = Vec::new();
@@ -203,12 +204,12 @@ fn setup_level(
                         materials.add(StandardMaterial {
                             base_color: base_col,
                             base_color_texture: img_handle,
-                            perceptual_roughness: 0.15,
-                            reflectance: 0.4,
+                            perceptual_roughness: 0.9,
+                            reflectance: 0.04,
                             cull_mode: None,
                             double_sided: true,
                             alpha_mode: AlphaMode::Blend,
-                            lightmap_exposure: 2.2,
+                            lightmap_exposure: 1.1,
                             ..default()
                         })
                     } else if is_cutout || part.render_mode == 4 {
@@ -220,7 +221,7 @@ fn setup_level(
                             cull_mode: Some(bevy::render::render_resource::Face::Back),
                             double_sided: false,
                             alpha_mode: AlphaMode::Mask(0.5),
-                            lightmap_exposure: 2.2,
+                            lightmap_exposure: 1.1,
                             ..default()
                         })
                     } else {
@@ -231,7 +232,7 @@ fn setup_level(
                             reflectance: 0.02,
                             cull_mode: Some(bevy::render::render_resource::Face::Back),
                             alpha_mode: AlphaMode::Opaque,
-                            lightmap_exposure: 2.2,
+                            lightmap_exposure: 1.1,
                             ..default()
                         })
                     }
@@ -314,4 +315,163 @@ fn setup_level(
             is_active: false,
         },
     ));
+}
+
+/// Parses entity string lumps and spawns authentic PointLight fixtures and environment lighting.
+#[allow(clippy::too_many_lines)]
+fn spawn_bsp_lights(commands: &mut Commands, entities_bytes: &[u8]) {
+    let Ok(entities_str) = std::str::from_utf8(entities_bytes) else {
+        return;
+    };
+
+    let mut light_count = 0;
+    for block in entities_str.split('}') {
+        let mut classname = "";
+        let mut origin_str = "";
+        let mut light_str = "";
+        let mut rendercolor_str = "";
+        let mut renderamt = 100u32;
+        let mut pitch = -90.0f32;
+        let mut angle = 0.0f32;
+
+        for line in block.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("\"classname\"")
+                && let Some(c) = trimmed.split('"').nth(3)
+            {
+                classname = c;
+            } else if trimmed.starts_with("\"origin\"")
+                && let Some(o) = trimmed.split('"').nth(3)
+            {
+                origin_str = o;
+            } else if trimmed.starts_with("\"_light\"")
+                && let Some(l) = trimmed.split('"').nth(3)
+            {
+                light_str = l;
+            } else if trimmed.starts_with("\"rendercolor\"")
+                && let Some(rc) = trimmed.split('"').nth(3)
+            {
+                rendercolor_str = rc;
+            } else if trimmed.starts_with("\"renderamt\"")
+                && let Some(ra) = trimmed.split('"').nth(3)
+            {
+                renderamt = ra.parse::<u32>().unwrap_or(100);
+            } else if trimmed.starts_with("\"pitch\"")
+                && let Some(p) = trimmed.split('"').nth(3)
+            {
+                pitch = p.parse::<f32>().unwrap_or(-90.0);
+            } else if trimmed.starts_with("\"angle\"")
+                && let Some(a) = trimmed.split('"').nth(3)
+            {
+                angle = a.parse::<f32>().unwrap_or(0.0);
+            }
+        }
+
+        if origin_str.is_empty() {
+            continue;
+        }
+
+        let mut parts = origin_str.split_whitespace();
+        let (Some(xs), Some(ys), Some(zs)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(fx), Ok(fy), Ok(fz)) = (xs.parse::<f32>(), ys.parse::<f32>(), zs.parse::<f32>())
+        else {
+            continue;
+        };
+
+        // GoldSrc (Z-up) -> Bevy (Y-up): X = X, Y = Z, Z = -Y
+        let bevy_pos = Vec3::new(fx, fz, -fy);
+
+        if classname == "light" || classname == "light_spot" || classname == "env_glow" {
+            let mut r = 255.0f32;
+            let mut g = 255.0f32;
+            let mut b = 255.0f32;
+            let mut intensity = 200.0f32;
+
+            let color_src = if light_str.is_empty() {
+                rendercolor_str
+            } else {
+                light_str
+            };
+
+            if !color_src.is_empty() {
+                let mut cparts = color_src.split_whitespace();
+                if let (Some(rs), Some(gs), Some(bs)) =
+                    (cparts.next(), cparts.next(), cparts.next())
+                {
+                    r = rs.parse::<f32>().unwrap_or(255.0);
+                    g = gs.parse::<f32>().unwrap_or(255.0);
+                    b = bs.parse::<f32>().unwrap_or(255.0);
+                }
+                if let Some(ints) = cparts.next() {
+                    intensity = ints.parse::<f32>().unwrap_or(200.0);
+                } else if classname == "env_glow" {
+                    intensity = (renderamt as f32) * 1.5;
+                }
+            }
+
+            let color = Color::srgb(
+                (r / 255.0).clamp(0.0, 1.0),
+                (g / 255.0).clamp(0.0, 1.0),
+                (b / 255.0).clamp(0.0, 1.0),
+            );
+
+            // Scale to Bevy lumens: GoldSrc 200 intensity ~ 12,000 - 20,000 lumens
+            let lumens = (intensity * 60.0).clamp(4_000.0, 30_000.0);
+            let radius_range = (intensity * 1.8).clamp(120.0, 450.0);
+
+            commands.spawn((
+                PointLight {
+                    color,
+                    intensity: lumens,
+                    range: radius_range,
+                    radius: 6.0,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(bevy_pos),
+            ));
+            light_count += 1;
+        } else if classname == "light_environment" {
+            let mut r = 240.0f32;
+            let mut g = 235.0f32;
+            let mut b = 220.0f32;
+
+            if !light_str.is_empty() {
+                let mut cparts = light_str.split_whitespace();
+                if let (Some(rs), Some(gs), Some(bs)) =
+                    (cparts.next(), cparts.next(), cparts.next())
+                {
+                    r = rs.parse::<f32>().unwrap_or(240.0);
+                    g = gs.parse::<f32>().unwrap_or(235.0);
+                    b = bs.parse::<f32>().unwrap_or(220.0);
+                }
+            }
+
+            let color = Color::srgb(
+                (r / 255.0).clamp(0.0, 1.0),
+                (g / 255.0).clamp(0.0, 1.0),
+                (b / 255.0).clamp(0.0, 1.0),
+            );
+
+            let pitch_rad = pitch.to_radians();
+            let yaw_rad = angle.to_radians();
+            let dir_quat = Quat::from_rotation_y(yaw_rad) * Quat::from_rotation_x(pitch_rad);
+
+            commands.spawn((
+                DirectionalLight {
+                    color,
+                    illuminance: 1200.0,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_rotation(dir_quat),
+            ));
+        }
+    }
+    tracing::info!(
+        spawned_lights = light_count,
+        "Spawned GoldSrc BSP PointLights and Environment Illuminators"
+    );
 }

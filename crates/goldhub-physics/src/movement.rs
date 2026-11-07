@@ -543,8 +543,18 @@ pub fn pm_fix_player_crouch_stuck(
     }
 
     let test_origin = state.origin;
+    // 1. Try preferred direction first
     for _ in 0..HALF_HUMAN_HEIGHT {
         state.origin[2] += direction;
+        if world.test_player_position(state.origin, hull).is_none() {
+            return; // Successfully unstuck!
+        }
+    }
+
+    // 2. Try opposite direction
+    state.origin = test_origin;
+    for _ in 0..HALF_HUMAN_HEIGHT {
+        state.origin[2] -= direction;
         if world.test_player_position(state.origin, hull).is_none() {
             return; // Successfully unstuck!
         }
@@ -623,6 +633,14 @@ pub fn pm_duck(
 
 /// Attempts to stand up from a crouch (`PM_UnDuck`).
 pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
+    // If ducking wasn't finished yet (fast tap / quick release), cancel ducking immediately (ReGameDLL parity)
+    if state.in_duck && !state.is_ducking {
+        state.in_duck = false;
+        state.duck_time_ms = 0.0;
+        state.view_height = VEC_VIEW_STANDING;
+        return;
+    }
+
     let mut new_origin = state.origin;
     if state.on_ground && state.is_ducking {
         new_origin[2] += 18.0;
@@ -649,14 +667,19 @@ pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
     }
 
     if state.unduck_time_ms > 0.0 {
-        // Smoothly interpolate view height up from VEC_VIEW_DUCKING to VEC_VIEW_STANDING
+        const F_MORE: f32 = 18.0;
+        // Smoothly interpolate camera rise from (VEC_VIEW_DUCKING - 18.0) up to VEC_VIEW_STANDING
+        // When unduck starts, origin[2] jumps by +18 units immediately.
+        // By starting view_height at (12.0 - 18.0) = -6.0, the eye position (origin + view_height)
+        // at tick 0 has delta = +18 - 18 = 0.0, and smoothly rises over TIME_TO_UNDUCK (200 ms)!
         let time = 1.0 - (state.unduck_time_ms / (TIME_TO_UNDUCK * 1000.0));
         let fraction = if time >= 0.0 {
             pm_spline_fraction(time, 1.0)
         } else {
             0.0
         };
-        state.view_height = VEC_VIEW_DUCKING * (1.0 - fraction) + VEC_VIEW_STANDING * fraction;
+        state.view_height =
+            (VEC_VIEW_DUCKING - F_MORE) * (1.0 - fraction) + VEC_VIEW_STANDING * fraction;
     } else {
         state.view_height = VEC_VIEW_STANDING;
         state.duck_time_ms = 0.0;
