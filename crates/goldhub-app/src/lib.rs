@@ -6,11 +6,13 @@
 pub mod camera;
 pub mod level;
 pub mod mesh_bridge;
+pub mod video_settings;
 pub mod window;
 
 pub use camera::{SpectatorCamera, SpectatorCameraPlugin};
 pub use level::LevelPlugin;
 pub use mesh_bridge::{PartitionedMesh, to_bevy_mesh, to_bevy_submeshes};
+pub use video_settings::{VideoSettings, VideoSettingsPlugin};
 pub use window::WindowControlPlugin;
 
 use bevy::prelude::*;
@@ -40,7 +42,12 @@ pub fn build_goldhub_app() -> App {
             .disable::<bevy::log::LogPlugin>(),
     );
 
-    app.add_plugins((WindowControlPlugin, SpectatorCameraPlugin, LevelPlugin));
+    app.add_plugins((
+        WindowControlPlugin,
+        SpectatorCameraPlugin,
+        LevelPlugin,
+        VideoSettingsPlugin,
+    ));
 
     app
 }

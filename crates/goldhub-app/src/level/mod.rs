@@ -196,7 +196,10 @@ fn setup_level(
         ));
     }
 
-    // 3. Spawn Spectator Camera
+    // 3. Spawn Spectator Camera with Color Grading pipeline
+    let mut initial_grading = bevy::render::view::ColorGrading::default();
+    crate::video_settings::VideoSettings::default().apply_to_color_grading(&mut initial_grading);
+
     commands.spawn((
         Camera3d::default(),
         Camera {
@@ -205,7 +208,8 @@ fn setup_level(
             )),
             ..default()
         },
-        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
+        initial_grading,
         Transform::from_xyz(0.0, 300.0, 500.0).looking_at(Vec3::new(0.0, 100.0, 0.0), Vec3::Y),
         SpectatorCamera::default(),
     ));
