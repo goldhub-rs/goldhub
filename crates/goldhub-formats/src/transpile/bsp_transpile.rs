@@ -330,8 +330,8 @@ pub fn compile_bsp_geometry_and_lightmap(
 
             if i >= 2 {
                 indices.push(base_vert_idx);
-                indices.push(base_vert_idx + (i as u32) - 1);
                 indices.push(base_vert_idx + (i as u32));
+                indices.push(base_vert_idx + (i as u32) - 1);
             }
         }
 
@@ -416,8 +416,8 @@ pub fn compile_bsp_geometry_with_atlas(
 
             if i >= 2 {
                 indices.push(base_vert_idx);
-                indices.push(base_vert_idx + (i as u32) - 1);
                 indices.push(base_vert_idx + (i as u32));
+                indices.push(base_vert_idx + (i as u32) - 1);
             }
         }
 
