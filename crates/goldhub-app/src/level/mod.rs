@@ -111,8 +111,10 @@ fn setup_level(
             // 2. Create native GPU Images for each diffuse texture with Repeating wrap sampler
             let mut texture_images: HashMap<u32, Handle<Image>> = HashMap::new();
             let mut texture_cutout: HashMap<u32, bool> = HashMap::new();
+            let mut texture_names: HashMap<u32, String> = HashMap::new();
 
             for (idx, tex_desc) in textures.iter().enumerate() {
+                texture_names.insert(idx as u32, tex_desc.name.clone());
                 let base_data = tex_desc.mips.first().map_or(&[][..], |m| m.data.as_slice());
 
                 let (mip_data, mip_count) =
@@ -190,33 +192,63 @@ fn setup_level(
                         .copied()
                         .unwrap_or(false);
 
-                    if part.render_mode == 2 {
-                        // GoldSrc rendermode 2 (kRenderTransTexture) with authentic renderamt alpha & rendercolor tinting.
-                        // Per GoldSrc specification (R_HasLightmap() == false), translucent entities do not receive
-                        // baked lightmaps. Removing lightmap contribution prevents the washed-out milky white fog.
-                        let alpha = f32::from(part.render_amt) / 255.0;
-                        let base_col = if part.render_color == [0, 0, 0] {
-                            Color::srgba(1.0, 1.0, 1.0, alpha)
-                        } else {
-                            Color::srgba(
-                                f32::from(part.render_color[0]) / 255.0,
-                                f32::from(part.render_color[1]) / 255.0,
-                                f32::from(part.render_color[2]) / 255.0,
-                                alpha,
-                            )
-                        };
+                    let tex_name = texture_names
+                        .get(&part.material_id)
+                        .map_or("", String::as_str)
+                        .to_ascii_lowercase();
 
+                    if tex_name == "sky" {
+                        // Sky brush surfaces: in GoldSrc, sky brushes clip the 3D skybox and occlude geometry behind them.
+                        // We use an unlit sky color matching atmospheric clear color.
                         materials.add(StandardMaterial {
-                            base_color: base_col,
-                            base_color_texture: img_handle,
-                            perceptual_roughness: 0.1,
-                            reflectance: 0.5,
+                            base_color: Color::srgb(0.55, 0.68, 0.85),
+                            unlit: true,
                             cull_mode: Some(bevy::render::render_resource::Face::Back),
-                            double_sided: false,
-                            alpha_mode: AlphaMode::Blend,
-                            lightmap_exposure: 0.0,
+                            alpha_mode: AlphaMode::Opaque,
                             ..default()
                         })
+                    } else if part.render_mode == 2 {
+                        // GoldSrc rendermode 2 (kRenderTransTexture).
+                        // Solid brush entities with default renderamt (255) and non-glass textures (e.g. wooden poles)
+                        // are treated as standard lightmapped opaque geometry per GoldSrc specification.
+                        let is_glass = tex_name.contains("glass") || tex_name.contains("window");
+                        if part.render_amt == 255 && !is_glass {
+                            materials.add(StandardMaterial {
+                                base_color: Color::WHITE,
+                                base_color_texture: img_handle,
+                                perceptual_roughness: 0.95,
+                                reflectance: 0.02,
+                                cull_mode: Some(bevy::render::render_resource::Face::Back),
+                                alpha_mode: AlphaMode::Opaque,
+                                lightmap_exposure: BSP_LIGHTMAP_EXPOSURE,
+                                ..default()
+                            })
+                        } else {
+                            // Translucent glass panes: soft ambient lighting, double-sided visibility, authentic tint
+                            let alpha = f32::from(part.render_amt) / 255.0;
+                            let base_col = if part.render_color == [0, 0, 0] {
+                                Color::srgba(1.0, 1.0, 1.0, alpha)
+                            } else {
+                                Color::srgba(
+                                    f32::from(part.render_color[0]) / 255.0,
+                                    f32::from(part.render_color[1]) / 255.0,
+                                    f32::from(part.render_color[2]) / 255.0,
+                                    alpha,
+                                )
+                            };
+
+                            materials.add(StandardMaterial {
+                                base_color: base_col,
+                                base_color_texture: img_handle,
+                                perceptual_roughness: 0.15,
+                                reflectance: 0.3,
+                                cull_mode: None,
+                                double_sided: true,
+                                alpha_mode: AlphaMode::Blend,
+                                lightmap_exposure: 150.0,
+                                ..default()
+                            })
+                        }
                     } else if is_cutout || part.render_mode == 4 {
                         materials.add(StandardMaterial {
                             base_color: Color::WHITE,

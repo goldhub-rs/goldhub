@@ -290,14 +290,13 @@ pub fn compile_bsp_geometry_and_lightmap(
             .unwrap_or([0.0, 0.0, 0.0]);
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
 
-        // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN) and SKY brushes
+        // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN)
         if let Some(tex) = textures.get(tex_id as usize) {
             let tex_lower = tex.name.to_ascii_lowercase();
             if tex_lower == "aaatrigger"
                 || tex_lower == "clip"
                 || tex_lower == "origin"
                 || tex_lower == "{invisible"
-                || tex_lower == "sky"
             {
                 continue;
             }

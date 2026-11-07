@@ -29,7 +29,7 @@ pub fn build_goldhub_app() -> App {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "GoldHub Engine Viewport".into(),
-                    resolution: WindowResolution::new(1280.0, 720.0),
+                    resolution: WindowResolution::new(1024.0, 768.0),
                     mode: WindowMode::Windowed,
                     resizable: true,
                     present_mode: bevy::window::PresentMode::Fifo,

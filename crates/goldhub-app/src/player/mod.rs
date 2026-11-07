@@ -50,13 +50,55 @@ impl Default for PlayerController {
     }
 }
 
+/// Marker component for the in-game speedometer HUD text.
+#[derive(Component)]
+pub struct SpeedometerText;
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraControlMode>();
         app.init_resource::<LevelCollisionResource>();
-        app.add_systems(Update, (player_movement_system, controller_toggle_system));
+        app.add_systems(Startup, setup_speedometer_hud);
+        app.add_systems(
+            Update,
+            (
+                player_movement_system,
+                controller_toggle_system,
+                update_speedometer_system,
+            ),
+        );
+    }
+}
+
+fn setup_speedometer_hud(mut commands: Commands) {
+    commands.spawn((
+        SpeedometerText,
+        Text::new("spd: 0.00 u/s"),
+        TextFont {
+            font_size: 24.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.0, 1.0, 0.4)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(24.0),
+            left: Val::Px(24.0),
+            ..default()
+        },
+    ));
+}
+
+fn update_speedometer_system(
+    player_query: Query<&PlayerController>,
+    mut text_query: Query<&mut Text, With<SpeedometerText>>,
+) {
+    if let Ok(player) = player_query.get_single() {
+        let spd = player.sim.current.horizontal_speed();
+        for mut text in &mut text_query {
+            **text = format!("spd: {spd:.2} u/s");
+        }
     }
 }
 
