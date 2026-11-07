@@ -144,17 +144,25 @@ fn build_lightmap_atlas(
     (atlas, face_uv_map)
 }
 
-/// Parses entities lump string to collect face ranges of invisible entities (triggers, collision walls).
-fn collect_invisible_face_ranges(bsp: &BspLevel<'_>) -> std::collections::HashSet<usize> {
+/// Parses entities lump string to collect face ranges of invisible entities and model origin offsets.
+fn collect_entity_metadata(
+    bsp: &BspLevel<'_>,
+) -> (
+    std::collections::HashSet<usize>,
+    std::collections::HashMap<usize, [f32; 3]>,
+) {
     let mut invis_faces = std::collections::HashSet::new();
+    let mut face_origins = std::collections::HashMap::new();
+
     let Ok(entities_str) = std::str::from_utf8(bsp.entities) else {
-        return invis_faces;
+        return (invis_faces, face_origins);
     };
 
     for block in entities_str.split('}') {
         let mut model_idx = None;
         let mut rendermode = 0u32;
         let mut is_trigger = false;
+        let mut origin = None;
 
         for line in block.lines() {
             let trimmed = line.trim();
@@ -167,6 +175,16 @@ fn collect_invisible_face_ranges(bsp: &BspLevel<'_>) -> std::collections::HashSe
                 if let Some(r_str) = trimmed.split('"').nth(3) {
                     rendermode = r_str.parse::<u32>().unwrap_or(0);
                 }
+            } else if trimmed.starts_with("\"origin\"") {
+                if let Some(o_str) = trimmed.split('"').nth(3) {
+                    let mut parts = o_str.split_whitespace();
+                    if let (Some(x), Some(y), Some(z)) = (parts.next(), parts.next(), parts.next())
+                        && let (Ok(fx), Ok(fy), Ok(fz)) =
+                            (x.parse::<f32>(), y.parse::<f32>(), z.parse::<f32>())
+                    {
+                        origin = Some([fx, fy, fz]);
+                    }
+                }
             } else if trimmed.starts_with("\"classname\"")
                 && let Some(c_str) = trimmed.split('"').nth(3)
                 && (c_str == "func_ladder"
@@ -177,20 +195,29 @@ fn collect_invisible_face_ranges(bsp: &BspLevel<'_>) -> std::collections::HashSe
             }
         }
 
-        // In GoldSrc: rendermode 2 (kRenderTransTexture) on func_wall is an invisible collision wall
-        if (is_trigger || rendermode == 2)
-            && let Some(m_idx) = model_idx
+        if let Some(m_idx) = model_idx
             && let Some(model) = bsp.models.get(m_idx)
         {
             let first = model.first_face.max(0) as usize;
             let num = model.num_faces.max(0) as usize;
-            for f in first..first + num {
-                invis_faces.insert(f);
+
+            // In GoldSrc: rendermode 2 (kRenderTransTexture) on func_wall is an invisible collision wall
+            if is_trigger || rendermode == 2 {
+                for f in first..first + num {
+                    invis_faces.insert(f);
+                }
+            }
+
+            // Brush entities with non-zero origin (e.g. func_door_rotating) store vertices locally
+            if let Some(orig) = origin {
+                for f in first..first + num {
+                    face_origins.insert(f, orig);
+                }
             }
         }
     }
 
-    invis_faces
+    (invis_faces, face_origins)
 }
 
 /// Compiles raw BSP30 level lumps into a contiguous, cache-line aligned Canonical `MeshBuffer`.
@@ -214,7 +241,7 @@ pub fn compile_bsp_geometry_and_lightmap(
     bsp: &BspLevel<'_>,
     textures: &[crate::ir::TextureDescriptor],
 ) -> Result<(MeshBuffer, LightmapAtlas), FormatError> {
-    let invisible_faces = collect_invisible_face_ranges(bsp);
+    let (invisible_faces, face_origins) = collect_entity_metadata(bsp);
     let (atlas, face_uv_map) = build_lightmap_atlas(bsp, &invisible_faces, textures);
 
     let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
@@ -226,6 +253,7 @@ pub fn compile_bsp_geometry_and_lightmap(
             continue;
         }
 
+        let origin_offset = face_origins.get(&face_idx).copied().unwrap_or([0.0, 0.0, 0.0]);
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
 
         // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN) and SKY brushes
@@ -279,9 +307,14 @@ pub fn compile_bsp_geometry_and_lightmap(
                 };
 
             // Coordinate system transformation:
+            // Apply submodel origin offset for movable entities (func_door_rotating, etc.)
+            let world_x = pos[0] + origin_offset[0];
+            let world_y = pos[1] + origin_offset[1];
+            let world_z = pos[2] + origin_offset[2];
+
             // GoldSrc: X = Right, Y = Forward, Z = Up
             // Bevy / Modern: X = Right, Y = Up, Z = -Forward (or -Y)
-            let bevy_pos = [pos[0], pos[2], -pos[1]];
+            let bevy_pos = [world_x, world_z, -world_y];
             let bevy_normal = [normal[0], normal[2], -normal[1]];
             let bevy_tangent = [tangent[0], tangent[2], -tangent[1], 1.0];
 

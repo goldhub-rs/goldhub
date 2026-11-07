@@ -59,19 +59,12 @@ fn find_skybox_file(sky_name: &str, suffix: &str) -> Option<PathBuf> {
     None
 }
 
-/// Creates a quad mesh for one side of the skybox cube pointing inward.
-fn create_skybox_face_mesh(positions: [[f32; 3]; 4]) -> Mesh {
+/// Creates a quad mesh for one side of the skybox cube pointing inward with exact UVs.
+fn create_skybox_face_mesh(positions: [[f32; 3]; 4], uvs: [[f32; 2]; 4]) -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
-
-    let uvs: [[f32; 2]; 4] = [
-        [0.0, 0.0],
-        [1.0, 0.0],
-        [1.0, 1.0],
-        [0.0, 1.0],
-    ];
 
     let normals: [[f32; 3]; 4] = [[0.0, 0.0, 0.0]; 4];
     let indices = vec![0u32, 1, 2, 0, 2, 3];
@@ -95,75 +88,111 @@ pub fn spawn_skybox(
 ) {
     let r = SKYBOX_HALF_SIZE;
 
-    // The 6 GoldSrc skybox sides:
-    // rt (+X Right), lf (-X Left), ft (-Z Front), bk (+Z Back), up (+Y Up), dn (-Y Down)
+    // Mathematically exact GoldSrc skybox projections from Xash3D st_to_vec / MakeSkyVec:
+    // Suffixes: rt, lf, bk, ft, up, dn
     let sides = [
-        // 0: Right (rt, +X)
+        // 0: Right (rt)
         (
             "rt",
             [
-                [r, r, -r],
-                [r, r, r],
-                [r, -r, r],
                 [r, -r, -r],
+                [r,  r, -r],
+                [r,  r,  r],
+                [r, -r,  r],
+            ],
+            [
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
             ],
         ),
-        // 1: Left (lf, -X)
+        // 1: Left (lf)
         (
             "lf",
             [
-                [-r, r, r],
-                [-r, r, -r],
+                [-r, -r,  r],
+                [-r,  r,  r],
+                [-r,  r, -r],
                 [-r, -r, -r],
-                [-r, -r, r],
             ],
-        ),
-        // 2: Front (ft, -Z)
-        (
-            "ft",
             [
-                [-r, r, -r],
-                [r, r, -r],
-                [r, -r, -r],
-                [-r, -r, -r],
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
             ],
         ),
-        // 3: Back (bk, +Z)
+        // 2: Back (bk)
         (
             "bk",
             [
-                [r, r, r],
-                [-r, r, r],
-                [-r, -r, r],
-                [r, -r, r],
+                [-r, -r, -r],
+                [-r,  r, -r],
+                [ r,  r, -r],
+                [ r, -r, -r],
+            ],
+            [
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
             ],
         ),
-        // 4: Up (up, +Y)
+        // 3: Front (ft)
+        (
+            "ft",
+            [
+                [ r, -r,  r],
+                [ r,  r,  r],
+                [-r,  r,  r],
+                [-r, -r,  r],
+            ],
+            [
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+            ],
+        ),
+        // 4: Up (up)
         (
             "up",
             [
-                [-r, r, -r],
-                [r, r, -r],
-                [r, r, r],
-                [-r, r, r],
+                [ r,  r, -r],
+                [-r,  r, -r],
+                [-r,  r,  r],
+                [ r,  r,  r],
+            ],
+            [
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
             ],
         ),
-        // 5: Down (dn, -Y)
+        // 5: Down (dn)
         (
             "dn",
             [
-                [r, -r, -r],
                 [-r, -r, -r],
-                [-r, -r, r],
-                [r, -r, r],
+                [ r, -r, -r],
+                [ r, -r,  r],
+                [-r, -r,  r],
+            ],
+            [
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
             ],
         ),
     ];
 
     let mut face_entities = Vec::with_capacity(6);
 
-    for (suffix, face_positions) in sides {
-        let quad_mesh = create_skybox_face_mesh(face_positions);
+    for (suffix, face_positions, face_uvs) in sides {
+        let quad_mesh = create_skybox_face_mesh(face_positions, face_uvs);
         let mesh_handle = meshes.add(quad_mesh);
 
         let img_handle = if let Some(path) = find_skybox_file(sky_name, suffix)

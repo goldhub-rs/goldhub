@@ -108,3 +108,18 @@ fn test_decode_real_skybox_tga() {
     assert_eq!(tga.height, 256);
     assert_eq!(tga.rgba.len(), 256 * 256 * 4);
 }
+
+#[test]
+fn test_transpile_submodel_origin_shift() {
+    let path = Path::new("D:/Repo/CS16/hlmsl/test_maps/de_inferno.bsp");
+    if !path.exists() {
+        return;
+    }
+
+    let bytes = fs::read(path).unwrap();
+    let decoder = Bsp30Decoder;
+    let bsp = decoder.decode(&bytes).unwrap();
+    let mesh = compile_bsp_geometry(&bsp).unwrap();
+
+    assert!(mesh.vertex_count() > 0);
+}
