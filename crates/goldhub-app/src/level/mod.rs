@@ -30,19 +30,10 @@ fn setup_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // 1. Illumination: Sun + Ambient Light
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 18_000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(500.0, 1500.0, 500.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
+    // 1. Illumination: Ambient Light tuned for GoldSrc PBR Lightmap balance
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.9, 0.92, 1.0),
-        brightness: 450.0,
+        color: Color::srgb(0.95, 0.95, 1.0),
+        brightness: 750.0,
     });
 
     // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
@@ -126,10 +117,10 @@ fn setup_level(
                 let mat_handle = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(img_handle),
-                    perceptual_roughness: 0.85,
-                    reflectance: 0.15,
+                    perceptual_roughness: 0.9,
+                    reflectance: 0.05,
                     cull_mode: None,
-                    lightmap_exposure: 1.0,
+                    lightmap_exposure: 2.2,
                     alpha_mode: if is_cutout {
                         AlphaMode::Mask(0.5)
                     } else {
@@ -144,7 +135,9 @@ fn setup_level(
             // Fallback material for textures without diffuse image
             let fallback_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.6, 0.6, 0.6),
-                perceptual_roughness: 0.85,
+                perceptual_roughness: 0.9,
+                reflectance: 0.05,
+                lightmap_exposure: 2.2,
                 cull_mode: None,
                 ..default()
             });
