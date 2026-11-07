@@ -201,7 +201,13 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
     }
 }
 
-impl BspLevel<'_> {
+impl<'a> BspLevel<'a> {
+    /// Zero-copy parses a BSP level from raw bytes.
+    #[inline]
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, FormatError> {
+        Bsp30Decoder.decode(bytes)
+    }
+
     /// Extracts all embedded miptex textures into RGBA8 TextureDescriptors.
     pub fn extract_embedded_textures(&self) -> Vec<crate::ir::TextureDescriptor> {
         let lump = self.textures_lump;

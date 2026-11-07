@@ -23,12 +23,18 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
         });
     }
 
-    // Default primary hull
-    let hulls = vec![CollisionHull {
-        hull_index: 0,
-        root_node: 0,
-        clip_nodes,
-    }];
+    let world_model = bsp.models.first();
+    let headnodes = world_model.map_or([0; 4], |m| m.headnode);
+
+    // Extract all 4 hulls (0: Point/Ray, 1: Standing Player, 2: Large, 3: Ducking Player)
+    let mut hulls = Vec::with_capacity(4);
+    for (hull_idx, &headnode) in headnodes.iter().enumerate() {
+        hulls.push(CollisionHull {
+            hull_index: hull_idx as u32,
+            root_node: headnode,
+            clip_nodes: clip_nodes.clone(),
+        });
+    }
 
     Ok(CollisionModel {
         hulls,

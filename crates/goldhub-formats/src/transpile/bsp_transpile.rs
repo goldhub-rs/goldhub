@@ -161,6 +161,7 @@ fn collect_entity_metadata(
     for block in entities_str.split('}') {
         let mut model_idx = None;
         let mut rendermode = 0u32;
+        let mut renderamt = 255u32;
         let mut is_trigger = false;
         let mut origin = None;
 
@@ -174,6 +175,10 @@ fn collect_entity_metadata(
             } else if trimmed.starts_with("\"rendermode\"") {
                 if let Some(r_str) = trimmed.split('"').nth(3) {
                     rendermode = r_str.parse::<u32>().unwrap_or(0);
+                }
+            } else if trimmed.starts_with("\"renderamt\"") {
+                if let Some(a_str) = trimmed.split('"').nth(3) {
+                    renderamt = a_str.parse::<u32>().unwrap_or(255);
                 }
             } else if trimmed.starts_with("\"origin\"") {
                 if let Some(o_str) = trimmed.split('"').nth(3) {
@@ -201,8 +206,8 @@ fn collect_entity_metadata(
             let first = model.first_face.max(0) as usize;
             let num = model.num_faces.max(0) as usize;
 
-            // In GoldSrc: rendermode 2 (kRenderTransTexture) on func_wall is an invisible collision wall
-            if is_trigger || rendermode == 2 {
+            // In GoldSrc: only truly invisible triggers or rendermode 2 with renderamt == 0 are culled
+            if is_trigger || (rendermode == 2 && renderamt == 0) {
                 for f in first..first + num {
                     invis_faces.insert(f);
                 }

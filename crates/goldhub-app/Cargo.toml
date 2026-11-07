@@ -14,6 +14,7 @@ goldhub-formats = { path = "../goldhub-formats" }
 goldhub-vfs = { path = "../goldhub-vfs" }
 goldhub-manifest = { path = "../goldhub-manifest" }
 goldhub-net = { path = "../goldhub-net" }
+goldhub-physics = { path = "../goldhub-physics" }
 proc-safety = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

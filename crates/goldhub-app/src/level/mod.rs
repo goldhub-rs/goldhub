@@ -51,10 +51,20 @@ fn setup_level(
         Path::new(FALLBACK_BSP_PATH)
     };
     let mut spawned_bsp = false;
+    let mut spawn_point: Option<([f32; 3], f32)> = None;
 
     if bsp_path.exists()
         && let Ok(raw_bytes) = fs::read(bsp_path)
     {
+        if let Ok(bsp) = goldhub_formats::codecs::legacy::bsp::BspLevel::from_bytes(&raw_bytes) {
+            if let Ok(collision) = goldhub_formats::transpile::compile_bsp_collision(&bsp) {
+                commands.insert_resource(crate::player::LevelCollisionResource {
+                    model: Some(collision),
+                });
+            }
+            spawn_point = crate::player::parse_first_player_spawn(bsp.entities);
+        }
+
         let mut search_dirs = Vec::new();
         if let Some(dir) = bsp_path.parent() {
             search_dirs.push(dir);
@@ -142,14 +152,26 @@ fn setup_level(
                         .first()
                         .is_some_and(|m| m.data.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
 
+                let is_glass = tex_desc.name.to_ascii_lowercase().contains("glass");
+
                 let mat_handle = materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
+                    base_color: if is_glass {
+                        Color::srgba(1.0, 1.0, 1.0, 0.45)
+                    } else {
+                        Color::WHITE
+                    },
                     base_color_texture: Some(img_handle),
-                    perceptual_roughness: 0.95,
-                    reflectance: 0.02,
-                    cull_mode: Some(bevy::render::render_resource::Face::Back),
+                    perceptual_roughness: if is_glass { 0.1 } else { 0.95 },
+                    reflectance: if is_glass { 0.5 } else { 0.02 },
+                    cull_mode: if is_glass {
+                        None
+                    } else {
+                        Some(bevy::render::render_resource::Face::Back)
+                    },
                     lightmap_exposure: 2.2,
-                    alpha_mode: if is_cutout {
+                    alpha_mode: if is_glass {
+                        AlphaMode::Blend
+                    } else if is_cutout {
                         AlphaMode::Mask(0.5)
                     } else {
                         AlphaMode::Opaque
@@ -217,7 +239,15 @@ fn setup_level(
         ));
     }
 
-    // 3. Spawn Spectator Camera with Color Grading pipeline
+    // 3. Spawn Tournament First-Person Player Camera (with Spectator mode support via 'V')
+    let (spawn_pos, spawn_yaw) = spawn_point.unwrap_or(([0.0, 0.0, 36.0], 0.0));
+    let bevy_spawn_pos = Vec3::new(
+        spawn_pos[0],
+        spawn_pos[2] + goldhub_physics::VEC_VIEW_STANDING,
+        -spawn_pos[1],
+    );
+    let bevy_yaw = spawn_yaw.to_radians();
+
     let mut initial_grading = bevy::render::view::ColorGrading::default();
     crate::video_settings::VideoSettings::default().apply_to_color_grading(&mut initial_grading);
 
@@ -231,7 +261,21 @@ fn setup_level(
         },
         bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
         initial_grading,
-        Transform::from_xyz(0.0, 300.0, 500.0).looking_at(Vec3::new(0.0, 100.0, 0.0), Vec3::Y),
-        SpectatorCamera::default(),
+        Transform::from_translation(bevy_spawn_pos).with_rotation(Quat::from_rotation_y(bevy_yaw)),
+        crate::player::PlayerController {
+            sim: goldhub_physics::FixedSubtickSimulator::new(spawn_pos, spawn_yaw),
+            pitch: 0.0,
+            yaw: bevy_yaw,
+            mouse_sensitivity: 0.002,
+            is_active: true,
+        },
+        SpectatorCamera {
+            move_speed: 600.0,
+            sprint_multiplier: 2.5,
+            look_sensitivity: 0.002,
+            pitch: 0.0,
+            yaw: bevy_yaw,
+            is_active: false,
+        },
     ));
 }

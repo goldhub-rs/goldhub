@@ -109,18 +109,27 @@ fn test_decode_real_skybox_tga() {
 }
 
 #[test]
-fn test_transpile_submodel_origin_shift() {
-    let path = Path::new("D:/Repo/CS16/hlmsl/test_maps/de_inferno.bsp");
+fn test_inspect_nuke_glass_doors_compiled() {
+    let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps/de_nuke.bsp");
     if !path.exists() {
         return;
     }
-
     let bytes = fs::read(path).unwrap();
-    let decoder = Bsp30Decoder;
-    let bsp = decoder.decode(&bytes).unwrap();
-    let mesh = compile_bsp_geometry(&bsp).unwrap();
+    let temp_cache = tempdir().unwrap();
+    let pipeline = AssetPipeline::new(temp_cache.path());
+    let extra_dirs = [Path::new("C:/Games/CS 1.6 GoldClient/cstrike")];
+    let (mesh, textures, _, _) = pipeline
+        .load_bsp_level_full_with_search_dirs(&bytes, &extra_dirs)
+        .expect("load de_nuke with glass");
 
-    assert!(mesh.vertex_count() > 0);
+    // Verify glass_med is present and has rendered submeshes
+    let glass_tex_id = textures.iter().position(|t| t.name == "glass_med");
+    assert!(glass_tex_id.is_some(), "de_nuke should have glass_med texture");
+    let glass_id = glass_tex_id.unwrap() as u32;
+
+    let glass_submeshes = mesh.submeshes.iter().filter(|s| s.material_id == glass_id).count();
+    assert!(glass_submeshes > 0, "de_nuke should have compiled glass submeshes");
+    println!("de_nuke compiled glass_med submeshes: {glass_submeshes}");
 }
 
 #[test]

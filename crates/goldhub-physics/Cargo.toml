@@ -1,0 +1,22 @@
+[package]
+name = "goldhub-physics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic CS 1.6 tournament-grade player physics engine (128 Hz sub-tick, ReGameDLL port)"
+
+[dependencies]
+goldhub-formats = { path = "../goldhub-formats" }
+goldhub-net = { path = "../goldhub-net" }
+bytemuck = { workspace = true }
+zerocopy = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
