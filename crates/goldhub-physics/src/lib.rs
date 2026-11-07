@@ -355,4 +355,107 @@ mod tests {
         );
         assert_eq!(state.view_height, VEC_VIEW_DUCKING);
     }
+
+    #[test]
+    fn test_ladder_climb_and_idle_and_jump_off() {
+        struct TestLadderWorld;
+
+        impl WorldTrace for TestLadderWorld {
+            fn trace_player_hull(
+                &self,
+                _start: [f32; 3],
+                end: [f32; 3],
+                _hull_idx: u32,
+            ) -> TraceResult {
+                TraceResult {
+                    startsolid: false,
+                    allsolid: false,
+                    fraction: 1.0,
+                    endpos: end,
+                    plane_normal: [0.0, 0.0, 1.0],
+                    plane_dist: 0.0,
+                    hit_entity: None,
+                }
+            }
+
+            fn test_player_position(&self, _pos: [f32; 3], _hull_idx: u32) -> Option<u32> {
+                None
+            }
+
+            fn find_ladder(
+                &self,
+                _origin: [f32; 3],
+                _hull_idx: u32,
+            ) -> Option<crate::trace::LadderContact> {
+                Some(crate::trace::LadderContact {
+                    normal: [0.0, 1.0, 0.0], // Ladder facing +Y
+                    center: [0.0, 0.0, 100.0],
+                    entity_id: 42,
+                })
+            }
+        }
+
+        let world = TestLadderWorld;
+        let vars = MoveVars::default();
+        let dt = 1.0 / 128.0;
+
+        let mut state = PlayerState {
+            origin: [0.0, 0.0, 50.0],
+            velocity: [0.0, 0.0, 0.0],
+            angles: [0.0, 270.0, 0.0], // Facing toward ladder (-Y)
+            ..Default::default()
+        };
+
+        // 1. Idle on ladder: player must not fall from gravity, velocity must remain 0
+        let idle_cmd = PlayerCmd {
+            forward_move: 0.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: 0,
+            view_angles: [0.0, 270.0, 0.0],
+        };
+        pm_player_move(&mut state, &idle_cmd, &vars, dt, &world);
+        assert!(state.on_ladder, "Player must be flagged on ladder");
+        assert_eq!(
+            state.velocity,
+            [0.0, 0.0, 0.0],
+            "Idle on ladder must have zero velocity"
+        );
+        assert_eq!(
+            state.origin[2], 50.0,
+            "Player must cling to ladder and not drop from gravity"
+        );
+
+        // 2. Press Forward (moving into ladder): climbs UP (+Z)
+        let climb_cmd = PlayerCmd {
+            forward_move: 200.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: IN_FORWARD,
+            view_angles: [0.0, 270.0, 0.0],
+        };
+        pm_player_move(&mut state, &climb_cmd, &vars, dt, &world);
+        assert!(state.on_ladder);
+        assert!(
+            state.velocity[2] > 150.0,
+            "Climbing ladder must produce upward velocity (got {})",
+            state.velocity[2]
+        );
+        assert!(state.origin[2] > 50.0, "Player must ascend on ladder");
+
+        // 3. Press Jump: player leaps off the ladder along ladder normal [0, 1, 0] with 270 u/s
+        let jump_cmd = PlayerCmd {
+            forward_move: 0.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: IN_JUMP,
+            view_angles: [0.0, 270.0, 0.0],
+        };
+        pm_player_move(&mut state, &jump_cmd, &vars, dt, &world);
+        assert!(!state.on_ladder, "Jumping must dismount player from ladder");
+        assert_eq!(
+            state.velocity[1], 270.0,
+            "Jump must propel along ladder normal with 270 u/s"
+        );
+    }
 }

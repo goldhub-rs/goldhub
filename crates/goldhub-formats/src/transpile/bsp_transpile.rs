@@ -149,7 +149,7 @@ fn build_lightmap_atlas(
 pub struct EntityMetadata {
     pub invisible_faces: std::collections::HashSet<usize>,
     pub face_origins: std::collections::HashMap<usize, [f32; 3]>,
-    pub face_render_props: std::collections::HashMap<usize, (u32, u8)>,
+    pub face_render_props: std::collections::HashMap<usize, (u32, u8, [u8; 3])>,
 }
 
 fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
@@ -163,6 +163,7 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
         let mut model_idx = None;
         let mut rendermode = 0u32;
         let mut renderamt = 0u32;
+        let mut rendercolor = [0u8, 0u8, 0u8];
         let mut is_trigger = false;
         let mut origin = None;
 
@@ -180,6 +181,16 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
             } else if trimmed.starts_with("\"renderamt\"") {
                 if let Some(a_str) = trimmed.split('"').nth(3) {
                     renderamt = a_str.parse::<u32>().unwrap_or(0);
+                }
+            } else if trimmed.starts_with("\"rendercolor\"") {
+                if let Some(c_str) = trimmed.split('"').nth(3) {
+                    let mut parts = c_str.split_whitespace();
+                    if let (Some(r), Some(g), Some(b)) = (parts.next(), parts.next(), parts.next())
+                        && let (Ok(ru), Ok(gu), Ok(bu)) =
+                            (r.parse::<u8>(), g.parse::<u8>(), b.parse::<u8>())
+                    {
+                        rendercolor = [ru, gu, bu];
+                    }
                 }
             } else if trimmed.starts_with("\"origin\"") {
                 if let Some(o_str) = trimmed.split('"').nth(3) {
@@ -215,7 +226,9 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
             } else {
                 let amt_u8 = renderamt.min(255) as u8;
                 for f in first..first + num {
-                    metadata.face_render_props.insert(f, (rendermode, amt_u8));
+                    metadata
+                        .face_render_props
+                        .insert(f, (rendermode, amt_u8, rendercolor));
                 }
             }
 
@@ -264,11 +277,11 @@ pub fn compile_bsp_geometry_and_lightmap(
             continue;
         }
 
-        let (render_mode, render_amt) = metadata
+        let (render_mode, render_amt, render_color) = metadata
             .face_render_props
             .get(&face_idx)
             .copied()
-            .unwrap_or((0, 255));
+            .unwrap_or((0, 255, [0, 0, 0]));
 
         let origin_offset = metadata
             .face_origins
@@ -364,6 +377,7 @@ pub fn compile_bsp_geometry_and_lightmap(
             material_id: tex_id,
             render_mode,
             render_amt,
+            render_color,
         });
     }
 
@@ -390,7 +404,7 @@ pub fn compile_bsp_geometry_with_atlas(
 
     for (face_idx, face) in bsp.faces.iter().enumerate() {
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
-        let (render_mode, render_amt) = (0, 255);
+        let (render_mode, render_amt, render_color) = (0, 255, [0, 0, 0]);
 
         let face_positions = collect_face_positions(face, bsp);
         if face_positions.len() < 3 {
@@ -453,6 +467,7 @@ pub fn compile_bsp_geometry_with_atlas(
             material_id: tex_id,
             render_mode,
             render_amt,
+            render_color,
         });
     }
 

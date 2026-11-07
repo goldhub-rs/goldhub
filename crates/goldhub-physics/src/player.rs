@@ -55,6 +55,8 @@ pub struct PlayerState {
     pub step_sound_time_ms: f32,
     /// Downward vertical velocity prior to landing (for falling damage / sound).
     pub fall_velocity: f32,
+    /// True if player is actively mounted on a ladder (`g_onladder`).
+    pub on_ladder: bool,
     /// Previous tick's button state for edge-detection (jump/duck triggers).
     pub old_buttons: u32,
     /// True if the player is dead and physics simulation should halt.
@@ -75,6 +77,7 @@ impl Default for PlayerState {
             jump_penalty_ms: 0.0,
             step_sound_time_ms: 0.0,
             fall_velocity: 0.0,
+            on_ladder: false,
             old_buttons: 0,
             dead: false,
         }

@@ -7,8 +7,9 @@
 
 use crate::constants::MoveVars;
 use crate::constants::{
-    BUNNYJUMP_MAX_SPEED_FACTOR, HULL_STANDING, IN_DUCK, IN_JUMP, IN_SPEED, JUMP_IMPULSE,
-    STOP_EPSILON, TIME_TO_DUCK, VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
+    BUNNYJUMP_MAX_SPEED_FACTOR, HULL_STANDING, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT,
+    IN_MOVERIGHT, IN_SPEED, JUMP_IMPULSE, STOP_EPSILON, TIME_TO_DUCK, VEC_VIEW_DUCKING,
+    VEC_VIEW_STANDING,
 };
 use crate::player::{PlayerCmd, PlayerState};
 use crate::trace::WorldTrace;
@@ -640,6 +641,119 @@ pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
     pm_categorize_position(state, world);
 }
 
+/// Canonical ladder movement physics (ReGameDLL `PM_LadderMove`).
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub fn pm_ladder_move(
+    state: &mut PlayerState,
+    cmd: &PlayerCmd,
+    vars: &MoveVars,
+    ladder: &crate::trace::LadderContact,
+    forward: [f32; 3],
+    right: [f32; 3],
+    dt: f32,
+    world: &impl WorldTrace,
+) {
+    // 1. Check if standing on solid ground at foot level
+    let floor_point = [state.origin[0], state.origin[1], state.origin[2] - 2.0];
+    let floor_tr = world.trace_player_hull(state.origin, floor_point, state.active_hull());
+    let on_floor = floor_tr.fraction < 1.0 && floor_tr.plane_normal[2] >= 0.7;
+
+    // 2. Jumping off the ladder: pushes directly away along the ladder normal
+    if (cmd.buttons & IN_JUMP) != 0 {
+        state.on_ladder = false;
+        state.velocity = [
+            ladder.normal[0] * 270.0,
+            ladder.normal[1] * 270.0,
+            ladder.normal[2] * 270.0,
+        ];
+        return;
+    }
+
+    // 3. Movement speed scaling on ladder (max 200 u/s)
+    let mut climb_speed = 200.0f32;
+    if climb_speed > vars.maxspeed {
+        climb_speed = vars.maxspeed;
+    }
+
+    let is_duck_active = (cmd.buttons & IN_DUCK) != 0 || state.in_duck || state.is_ducking;
+    if is_duck_active {
+        climb_speed *= vars.ducking_speed_multiplier;
+    }
+    if (cmd.buttons & IN_SPEED) != 0 {
+        climb_speed *= vars.walking_speed_multiplier;
+    }
+
+    let mut forward_impulse = 0.0f32;
+    let mut right_impulse = 0.0f32;
+
+    if (cmd.buttons & IN_FORWARD) != 0 || cmd.forward_move > 0.0 {
+        forward_impulse += climb_speed;
+    }
+    if (cmd.buttons & IN_BACK) != 0 || cmd.forward_move < 0.0 {
+        forward_impulse -= climb_speed;
+    }
+    if (cmd.buttons & IN_MOVERIGHT) != 0 || cmd.side_move > 0.0 {
+        right_impulse += climb_speed;
+    }
+    if (cmd.buttons & IN_MOVELEFT) != 0 || cmd.side_move < 0.0 {
+        right_impulse -= climb_speed;
+    }
+
+    if forward_impulse != 0.0 || right_impulse != 0.0 {
+        // Desired velocity in view direction
+        let vel = [
+            forward[0] * forward_impulse + right[0] * right_impulse,
+            forward[1] * forward_impulse + right[1] * right_impulse,
+            forward[2] * forward_impulse + right[2] * right_impulse,
+        ];
+
+        // Normal perpendicular to world up [0, 0, 1] and ladder normal
+        let up_ref = [0.0, 0.0, 1.0];
+        let (perp, _) = normalize(cross(up_ref, ladder.normal));
+
+        // Component into the face of the ladder
+        let normal_comp = dot(vel, ladder.normal);
+        let cross_vel = [
+            ladder.normal[0] * normal_comp,
+            ladder.normal[1] * normal_comp,
+            ladder.normal[2] * normal_comp,
+        ];
+        let lateral = [
+            vel[0] - cross_vel[0],
+            vel[1] - cross_vel[1],
+            vel[2] - cross_vel[2],
+        ];
+
+        // Turn velocity into the ladder into vertical velocity roughly perpendicular to ladder
+        let ladder_up = cross(ladder.normal, perp);
+
+        state.velocity = [
+            lateral[0] - normal_comp * ladder_up[0],
+            lateral[1] - normal_comp * ladder_up[1],
+            lateral[2] - normal_comp * ladder_up[2],
+        ];
+
+        // On ground moving away from the ladder
+        if on_floor && normal_comp > 0.0 {
+            state.velocity[0] += ladder.normal[0] * 200.0;
+            state.velocity[1] += ladder.normal[1] * 200.0;
+            state.velocity[2] += ladder.normal[2] * 200.0;
+        }
+    } else {
+        state.velocity = [0.0, 0.0, 0.0];
+    }
+
+    // Fly move along ladder surface without applying gravity
+    let active_hull = state.active_hull();
+    pm_fly_move(
+        &mut state.origin,
+        &mut state.velocity,
+        active_hull,
+        dt,
+        world,
+    );
+}
+
 /// Master single-tick player physics update (128 Hz sub-tick step, ReGameDLL standard).
 pub fn pm_player_move(
     state: &mut PlayerState,
@@ -668,7 +782,20 @@ pub fn pm_player_move(
     state.angles = cmd.view_angles;
     let (forward, right, _up) = angle_vectors(state.angles);
 
-    // 3. Ground detection
+    // 3. Ladder detection
+    let ladder_contact = world.find_ladder(state.origin, state.active_hull());
+    if let Some(ladder) = ladder_contact {
+        state.on_ladder = true;
+        state.on_ground = false;
+        pm_duck(state, cmd, vars, dt, world);
+        pm_ladder_move(state, cmd, vars, &ladder, forward, right, dt, world);
+        state.old_buttons = cmd.buttons;
+        return;
+    }
+
+    state.on_ladder = false;
+
+    // 4. Ground detection
     pm_categorize_position(state, world);
 
     if !state.on_ground {

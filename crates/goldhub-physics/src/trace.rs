@@ -66,6 +66,17 @@ pub fn player_hull_bounds(hull_idx: u32) -> ([f32; 3], [f32; 3]) {
     }
 }
 
+/// Contact information when player intersects a ladder entity (`func_ladder`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LadderContact {
+    /// Outward facing surface normal of the ladder pointing toward the player.
+    pub normal: [f32; 3],
+    /// Geometric center of the ladder brush.
+    pub center: [f32; 3],
+    /// Entity ID of the ladder.
+    pub entity_id: u32,
+}
+
 /// Abstract spatial query provider for player movement hulls.
 pub trait WorldTrace {
     /// Traces an AABB hull from `start` to `end` against the world and all active solid brush entities.
@@ -74,6 +85,11 @@ pub trait WorldTrace {
     /// Tests whether the designated player hull intersects any solid world or brush geometry at `pos`.
     /// Returns `Some(hit_entity)` if inside solid (0 for worldspawn, entity_id for brush entity), or `None` if free.
     fn test_player_position(&self, pos: [f32; 3], hull_idx: u32) -> Option<u32>;
+
+    /// Probes for contact with a ladder entity (`func_ladder`) intersecting the player hull.
+    fn find_ladder(&self, _origin: [f32; 3], _hull_idx: u32) -> Option<LadderContact> {
+        None
+    }
 }
 
 /// Hardware-accelerated zero-copy BSP collision trace engine.
@@ -480,6 +496,146 @@ impl WorldTrace for BspWorldCollision<'_> {
         }
 
         trace
+    }
+
+    #[allow(clippy::many_single_char_names, clippy::too_many_lines)]
+    fn find_ladder(&self, origin: [f32; 3], hull_idx: u32) -> Option<LadderContact> {
+        let (hull_mins, hull_maxs) = player_hull_bounds(hull_idx);
+
+        let world_hull = self
+            .model
+            .hulls
+            .iter()
+            .find(|h| h.hull_index == hull_idx)
+            .or_else(|| self.model.hulls.first())?;
+
+        for ent in &self.model.brush_entities {
+            if ent.classname != "func_ladder" {
+                continue;
+            }
+
+            // Quick AABB overlap with expanded player hull
+            let exp_min = [
+                ent.mins[0] - hull_maxs[0],
+                ent.mins[1] - hull_maxs[1],
+                ent.mins[2] - hull_maxs[2],
+            ];
+            let exp_max = [
+                ent.maxs[0] - hull_mins[0],
+                ent.maxs[1] - hull_mins[1],
+                ent.maxs[2] - hull_mins[2],
+            ];
+
+            if origin[0] < exp_min[0]
+                || origin[0] > exp_max[0]
+                || origin[1] < exp_min[1]
+                || origin[1] > exp_max[1]
+                || origin[2] < exp_min[2]
+                || origin[2] > exp_max[2]
+            {
+                continue;
+            }
+
+            let root_node = ent.headnodes.get(hull_idx as usize).copied().unwrap_or(-1);
+            if root_node == i32::from(CONTENTS_EMPTY) {
+                continue;
+            }
+
+            let mut local_origin = [
+                origin[0] - ent.origin[0],
+                origin[1] - ent.origin[1],
+                origin[2] - ent.origin[2],
+            ];
+
+            let rotated = ent.angles[0] != 0.0 || ent.angles[1] != 0.0 || ent.angles[2] != 0.0;
+            let (forward, right, up) = if rotated {
+                let (f, r, u) = crate::movement::angle_vectors(ent.angles);
+                let p = local_origin;
+                local_origin = [dot(f, p), -dot(r, p), dot(u, p)];
+                (f, r, u)
+            } else {
+                ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+            };
+
+            let contents = if root_node < 0 {
+                root_node as i16
+            } else {
+                self.hull_point_contents(world_hull, root_node, local_origin)
+            };
+
+            if contents != CONTENTS_EMPTY {
+                let ladder_center = [
+                    f32::midpoint(ent.mins[0], ent.maxs[0]),
+                    f32::midpoint(ent.mins[1], ent.maxs[1]),
+                    f32::midpoint(ent.mins[2], ent.maxs[2]),
+                ];
+
+                let mut local_center = [
+                    ladder_center[0] - ent.origin[0],
+                    ladder_center[1] - ent.origin[1],
+                    ladder_center[2] - ent.origin[2],
+                ];
+                if rotated {
+                    let c = local_center;
+                    local_center = [dot(forward, c), -dot(right, c), dot(up, c)];
+                }
+
+                let mut sub_trace = TraceResult {
+                    startsolid: false,
+                    allsolid: true,
+                    fraction: 1.0,
+                    endpos: local_center,
+                    plane_normal: [0.0, 0.0, 1.0],
+                    plane_dist: 0.0,
+                    hit_entity: Some(ent.entity_id),
+                };
+
+                if root_node >= 0 {
+                    self.recursive_hull_check(
+                        world_hull,
+                        root_node,
+                        0.0,
+                        1.0,
+                        local_origin,
+                        local_center,
+                        &mut sub_trace,
+                    );
+                }
+
+                let normal = if sub_trace.fraction < 1.0 {
+                    if rotated {
+                        let n = sub_trace.plane_normal;
+                        [
+                            forward[0] * n[0] - right[0] * n[1] + up[0] * n[2],
+                            forward[1] * n[0] - right[1] * n[1] + up[1] * n[2],
+                            forward[2] * n[0] - right[2] * n[1] + up[2] * n[2],
+                        ]
+                    } else {
+                        sub_trace.plane_normal
+                    }
+                } else {
+                    let diff = [
+                        origin[0] - ladder_center[0],
+                        origin[1] - ladder_center[1],
+                        0.0,
+                    ];
+                    let len = diff[0].hypot(diff[1]);
+                    if len > 0.001 {
+                        [diff[0] / len, diff[1] / len, 0.0]
+                    } else {
+                        [0.0, 1.0, 0.0]
+                    }
+                };
+
+                return Some(LadderContact {
+                    normal,
+                    center: ladder_center,
+                    entity_id: ent.entity_id,
+                });
+            }
+        }
+
+        None
     }
 }
 

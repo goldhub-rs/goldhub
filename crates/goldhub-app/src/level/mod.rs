@@ -163,15 +163,20 @@ fn setup_level(
                 texture_cutout.insert(idx as u32, is_cutout);
             }
 
-            // Material cache keyed by (material_id, render_mode, render_amt)
-            let mut material_cache: HashMap<(u32, u32, u8), Handle<StandardMaterial>> =
+            // Material cache keyed by (material_id, render_mode, render_amt, render_color)
+            let mut material_cache: HashMap<(u32, u32, u8, [u8; 3]), Handle<StandardMaterial>> =
                 HashMap::new();
 
             // 3. Spawn partitioned submeshes by material & render attributes with baked Lightmap component
             let partitioned = to_bevy_submeshes(&mesh_buffer);
             for part in partitioned {
                 let mesh_handle = meshes.add(part.mesh);
-                let key = (part.material_id, part.render_mode, part.render_amt);
+                let key = (
+                    part.material_id,
+                    part.render_mode,
+                    part.render_amt,
+                    part.render_color,
+                );
 
                 let mat_handle = material_cache.entry(key).or_insert_with(|| {
                     let img_handle = texture_images.get(&part.material_id).cloned();
@@ -181,13 +186,25 @@ fn setup_level(
                         .unwrap_or(false);
 
                     if part.render_mode == 2 {
-                        // GoldSrc rendermode 2 (kRenderTransTexture) with authentic renderamt alpha
+                        // GoldSrc rendermode 2 (kRenderTransTexture) with authentic renderamt alpha & rendercolor tinting
                         let alpha = f32::from(part.render_amt) / 255.0;
+                        let base_col = if part.render_color == [0, 0, 0] {
+                            // If rendercolor is not specified (0, 0, 0), use neutral white modulation with glass alpha
+                            Color::srgba(1.0, 1.0, 1.0, alpha)
+                        } else {
+                            Color::srgba(
+                                f32::from(part.render_color[0]) / 255.0,
+                                f32::from(part.render_color[1]) / 255.0,
+                                f32::from(part.render_color[2]) / 255.0,
+                                alpha,
+                            )
+                        };
+
                         materials.add(StandardMaterial {
-                            base_color: Color::srgba(1.0, 1.0, 1.0, alpha),
+                            base_color: base_col,
                             base_color_texture: img_handle,
-                            perceptual_roughness: 1.0,
-                            reflectance: 0.0,
+                            perceptual_roughness: 0.15,
+                            reflectance: 0.4,
                             cull_mode: None,
                             double_sided: true,
                             alpha_mode: AlphaMode::Blend,
