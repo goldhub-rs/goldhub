@@ -19,12 +19,24 @@ pub fn compile_bsp_geometry_submeshes(
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
 
     for (face_idx, face) in bsp.faces.iter().enumerate() {
+        let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
+
+        // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN)
+        if let Some(tex) = textures.get(tex_id as usize) {
+            let tex_lower = tex.name.to_ascii_lowercase();
+            if tex_lower == "aaatrigger"
+                || tex_lower == "clip"
+                || tex_lower == "origin"
+                || tex_lower == "{invisible"
+            {
+                continue;
+            }
+        }
+
         let face_positions = collect_face_positions(face, bsp);
         if face_positions.len() < 3 {
             continue;
         }
-
-        let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
         let normal = compute_face_normal(&face_positions);
         let tangent = [s_vec[0], s_vec[1], s_vec[2], 1.0];
 
@@ -98,12 +110,12 @@ pub fn compile_bsp_geometry_with_atlas(
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
 
     for (face_idx, face) in bsp.faces.iter().enumerate() {
+        let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
+
         let face_positions = collect_face_positions(face, bsp);
         if face_positions.len() < 3 {
             continue;
         }
-
-        let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
         let normal = compute_face_normal(&face_positions);
         let tangent = [s_vec[0], s_vec[1], s_vec[2], 1.0];
 
