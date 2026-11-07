@@ -39,6 +39,8 @@ pub struct SubMesh {
     pub index_start: u32,
     pub index_count: u32,
     pub material_id: u32,
+    pub render_mode: u32,
+    pub render_amt: u8,
 }
 
 /// Contiguous canonical mesh container ready for direct DMA upload to GPU buffers.

@@ -104,7 +104,8 @@ fn setup_level(
             let lm_handle = images.add(lm_img);
 
             // 2. Create native GPU Images for each diffuse texture with Repeating wrap sampler
-            let mut texture_materials: HashMap<u32, Handle<StandardMaterial>> = HashMap::new();
+            let mut texture_images: HashMap<u32, Handle<Image>> = HashMap::new();
+            let mut texture_cutout: HashMap<u32, bool> = HashMap::new();
 
             for (idx, tex_desc) in textures.iter().enumerate() {
                 let base_data = tex_desc.mips.first().map_or(&[][..], |m| m.data.as_slice());
@@ -120,30 +121,36 @@ fn setup_level(
                         (base_data.to_vec(), 1)
                     };
 
-                let mut img = Image::new(
-                    bevy::render::render_resource::Extent3d {
-                        width: tex_desc.width.max(1),
-                        height: tex_desc.height.max(1),
-                        depth_or_array_layers: 1,
+                let img = Image {
+                    data: mip_data,
+                    texture_descriptor: bevy::render::render_resource::TextureDescriptor {
+                        label: None,
+                        size: bevy::render::render_resource::Extent3d {
+                            width: tex_desc.width.max(1),
+                            height: tex_desc.height.max(1),
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: mip_count,
+                        sample_count: 1,
+                        dimension: bevy::render::render_resource::TextureDimension::D2,
+                        format: bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                        usage: bevy::render::render_resource::TextureUsages::TEXTURE_BINDING
+                            | bevy::render::render_resource::TextureUsages::COPY_DST,
+                        view_formats: &[],
                     },
-                    bevy::render::render_resource::TextureDimension::D2,
-                    mip_data,
-                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
-                    bevy::render::render_asset::RenderAssetUsages::default(),
-                );
-                img.texture_descriptor.mip_level_count = mip_count;
-
-                // Authentic GoldSrc GL_LINEAR_MIPMAP_LINEAR (trilinear) + 16x Anisotropic Filtering
-                img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                    address_mode_u: ImageAddressMode::Repeat,
-                    address_mode_v: ImageAddressMode::Repeat,
-                    address_mode_w: ImageAddressMode::Repeat,
-                    mag_filter: bevy::image::ImageFilterMode::Linear,
-                    min_filter: bevy::image::ImageFilterMode::Linear,
-                    mipmap_filter: bevy::image::ImageFilterMode::Linear,
-                    anisotropy_clamp: 16,
-                    ..default()
-                });
+                    sampler: ImageSampler::Descriptor(ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::Repeat,
+                        address_mode_v: ImageAddressMode::Repeat,
+                        address_mode_w: ImageAddressMode::Repeat,
+                        mag_filter: bevy::image::ImageFilterMode::Linear,
+                        min_filter: bevy::image::ImageFilterMode::Linear,
+                        mipmap_filter: bevy::image::ImageFilterMode::Linear,
+                        anisotropy_clamp: 16,
+                        ..default()
+                    }),
+                    texture_view_descriptor: None,
+                    asset_usage: bevy::render::render_asset::RenderAssetUsages::default(),
+                };
 
                 let img_handle = images.add(img);
                 let is_cutout = tex_desc.name.starts_with('{')
@@ -152,58 +159,70 @@ fn setup_level(
                         .first()
                         .is_some_and(|m| m.data.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
 
-                let is_glass = tex_desc.name.to_ascii_lowercase().contains("glass");
-
-                let mat_handle = materials.add(StandardMaterial {
-                    base_color: if is_glass {
-                        Color::srgba(1.0, 1.0, 1.0, 0.45)
-                    } else {
-                        Color::WHITE
-                    },
-                    base_color_texture: Some(img_handle),
-                    perceptual_roughness: if is_glass { 0.1 } else { 0.95 },
-                    reflectance: if is_glass { 0.5 } else { 0.02 },
-                    cull_mode: if is_glass {
-                        None
-                    } else {
-                        Some(bevy::render::render_resource::Face::Back)
-                    },
-                    lightmap_exposure: 2.2,
-                    alpha_mode: if is_glass {
-                        AlphaMode::Blend
-                    } else if is_cutout {
-                        AlphaMode::Mask(0.5)
-                    } else {
-                        AlphaMode::Opaque
-                    },
-                    ..default()
-                });
-
-                texture_materials.insert(idx as u32, mat_handle);
+                texture_images.insert(idx as u32, img_handle);
+                texture_cutout.insert(idx as u32, is_cutout);
             }
 
-            // Fallback material for textures without diffuse image
-            let fallback_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.6, 0.6, 0.6),
-                perceptual_roughness: 0.95,
-                reflectance: 0.02,
-                lightmap_exposure: 2.2,
-                cull_mode: Some(bevy::render::render_resource::Face::Back),
-                ..default()
-            });
+            // Material cache keyed by (material_id, render_mode, render_amt)
+            let mut material_cache: HashMap<(u32, u32, u8), Handle<StandardMaterial>> =
+                HashMap::new();
 
-            // 3. Spawn partitioned submeshes by material_id with baked Lightmap component
+            // 3. Spawn partitioned submeshes by material & render attributes with baked Lightmap component
             let partitioned = to_bevy_submeshes(&mesh_buffer);
             for part in partitioned {
                 let mesh_handle = meshes.add(part.mesh);
-                let mat_handle = texture_materials
-                    .get(&part.material_id)
-                    .cloned()
-                    .unwrap_or_else(|| fallback_mat.clone());
+                let key = (part.material_id, part.render_mode, part.render_amt);
+
+                let mat_handle = material_cache.entry(key).or_insert_with(|| {
+                    let img_handle = texture_images.get(&part.material_id).cloned();
+                    let is_cutout = texture_cutout
+                        .get(&part.material_id)
+                        .copied()
+                        .unwrap_or(false);
+
+                    if part.render_mode == 2 {
+                        // GoldSrc rendermode 2 (kRenderTransTexture) with authentic renderamt alpha
+                        let alpha = f32::from(part.render_amt) / 255.0;
+                        materials.add(StandardMaterial {
+                            base_color: Color::srgba(1.0, 1.0, 1.0, alpha),
+                            base_color_texture: img_handle,
+                            perceptual_roughness: 1.0,
+                            reflectance: 0.0,
+                            cull_mode: None,
+                            double_sided: true,
+                            alpha_mode: AlphaMode::Blend,
+                            lightmap_exposure: 2.2,
+                            ..default()
+                        })
+                    } else if is_cutout {
+                        materials.add(StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: img_handle,
+                            perceptual_roughness: 0.95,
+                            reflectance: 0.02,
+                            cull_mode: None,
+                            double_sided: true,
+                            alpha_mode: AlphaMode::Mask(0.5),
+                            lightmap_exposure: 2.2,
+                            ..default()
+                        })
+                    } else {
+                        materials.add(StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: img_handle,
+                            perceptual_roughness: 0.95,
+                            reflectance: 0.02,
+                            cull_mode: Some(bevy::render::render_resource::Face::Back),
+                            alpha_mode: AlphaMode::Opaque,
+                            lightmap_exposure: 2.2,
+                            ..default()
+                        })
+                    }
+                });
 
                 commands.spawn((
                     Mesh3d(mesh_handle),
-                    MeshMaterial3d(mat_handle),
+                    MeshMaterial3d(mat_handle.clone()),
                     bevy::pbr::Lightmap {
                         image: lm_handle.clone(),
                         ..default()
@@ -239,14 +258,14 @@ fn setup_level(
         ));
     }
 
-    // 3. Spawn Tournament First-Person Player Camera (with Spectator mode support via 'V')
+    // 3. Spawn Tournament First-Person Player Camera (with Spectator mode support via 'M' / 'F3')
     let (spawn_pos, spawn_yaw) = spawn_point.unwrap_or(([0.0, 0.0, 36.0], 0.0));
     let bevy_spawn_pos = Vec3::new(
         spawn_pos[0],
         spawn_pos[2] + goldhub_physics::VEC_VIEW_STANDING,
         -spawn_pos[1],
     );
-    let bevy_yaw = spawn_yaw.to_radians();
+    let bevy_yaw = (spawn_yaw - 90.0).to_radians();
 
     let mut initial_grading = bevy::render::view::ColorGrading::default();
     crate::video_settings::VideoSettings::default().apply_to_color_grading(&mut initial_grading);

@@ -142,8 +142,9 @@ fn player_movement_system(
         }
 
         // GoldSrc angles: pitch in degrees [-89, 89], yaw in degrees [0, 360]
+        // Bevy camera forward (-Z) maps to GoldSrc +Y (yaw = 90 deg). GoldSrc yaw 0 deg is +X.
         let pitch_deg = player.pitch.to_degrees();
-        let yaw_deg = player.yaw.to_degrees().rem_euclid(360.0);
+        let yaw_deg = (player.yaw.to_degrees() + 90.0).rem_euclid(360.0);
 
         // 2. Keyboard Input mapping to PlayerCmd
         let mut forward_move = 0.0f32;
@@ -205,13 +206,13 @@ fn player_movement_system(
     }
 }
 
-/// Allows toggling between authentic Player movement and Spectator noclip camera with 'V'.
+/// Allows toggling between authentic Player movement and Spectator noclip camera with 'M' or 'F3'.
 fn controller_toggle_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<CameraControlMode>,
     mut query: Query<(&Transform, &mut PlayerController, &mut SpectatorCamera)>,
 ) {
-    if keyboard.just_pressed(KeyCode::KeyV) {
+    if keyboard.just_pressed(KeyCode::KeyM) || keyboard.just_pressed(KeyCode::F3) {
         let Ok((transform, mut player, mut spec)) = query.get_single_mut() else {
             return;
         };

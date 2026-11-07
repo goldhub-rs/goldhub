@@ -15,6 +15,41 @@ const SAMPLE_WAD_PATH: &str =
     "D:/Repo/GoldSrc.rs/references/regamedll/regamedll/extra/Test Maps/src/regamedll_zedit.wad";
 
 #[test]
+fn test_inspect_glass_med_texture() {
+    for wad_name in ["cstrike.wad", "halflife.wad", "nuke.wad", "cs_dust.wad"] {
+        let wad_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike").join(wad_name);
+        let wad_path = if wad_path.exists() {
+            wad_path
+        } else {
+            Path::new("C:/Games/CS 1.6 GoldClient/valve").join(wad_name)
+        };
+        if !wad_path.exists() {
+            continue;
+        }
+        let bytes = fs::read(&wad_path).unwrap();
+        let wad = Wad3Decoder.decode(&bytes).unwrap();
+        if let Some(entry) = wad.find_entry("glass_med") {
+            let tex = wad.unpack_miptex(entry).unwrap();
+            println!("Found in {}: glass_med: w={}, h={}, len={}", wad_name, tex.width, tex.height, tex.mips[0].data.len());
+            let data = &tex.mips[0].data;
+            let mut sum_r = 0u64;
+            let mut sum_g = 0u64;
+            let mut sum_b = 0u64;
+            let count = (data.len() / 4) as u64;
+            for chunk in data.as_chunks::<4>().0 {
+                sum_r += u64::from(chunk[0]);
+                sum_g += u64::from(chunk[1]);
+                sum_b += u64::from(chunk[2]);
+            }
+            println!("Average RGB: R={}, G={}, B={}", sum_r / count, sum_g / count, sum_b / count);
+            println!("First 5 pixels: {:?}", &data[..20]);
+            return;
+        }
+    }
+    println!("glass_med not found in tested WADs");
+}
+
+#[test]
 fn test_decode_real_wad3_archive() {
     let path = Path::new(SAMPLE_WAD_PATH);
     if !path.exists() {
@@ -198,7 +233,7 @@ fn test_inspect_de_nuke_and_cs_assault() {
             || n == "skip"
     };
 
-    for map_name in ["de_nuke.bsp", "cs_assault.bsp", "cs_italy.bsp"] {
+    for map_name in ["de_nuke.bsp", "cs_assault.bsp", "cs_italy.bsp", "de_inferno.bsp"] {
         let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps").join(map_name);
         if !path.exists() {
             continue;
@@ -220,6 +255,19 @@ fn test_inspect_de_nuke_and_cs_assault() {
         }
         let unresolved = unresolved_names.len();
         println!("{map_name}: unresolved non-tool textures = {unresolved_names:?}");
+        for t in &textures {
+            if t.name.starts_with('{') {
+                let first_mip = &t.mips[0].data;
+                let has_zero_alpha = first_mip.as_chunks::<4>().0.iter().any(|c| c[3] == 0);
+                let blue_count = first_mip
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|c| c[0] == 0 && c[1] == 0 && c[2] == 255)
+                    .count();
+                println!("  Cutout texture: {} (w={}, h={}, zero_alpha={}, blue_pixels={})", t.name, t.width, t.height, has_zero_alpha, blue_count);
+            }
+        }
 
         println!(
             "{map_name}: vertices = {}, submeshes = {}, textures = {}, sky = {sky:?}, unresolved = {unresolved}",

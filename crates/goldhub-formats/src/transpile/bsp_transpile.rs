@@ -145,23 +145,24 @@ fn build_lightmap_atlas(
 }
 
 /// Parses entities lump string to collect face ranges of invisible entities and model origin offsets.
-fn collect_entity_metadata(
-    bsp: &BspLevel<'_>,
-) -> (
-    std::collections::HashSet<usize>,
-    std::collections::HashMap<usize, [f32; 3]>,
-) {
-    let mut invis_faces = std::collections::HashSet::new();
-    let mut face_origins = std::collections::HashMap::new();
+#[derive(Debug, Default)]
+pub struct EntityMetadata {
+    pub invisible_faces: std::collections::HashSet<usize>,
+    pub face_origins: std::collections::HashMap<usize, [f32; 3]>,
+    pub face_render_props: std::collections::HashMap<usize, (u32, u8)>,
+}
+
+fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
+    let mut metadata = EntityMetadata::default();
 
     let Ok(entities_str) = std::str::from_utf8(bsp.entities) else {
-        return (invis_faces, face_origins);
+        return metadata;
     };
 
     for block in entities_str.split('}') {
         let mut model_idx = None;
         let mut rendermode = 0u32;
-        let mut renderamt = 255u32;
+        let mut renderamt = 0u32;
         let mut is_trigger = false;
         let mut origin = None;
 
@@ -178,7 +179,7 @@ fn collect_entity_metadata(
                 }
             } else if trimmed.starts_with("\"renderamt\"") {
                 if let Some(a_str) = trimmed.split('"').nth(3) {
-                    renderamt = a_str.parse::<u32>().unwrap_or(255);
+                    renderamt = a_str.parse::<u32>().unwrap_or(0);
                 }
             } else if trimmed.starts_with("\"origin\"") {
                 if let Some(o_str) = trimmed.split('"').nth(3) {
@@ -209,20 +210,25 @@ fn collect_entity_metadata(
             // In GoldSrc: only truly invisible triggers or rendermode 2 with renderamt == 0 are culled
             if is_trigger || (rendermode == 2 && renderamt == 0) {
                 for f in first..first + num {
-                    invis_faces.insert(f);
+                    metadata.invisible_faces.insert(f);
+                }
+            } else {
+                let amt_u8 = renderamt.min(255) as u8;
+                for f in first..first + num {
+                    metadata.face_render_props.insert(f, (rendermode, amt_u8));
                 }
             }
 
             // Brush entities with non-zero origin (e.g. func_door_rotating) store vertices locally
             if let Some(orig) = origin {
                 for f in first..first + num {
-                    face_origins.insert(f, orig);
+                    metadata.face_origins.insert(f, orig);
                 }
             }
         }
     }
 
-    (invis_faces, face_origins)
+    metadata
 }
 
 /// Compiles raw BSP30 level lumps into a contiguous, cache-line aligned Canonical `MeshBuffer`.
@@ -246,19 +252,26 @@ pub fn compile_bsp_geometry_and_lightmap(
     bsp: &BspLevel<'_>,
     textures: &[crate::ir::TextureDescriptor],
 ) -> Result<(MeshBuffer, LightmapAtlas), FormatError> {
-    let (invisible_faces, face_origins) = collect_entity_metadata(bsp);
-    let (atlas, face_uv_map) = build_lightmap_atlas(bsp, &invisible_faces, textures);
+    let metadata = collect_entity_metadata(bsp);
+    let (atlas, face_uv_map) = build_lightmap_atlas(bsp, &metadata.invisible_faces, textures);
 
     let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(bsp.faces.len() * 6);
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
 
     for (face_idx, face) in bsp.faces.iter().enumerate() {
-        if invisible_faces.contains(&face_idx) {
+        if metadata.invisible_faces.contains(&face_idx) {
             continue;
         }
 
-        let origin_offset = face_origins
+        let (render_mode, render_amt) = metadata
+            .face_render_props
+            .get(&face_idx)
+            .copied()
+            .unwrap_or((0, 255));
+
+        let origin_offset = metadata
+            .face_origins
             .get(&face_idx)
             .copied()
             .unwrap_or([0.0, 0.0, 0.0]);
@@ -349,6 +362,8 @@ pub fn compile_bsp_geometry_and_lightmap(
             index_start: submesh_start,
             index_count: submesh_count,
             material_id: tex_id,
+            render_mode,
+            render_amt,
         });
     }
 
@@ -375,6 +390,7 @@ pub fn compile_bsp_geometry_with_atlas(
 
     for (face_idx, face) in bsp.faces.iter().enumerate() {
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
+        let (render_mode, render_amt) = (0, 255);
 
         let face_positions = collect_face_positions(face, bsp);
         if face_positions.len() < 3 {
@@ -435,6 +451,8 @@ pub fn compile_bsp_geometry_with_atlas(
             index_start: submesh_start,
             index_count: submesh_count,
             material_id: tex_id,
+            render_mode,
+            render_amt,
         });
     }
 

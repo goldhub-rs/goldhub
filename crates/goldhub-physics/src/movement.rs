@@ -503,6 +503,15 @@ pub fn pm_jump(state: &mut PlayerState, _cmd: &PlayerCmd, vars: &MoveVars) {
     state.old_buttons |= IN_JUMP;
 }
 
+/// Evaluates Hermite cubic ease-in/ease-out spline interpolation (`PM_SplineFraction`).
+#[inline]
+#[must_use]
+pub fn pm_spline_fraction(value: f32, scale: f32) -> f32 {
+    let v = (value * scale).clamp(0.0, 1.0);
+    let v_sq = v * v;
+    3.0 * v_sq - 2.0 * v_sq * v
+}
+
 /// Manages ducking transitions and instant Double Duck / Duck Tap mechanics (`PM_Duck`).
 pub fn pm_duck(
     state: &mut PlayerState,
@@ -543,11 +552,18 @@ pub fn pm_duck(
                     pm_categorize_position(state, world);
                 }
             } else {
-                // Smooth camera duck transition
+                const F_MORE: f32 = 18.0;
+                // Smooth cubic spline duck transition matching ReGameDLL:
+                // View height interpolates from VEC_VIEW_STANDING (17.0) down to (VEC_VIEW_DUCKING - 18.0) = -6.0
+                // When duck finishes and origin[2] drops by 18 units, net camera delta is exactly zero!
                 let time = 1.0 - state.duck_time_ms / 1000.0;
-                let fraction = (time / TIME_TO_DUCK).clamp(0.0, 1.0);
+                let fraction = if time >= 0.0 {
+                    pm_spline_fraction(time, 1.0 / TIME_TO_DUCK)
+                } else {
+                    0.0
+                };
                 state.view_height =
-                    VEC_VIEW_DUCKING * fraction + VEC_VIEW_STANDING * (1.0 - fraction);
+                    (VEC_VIEW_DUCKING - F_MORE) * fraction + VEC_VIEW_STANDING * (1.0 - fraction);
             }
         }
     } else {
@@ -557,7 +573,11 @@ pub fn pm_duck(
 
 /// Attempts to stand up from a crouch (`PM_UnDuck`).
 pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
-    if !state.is_ducking && !state.in_duck {
+    if state.in_duck || !state.is_ducking {
+        state.is_ducking = false;
+        state.in_duck = false;
+        state.view_height = VEC_VIEW_STANDING;
+        state.duck_time_ms = 0.0;
         return;
     }
 

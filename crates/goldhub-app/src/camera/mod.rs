@@ -4,6 +4,8 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
+use crate::player::CameraControlMode;
+
 pub struct SpectatorCameraPlugin;
 
 impl Plugin for SpectatorCameraPlugin {
@@ -38,10 +40,15 @@ impl Default for SpectatorCamera {
 
 fn spectator_camera_movement(
     time: Res<Time>,
+    mode: Res<CameraControlMode>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut camera_query: Query<(&mut Transform, &mut SpectatorCamera)>,
 ) {
+    if *mode != CameraControlMode::Spectator {
+        return;
+    }
+
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
@@ -102,6 +109,7 @@ fn spectator_camera_movement(
 fn cursor_grab_system(
     mouse_button: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    mode: Res<CameraControlMode>,
     mut window_query: Query<&mut Window, With<PrimaryWindow>>,
     mut camera_query: Query<&mut SpectatorCamera>,
 ) {
@@ -112,8 +120,10 @@ fn cursor_grab_system(
     if mouse_button.just_pressed(MouseButton::Left) {
         window.cursor_options.grab_mode = CursorGrabMode::Locked;
         window.cursor_options.visible = false;
-        for mut cam in &mut camera_query {
-            cam.is_active = true;
+        if *mode == CameraControlMode::Spectator {
+            for mut cam in &mut camera_query {
+                cam.is_active = true;
+            }
         }
     }
 

@@ -35,6 +35,9 @@ pub struct BlobSubMesh {
     pub index_start: u32,
     pub index_count: u32,
     pub material_id: u32,
+    pub render_mode: u32,
+    pub render_amt: u8,
+    pub _padding: [u8; 3],
 }
 
 /// Decoder for pre-compiled, cache-line aligned native blobs.
@@ -128,6 +131,8 @@ impl<'a> AssetDecoder<'a, MeshBuffer> for RawBlobDecoder {
                             index_start: sm.index_start,
                             index_count: sm.index_count,
                             material_id: sm.material_id,
+                            render_mode: sm.render_mode,
+                            render_amt: sm.render_amt,
                         }
                     })
                     .collect()
@@ -174,6 +179,9 @@ pub fn encode_raw_blob(mesh: &MeshBuffer) -> Vec<u8> {
                 index_start: sm.index_start,
                 index_count: sm.index_count,
                 material_id: sm.material_id,
+                render_mode: sm.render_mode,
+                render_amt: sm.render_amt,
+                _padding: [0; 3],
             }
         })
         .collect();

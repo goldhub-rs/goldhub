@@ -35,18 +35,22 @@ pub fn to_bevy_mesh(mesh_buffer: &MeshBuffer) -> Mesh {
 #[derive(Debug)]
 pub struct PartitionedMesh {
     pub material_id: u32,
+    pub render_mode: u32,
+    pub render_amt: u8,
     pub mesh: Mesh,
 }
 
-/// Converts a Canonical Data IR `MeshBuffer` into partitioned Bevy `Mesh`es grouped by `material_id`.
+/// Converts a Canonical Data IR `MeshBuffer` into partitioned Bevy `Mesh`es grouped by `(material_id, render_mode, render_amt)`.
 pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
     use std::collections::HashMap;
 
-    // Group submesh index ranges by material_id
-    let mut material_groups: HashMap<u32, Vec<u32>> = HashMap::new();
+    // Group submesh index ranges by (material_id, render_mode, render_amt)
+    let mut material_groups: HashMap<(u32, u32, u8), Vec<u32>> = HashMap::new();
 
     for submesh in &mesh_buffer.submeshes {
-        let entry = material_groups.entry(submesh.material_id).or_default();
+        let entry = material_groups
+            .entry((submesh.material_id, submesh.render_mode, submesh.render_amt))
+            .or_default();
         let start = submesh.index_start as usize;
         let end = start + submesh.index_count as usize;
         if end <= mesh_buffer.indices.len() {
@@ -56,7 +60,7 @@ pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
 
     let mut result = Vec::with_capacity(material_groups.len());
 
-    for (mat_id, sub_indices) in material_groups {
+    for ((mat_id, r_mode, r_amt), sub_indices) in material_groups {
         if sub_indices.is_empty() {
             continue;
         }
@@ -98,6 +102,8 @@ pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
 
         result.push(PartitionedMesh {
             material_id: mat_id,
+            render_mode: r_mode,
+            render_amt: r_amt,
             mesh,
         });
     }
@@ -148,6 +154,8 @@ mod tests {
                 index_start: 0,
                 index_count: 3,
                 material_id: 1,
+                render_mode: 0,
+                render_amt: 255,
             }],
             aabb_min: [0.0, 0.0, 0.0],
             aabb_max: [1.0, 0.0, 1.0],
