@@ -61,11 +61,28 @@ impl AssetPipeline {
         &self,
         raw_bytes: &[u8],
     ) -> Result<(MeshBuffer, Vec<crate::ir::TextureDescriptor>), FormatError> {
+        let (mesh, textures, _) = self.load_bsp_level_with_lightmap(raw_bytes)?;
+        Ok((mesh, textures))
+    }
+
+    /// Ingests a BSP30 level, compiles geometry with packed Lightmap atlas and raw texture descriptors.
+    #[cfg(feature = "goldsrc")]
+    pub fn load_bsp_level_with_lightmap(
+        &self,
+        raw_bytes: &[u8],
+    ) -> Result<
+        (
+            MeshBuffer,
+            Vec<crate::ir::TextureDescriptor>,
+            crate::ir::LightmapAtlas,
+        ),
+        FormatError,
+    > {
         let decoder = Bsp30Decoder;
         let bsp = decoder.decode(raw_bytes)?;
         let textures = bsp.extract_embedded_textures();
-        let mesh = crate::transpile::compile_bsp_geometry_submeshes(&bsp, &textures)?;
+        let (mesh, atlas) = crate::transpile::compile_bsp_geometry_and_lightmap(&bsp, &textures)?;
 
-        Ok((mesh, textures))
+        Ok((mesh, textures, atlas))
     }
 }

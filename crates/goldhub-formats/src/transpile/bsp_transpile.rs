@@ -2,7 +2,147 @@
 
 use crate::codecs::legacy::bsp::{BspFace, BspLevel};
 use crate::error::FormatError;
+use crate::ir::lightmap::LightmapAtlas;
 use crate::ir::{MeshBuffer, SubMesh, Vertex};
+
+/// Metadata computed for a BSP face's lightmap block before packing into the global atlas.
+struct FaceLightmapInfo {
+    face_idx: usize,
+    s_min: f32,
+    t_min: f32,
+    w: u32,
+    h: u32,
+    light_offset: u32,
+}
+
+/// Face lightmap placement: (s_min, t_min, [atlas_x, atlas_y], [atlas_w, atlas_h])
+type FaceUvMapping = std::collections::HashMap<usize, (f32, f32, [f32; 2], [f32; 2])>;
+
+/// Computes the lightmap extents and allocates positions in a single RGBA8 Lightmap Atlas (2048px width).
+fn build_lightmap_atlas(
+    bsp: &BspLevel<'_>,
+    invisible_faces: &std::collections::HashSet<usize>,
+    textures: &[crate::ir::TextureDescriptor],
+) -> (LightmapAtlas, FaceUvMapping) {
+    let mut face_infos = Vec::new();
+
+    for (face_idx, face) in bsp.faces.iter().enumerate() {
+        if invisible_faces.contains(&face_idx) || face.lightmap_offset == u32::MAX {
+            continue;
+        }
+
+        let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
+
+        if let Some(tex) = textures.get(tex_id as usize) {
+            let tex_lower = tex.name.to_ascii_lowercase();
+            if tex_lower == "aaatrigger"
+                || tex_lower == "clip"
+                || tex_lower == "origin"
+                || tex_lower == "{invisible"
+                || tex_lower == "sky"
+            {
+                continue;
+            }
+        }
+
+        let face_positions = collect_face_positions(face, bsp);
+        if face_positions.len() < 3 {
+            continue;
+        }
+
+        let mut s_min = f32::MAX;
+        let mut s_max = f32::MIN;
+        let mut t_min = f32::MAX;
+        let mut t_max = f32::MIN;
+
+        for &pos in &face_positions {
+            let s = pos[0] * s_vec[0] + pos[1] * s_vec[1] + pos[2] * s_vec[2] + s_shift;
+            let t = pos[0] * t_vec[0] + pos[1] * t_vec[1] + pos[2] * t_vec[2] + t_shift;
+            s_min = s_min.min(s);
+            s_max = s_max.max(s);
+            t_min = t_min.min(t);
+            t_max = t_max.max(t);
+        }
+
+        let b_s_min = (s_min / 16.0).floor();
+        let b_s_max = (s_max / 16.0).ceil();
+        let b_t_min = (t_min / 16.0).floor();
+        let b_t_max = (t_max / 16.0).ceil();
+
+        let w = ((b_s_max - b_s_min) as i32 + 1).max(1) as u32;
+        let h = ((b_t_max - b_t_min) as i32 + 1).max(1) as u32;
+
+        face_infos.push(FaceLightmapInfo {
+            face_idx,
+            s_min: b_s_min * 16.0,
+            t_min: b_t_min * 16.0,
+            w,
+            h,
+            light_offset: face.lightmap_offset,
+        });
+    }
+
+    // Shelf packing: width = 2048, packed row by row
+    let atlas_width = 2048u32;
+    let mut current_x = 0u32;
+    let mut current_y = 0u32;
+    let mut row_h = 0u32;
+
+    // Face UV mapping: face_idx -> (s_min, t_min, [atlas_x, atlas_y], [atlas_w, atlas_h])
+    let mut face_uv_map = std::collections::HashMap::with_capacity(face_infos.len());
+    let mut placements = Vec::with_capacity(face_infos.len());
+
+    for info in &face_infos {
+        if current_x + info.w > atlas_width {
+            current_x = 0;
+            current_y += row_h;
+            row_h = 0;
+        }
+
+        placements.push((info, current_x, current_y));
+        row_h = row_h.max(info.h);
+        current_x += info.w;
+    }
+
+    let total_height = (current_y + row_h).max(1).next_power_of_two();
+    let mut atlas = LightmapAtlas::new(atlas_width, total_height);
+
+    for (info, x_pos, y_pos) in placements {
+        face_uv_map.insert(
+            info.face_idx,
+            (
+                info.s_min,
+                info.t_min,
+                [x_pos as f32, y_pos as f32],
+                [atlas_width as f32, total_height as f32],
+            ),
+        );
+
+        // Copy raw RGB luxels into the atlas RGBA8 buffer
+        let luxel_count = (info.w * info.h) as usize;
+        let src_start = info.light_offset as usize;
+        let src_end = src_start + luxel_count * 3;
+
+        if src_end <= bsp.lighting.len() {
+            let luxels = &bsp.lighting[src_start..src_end];
+            for ly in 0..info.h {
+                for lx in 0..info.w {
+                    let src_idx = ((ly * info.w + lx) * 3) as usize;
+                    let dst_idx = (((y_pos + ly) * atlas_width + (x_pos + lx)) * 4) as usize;
+
+                    if src_idx + 2 < luxels.len() && dst_idx + 3 < atlas.rgba_bytes.len() {
+                        atlas.rgba_bytes[dst_idx] = luxels[src_idx];
+                        atlas.rgba_bytes[dst_idx + 1] = luxels[src_idx + 1];
+                        atlas.rgba_bytes[dst_idx + 2] = luxels[src_idx + 2];
+                        atlas.rgba_bytes[dst_idx + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+
+    (atlas, face_uv_map)
+}
 
 /// Parses entities lump string to collect face ranges of invisible entities (triggers, collision walls).
 fn collect_invisible_face_ranges(bsp: &BspLevel<'_>) -> std::collections::HashSet<usize> {
@@ -56,7 +196,8 @@ fn collect_invisible_face_ranges(bsp: &BspLevel<'_>) -> std::collections::HashSe
 /// Compiles raw BSP30 level lumps into a contiguous, cache-line aligned Canonical `MeshBuffer`.
 pub fn compile_bsp_geometry(bsp: &BspLevel<'_>) -> Result<MeshBuffer, FormatError> {
     let textures = bsp.extract_embedded_textures();
-    compile_bsp_geometry_submeshes(bsp, &textures)
+    let (mesh, _) = compile_bsp_geometry_and_lightmap(bsp, &textures)?;
+    Ok(mesh)
 }
 
 /// Compiles raw BSP30 level into partitioned submeshes with unconstrained, repeating UV coordinates.
@@ -64,7 +205,18 @@ pub fn compile_bsp_geometry_submeshes(
     bsp: &BspLevel<'_>,
     textures: &[crate::ir::TextureDescriptor],
 ) -> Result<MeshBuffer, FormatError> {
+    let (mesh, _) = compile_bsp_geometry_and_lightmap(bsp, textures)?;
+    Ok(mesh)
+}
+
+/// Compiles raw BSP30 level geometry and generates the hardware-accelerated packed lightmap atlas.
+pub fn compile_bsp_geometry_and_lightmap(
+    bsp: &BspLevel<'_>,
+    textures: &[crate::ir::TextureDescriptor],
+) -> Result<(MeshBuffer, LightmapAtlas), FormatError> {
     let invisible_faces = collect_invisible_face_ranges(bsp);
+    let (atlas, face_uv_map) = build_lightmap_atlas(bsp, &invisible_faces, textures);
+
     let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(bsp.faces.len() * 6);
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
@@ -103,6 +255,9 @@ pub fn compile_bsp_geometry_submeshes(
             .get(tex_id as usize)
             .map_or((128.0, 128.0), |t| (t.width as f32, t.height as f32));
 
+        // Lightmap atlas mapping parameters for this face
+        let lm_info = face_uv_map.get(&face_idx);
+
         // Triangulate convex polygon fan: (0, 1, 2), (0, 2, 3), (0, 3, 4), ...
         for (i, &pos) in face_positions.iter().enumerate() {
             // Correct GoldSrc texture projection in world coordinates:
@@ -110,6 +265,18 @@ pub fn compile_bsp_geometry_submeshes(
                 ((pos[0] * s_vec[0] + pos[1] * s_vec[1] + pos[2] * s_vec[2]) + s_shift) / tex_w;
             let raw_v =
                 ((pos[0] * t_vec[0] + pos[1] * t_vec[1] + pos[2] * t_vec[2]) + t_shift) / tex_h;
+
+            // Correct GoldSrc lightmap UV calculation:
+            let uv1_lightmap =
+                if let Some(&(s_min, t_min, [atlas_x, atlas_y], [atlas_w, atlas_h])) = lm_info {
+                    let s = pos[0] * s_vec[0] + pos[1] * s_vec[1] + pos[2] * s_vec[2] + s_shift;
+                    let t = pos[0] * t_vec[0] + pos[1] * t_vec[1] + pos[2] * t_vec[2] + t_shift;
+                    let lm_u = (atlas_x + ((s - s_min) / 16.0) + 0.5) / atlas_w;
+                    let lm_v = (atlas_y + ((t - t_min) / 16.0) + 0.5) / atlas_h;
+                    [lm_u, lm_v]
+                } else {
+                    [0.0, 0.0]
+                };
 
             // Coordinate system transformation:
             // GoldSrc: X = Right, Y = Forward, Z = Up
@@ -123,7 +290,7 @@ pub fn compile_bsp_geometry_submeshes(
                 normal: bevy_normal,
                 tangent: bevy_tangent,
                 uv0: [raw_u, raw_v],
-                uv1_lightmap: [0.0, 0.0],
+                uv1_lightmap,
                 style_indices: face.styles,
                 style_weights: [255, 0, 0, 0],
             });
@@ -153,7 +320,7 @@ pub fn compile_bsp_geometry_submeshes(
     };
 
     mesh.recompute_bounds();
-    Ok(mesh)
+    Ok((mesh, atlas))
 }
 
 /// Compiles raw BSP30 level lumps with atlas-mapped UV coordinates (Legacy Fallback).

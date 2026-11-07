@@ -15,11 +15,17 @@ pub fn to_bevy_mesh(mesh_buffer: &MeshBuffer) -> Mesh {
     let normals: Vec<[f32; 3]> = mesh_buffer.vertices.iter().map(|v| v.normal).collect();
     let tangents: Vec<[f32; 4]> = mesh_buffer.vertices.iter().map(|v| v.tangent).collect();
     let uvs: Vec<[f32; 2]> = mesh_buffer.vertices.iter().map(|v| v.uv0).collect();
+    let uv1_lightmaps: Vec<[f32; 2]> = mesh_buffer
+        .vertices
+        .iter()
+        .map(|v| v.uv1_lightmap)
+        .collect();
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, tangents);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1_lightmaps);
     mesh.insert_indices(Indices::U32(mesh_buffer.indices.clone()));
 
     mesh
@@ -61,6 +67,7 @@ pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
         let mut sub_normals = Vec::new();
         let mut sub_tangents = Vec::new();
         let mut sub_uvs = Vec::new();
+        let mut sub_uv1_lightmaps = Vec::new();
         let mut new_indices = Vec::with_capacity(sub_indices.len());
 
         for &orig_idx in &sub_indices {
@@ -71,6 +78,7 @@ pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
                     sub_normals.push(v.normal);
                     sub_tangents.push(v.tangent);
                     sub_uvs.push(v.uv0);
+                    sub_uv1_lightmaps.push(v.uv1_lightmap);
                 }
                 new_idx
             });
@@ -85,6 +93,7 @@ pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, sub_normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, sub_tangents);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub_uvs);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, sub_uv1_lightmaps);
         mesh.insert_indices(Indices::U32(new_indices));
 
         result.push(PartitionedMesh {

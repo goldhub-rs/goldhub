@@ -1,28 +1,36 @@
 //! Canonical lightmap atlas representations and dynamic lightstyle bindings.
 
-/// Hardware-accelerated lightmap atlas backed by FP16 linear HDR texels.
+/// Hardware-accelerated lightmap atlas backed by RGBA8 texels.
 ///
-/// Designed as a 2D Texture Array (`Texture2DArray<R16G16B16A16_FLOAT>`) where each array slice
-/// corresponds to a dynamic lightstyle layer, eliminating CPU atlas rebuilds during animated light sequences.
+/// Designed as a 2D Texture where lightmaps from all BSP faces are packed tightly
+/// with shelf packing, ready for instant GPU upload and sampling in pixel shaders.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LightmapAtlas {
     pub width: u32,
     pub height: u32,
-    pub layers: u32,
-    /// Raw byte buffer holding FP16 RGBA data (each luxel is 4 * 2 = 8 bytes).
-    pub fp16_bytes: Vec<u8>,
+    /// Raw byte buffer holding RGBA8 data (each luxel is 4 bytes).
+    pub rgba_bytes: Vec<u8>,
 }
 
 impl LightmapAtlas {
-    /// Creates an empty lightmap atlas.
-    pub fn new(width: u32, height: u32, layers: u32) -> Self {
-        let size = (width as usize) * (height as usize) * (layers as usize) * 8;
+    /// Creates an empty lightmap atlas with default black (0, 0, 0, 255) pixels.
+    pub fn new(width: u32, height: u32) -> Self {
+        let size = (width as usize) * (height as usize) * 4;
+        let mut rgba_bytes = vec![0; size];
+        // Set alpha channel to 255 for all texels
+        for chunk in rgba_bytes.as_chunks_mut::<4>().0 {
+            chunk[3] = 255;
+        }
         Self {
             width,
             height,
-            layers,
-            fp16_bytes: vec![0; size],
+            rgba_bytes,
         }
+    }
+
+    /// Access raw RGBA8 bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.rgba_bytes
     }
 }
 

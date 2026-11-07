@@ -62,8 +62,32 @@ fn setup_level(
         && let Ok(raw_bytes) = fs::read(bsp_path)
     {
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
-        if let Ok((mesh_buffer, textures)) = pipeline.load_bsp_level_raw(&raw_bytes) {
-            // 1. Create native GPU Images for each texture with Repeating wrap sampler
+        if let Ok((mesh_buffer, textures, lightmap_atlas)) =
+            pipeline.load_bsp_level_with_lightmap(&raw_bytes)
+        {
+            // 1. Create native GPU Image for Lightmap Atlas
+            let mut lm_img = Image::new(
+                bevy::render::render_resource::Extent3d {
+                    width: lightmap_atlas.width,
+                    height: lightmap_atlas.height,
+                    depth_or_array_layers: 1,
+                },
+                bevy::render::render_resource::TextureDimension::D2,
+                lightmap_atlas.rgba_bytes,
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                bevy::render::render_asset::RenderAssetUsages::default(),
+            );
+            lm_img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                address_mode_u: ImageAddressMode::ClampToEdge,
+                address_mode_v: ImageAddressMode::ClampToEdge,
+                address_mode_w: ImageAddressMode::ClampToEdge,
+                mag_filter: bevy::image::ImageFilterMode::Linear,
+                min_filter: bevy::image::ImageFilterMode::Linear,
+                ..default()
+            });
+            let lm_handle = images.add(lm_img);
+
+            // 2. Create native GPU Images for each diffuse texture with Repeating wrap sampler
             let mut texture_materials: HashMap<u32, Handle<StandardMaterial>> = HashMap::new();
 
             for (idx, tex_desc) in textures.iter().enumerate() {
@@ -105,6 +129,7 @@ fn setup_level(
                     perceptual_roughness: 0.85,
                     reflectance: 0.15,
                     cull_mode: None,
+                    lightmap_exposure: 1.0,
                     alpha_mode: if is_cutout {
                         AlphaMode::Mask(0.5)
                     } else {
@@ -124,7 +149,7 @@ fn setup_level(
                 ..default()
             });
 
-            // 2. Spawn partitioned submeshes by material_id
+            // 3. Spawn partitioned submeshes by material_id with baked Lightmap component
             let partitioned = to_bevy_submeshes(&mesh_buffer);
             for part in partitioned {
                 let mesh_handle = meshes.add(part.mesh);
@@ -136,6 +161,10 @@ fn setup_level(
                 commands.spawn((
                     Mesh3d(mesh_handle),
                     MeshMaterial3d(mat_handle),
+                    bevy::pbr::Lightmap {
+                        image: lm_handle.clone(),
+                        ..default()
+                    },
                     Transform::from_xyz(0.0, 0.0, 0.0),
                 ));
             }
