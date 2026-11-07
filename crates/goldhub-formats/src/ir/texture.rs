@@ -59,7 +59,11 @@ impl TextureDescriptor {
 /// Generates a full mipmap chain down to 1x1 for an uncompressed 2D RGBA8 image using a 2x2 box filter.
 /// Returns concatenated bytes of all mip levels (including mip 0) and the total number of mip levels.
 #[must_use]
-#[allow(clippy::many_single_char_names)]
+#[allow(
+    clippy::many_single_char_names,
+    clippy::manual_checked_ops,
+    clippy::tuple_array_conversions
+)]
 pub fn generate_rgba8_mipmaps(width: u32, height: u32, base_rgba: &[u8]) -> (Vec<u8>, u32) {
     if width == 0 || height == 0 || base_rgba.len() != (width * height * 4) as usize {
         return (base_rgba.to_vec(), 1);
@@ -106,30 +110,36 @@ pub fn generate_rgba8_mipmaps(width: u32, height: u32, base_rgba: &[u8]) -> (Vec
                 let i01 = prev_offset + ((py1 * prev_w + px0) * 4) as usize;
                 let i11 = prev_offset + ((py1 * prev_w + px1) * 4) as usize;
 
-                let r = ((u32::from(output[i00])
-                    + u32::from(output[i10])
-                    + u32::from(output[i01])
-                    + u32::from(output[i11])
-                    + 2)
-                    >> 2) as u8;
-                let g = ((u32::from(output[i00 + 1])
-                    + u32::from(output[i10 + 1])
-                    + u32::from(output[i01 + 1])
-                    + u32::from(output[i11 + 1])
-                    + 2)
-                    >> 2) as u8;
-                let b = ((u32::from(output[i00 + 2])
-                    + u32::from(output[i10 + 2])
-                    + u32::from(output[i01 + 2])
-                    + u32::from(output[i11 + 2])
-                    + 2)
-                    >> 2) as u8;
-                let a = ((u32::from(output[i00 + 3])
-                    + u32::from(output[i10 + 3])
-                    + u32::from(output[i01 + 3])
-                    + u32::from(output[i11 + 3])
-                    + 2)
-                    >> 2) as u8;
+                let a00 = u32::from(output[i00 + 3]);
+                let a10 = u32::from(output[i10 + 3]);
+                let a01 = u32::from(output[i01 + 3]);
+                let a11 = u32::from(output[i11 + 3]);
+                let total_weight = a00 + a10 + a01 + a11;
+
+                let (r, g, b, a) = if total_weight == 0 {
+                    (0, 0, 0, 0)
+                } else {
+                    let r = ((u32::from(output[i00]) * a00
+                        + u32::from(output[i10]) * a10
+                        + u32::from(output[i01]) * a01
+                        + u32::from(output[i11]) * a11
+                        + (total_weight / 2))
+                        / total_weight) as u8;
+                    let g = ((u32::from(output[i00 + 1]) * a00
+                        + u32::from(output[i10 + 1]) * a10
+                        + u32::from(output[i01 + 1]) * a01
+                        + u32::from(output[i11 + 1]) * a11
+                        + (total_weight / 2))
+                        / total_weight) as u8;
+                    let b = ((u32::from(output[i00 + 2]) * a00
+                        + u32::from(output[i10 + 2]) * a10
+                        + u32::from(output[i01 + 2]) * a01
+                        + u32::from(output[i11 + 2]) * a11
+                        + (total_weight / 2))
+                        / total_weight) as u8;
+                    let a = ((total_weight + 2) >> 2) as u8;
+                    (r, g, b, a)
+                };
 
                 output.extend_from_slice(&[r, g, b, a]);
             }

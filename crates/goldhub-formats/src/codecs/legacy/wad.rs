@@ -113,16 +113,22 @@ impl<'a> WadArchive<'a> {
         let mut rgba = Vec::with_capacity(pixel_count * 4);
         for &idx in pixel_indices {
             let p_idx = (idx as usize) * 3;
-            let r = palette_slice[p_idx];
-            let g = palette_slice[p_idx + 1];
-            let b = palette_slice[p_idx + 2];
-            // 255 alpha (or 0 for blue transparent color if masked texture '{')
-            let is_transparent = header.name[0] == b'{' && idx == 255;
-            let a = if is_transparent { 0 } else { 255 };
-            rgba.push(r);
-            rgba.push(g);
-            rgba.push(b);
-            rgba.push(a);
+            // 255 alpha (or 0 for blue transparent color if masked texture '{' or last palette color is pure blue)
+            let is_transparent = (header.name[0] == b'{'
+                || (palette_slice[255 * 3] == 0
+                    && palette_slice[255 * 3 + 1] == 0
+                    && palette_slice[255 * 3 + 2] == 255))
+                && idx == 255;
+
+            if is_transparent {
+                // Zero out RGB and Alpha to prevent blue fringe bleeding
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                let r = palette_slice[p_idx];
+                let g = palette_slice[p_idx + 1];
+                let b = palette_slice[p_idx + 2];
+                rgba.extend_from_slice(&[r, g, b, 255]);
+            }
         }
 
         let name_len = header

@@ -299,15 +299,16 @@ impl BspLevel<'_> {
                     && palette[255 * 3 + 2] == 255);
             for &idx in pixel_indices {
                 let p_idx = (idx as usize) * 3;
-                let r = palette[p_idx];
-                let g = palette[p_idx + 1];
-                let b = palette[p_idx + 2];
                 let is_transparent = is_transparent_tex && idx == 255;
-                let a = if is_transparent { 0 } else { 255 };
-                rgba.push(r);
-                rgba.push(g);
-                rgba.push(b);
-                rgba.push(a);
+                if is_transparent {
+                    // Transparent pixels must be zeroed (RGB 0, Alpha 0) to avoid color bleeding during linear filtering and mipmapping
+                    rgba.extend_from_slice(&[0, 0, 0, 0]);
+                } else {
+                    let r = palette[p_idx];
+                    let g = palette[p_idx + 1];
+                    let b = palette[p_idx + 2];
+                    rgba.extend_from_slice(&[r, g, b, 255]);
+                }
             }
 
             descriptors.push(crate::ir::TextureDescriptor::new_2d(
