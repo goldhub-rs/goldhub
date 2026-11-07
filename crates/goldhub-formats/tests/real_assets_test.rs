@@ -91,3 +91,20 @@ fn test_decode_and_transpile_real_bsp30_level() {
     assert_eq!(warm_mesh.vertex_count(), mesh.vertex_count());
     assert_eq!(warm_mesh.index_count(), mesh.index_count());
 }
+
+
+#[test]
+fn test_decode_real_skybox_tga() {
+    let tga_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/gfx/env/greenup.tga");
+    if !tga_path.exists() {
+        eprintln!("Skipping test: greenup.tga not found");
+        return;
+    }
+
+    let bytes = fs::read(tga_path).expect("read sample tga");
+    let tga = goldhub_formats::codecs::legacy::decode_tga(&bytes).expect("decode tga");
+
+    assert_eq!(tga.width, 256);
+    assert_eq!(tga.height, 256);
+    assert_eq!(tga.rgba.len(), 256 * 256 * 4);
+}

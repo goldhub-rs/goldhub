@@ -320,4 +320,19 @@ impl BspLevel<'_> {
 
         descriptors
     }
+
+    /// Extracts the skybox name defined in the worldspawn entity (e.g. "green", "desert").
+    pub fn extract_sky_name(&self) -> Option<String> {
+        let entities_str = std::str::from_utf8(self.entities).ok()?;
+        for line in entities_str.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("\"skyname\"")
+                && let Some(val) = trimmed.split('"').nth(3)
+                && !val.trim().is_empty()
+            {
+                return Some(val.trim().to_string());
+            }
+        }
+        None
+    }
 }

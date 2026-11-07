@@ -65,6 +65,29 @@ impl AssetPipeline {
         Ok((mesh, textures))
     }
 
+    /// Ingests a BSP30 level, compiles geometry with packed Lightmap atlas, raw texture descriptors, and extracts skyname.
+    #[cfg(feature = "goldsrc")]
+    pub fn load_bsp_level_full(
+        &self,
+        raw_bytes: &[u8],
+    ) -> Result<
+        (
+            MeshBuffer,
+            Vec<crate::ir::TextureDescriptor>,
+            crate::ir::LightmapAtlas,
+            Option<String>,
+        ),
+        FormatError,
+    > {
+        let decoder = Bsp30Decoder;
+        let bsp = decoder.decode(raw_bytes)?;
+        let sky_name = bsp.extract_sky_name();
+        let textures = bsp.extract_embedded_textures();
+        let (mesh, atlas) = crate::transpile::compile_bsp_geometry_and_lightmap(&bsp, &textures)?;
+
+        Ok((mesh, textures, atlas, sky_name))
+    }
+
     /// Ingests a BSP30 level, compiles geometry with packed Lightmap atlas and raw texture descriptors.
     #[cfg(feature = "goldsrc")]
     pub fn load_bsp_level_with_lightmap(
@@ -78,11 +101,7 @@ impl AssetPipeline {
         ),
         FormatError,
     > {
-        let decoder = Bsp30Decoder;
-        let bsp = decoder.decode(raw_bytes)?;
-        let textures = bsp.extract_embedded_textures();
-        let (mesh, atlas) = crate::transpile::compile_bsp_geometry_and_lightmap(&bsp, &textures)?;
-
+        let (mesh, textures, atlas, _) = self.load_bsp_level_full(raw_bytes)?;
         Ok((mesh, textures, atlas))
     }
 }

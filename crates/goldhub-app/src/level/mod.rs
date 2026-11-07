@@ -11,6 +11,8 @@ use goldhub_formats::pipeline::AssetPipeline;
 use crate::camera::SpectatorCamera;
 use crate::mesh_bridge::to_bevy_submeshes;
 
+pub mod skybox;
+
 const SAMPLE_BSP_PATH: &str = "D:/Repo/CS16/hlmsl/test_maps/de_inferno.bsp";
 const FALLBACK_BSP_PATH: &str =
     "D:/Repo/GoldSrc.rs/references/regamedll/regamedll/extra/Test Maps/regamedll_test_map_v8.bsp";
@@ -20,6 +22,7 @@ pub struct LevelPlugin;
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_level);
+        app.add_systems(Update, skybox::update_skybox_position);
     }
 }
 
@@ -30,11 +33,21 @@ fn setup_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // 1. Illumination: Ambient Light tuned for GoldSrc PBR Lightmap balance
+    // 1. Illumination: Warm ambient & directional sun tuned for GoldSrc daytime lighting
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.95, 0.95, 1.0),
-        brightness: 750.0,
+        color: Color::srgb(1.0, 0.98, 0.94),
+        brightness: 1800.0,
     });
+
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.96, 0.88),
+            illuminance: 3200.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, -0.6, -0.8, 0.0)),
+    ));
 
     // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
     let cli_map = std::env::args().nth(1);
@@ -53,9 +66,13 @@ fn setup_level(
         && let Ok(raw_bytes) = fs::read(bsp_path)
     {
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
-        if let Ok((mesh_buffer, textures, lightmap_atlas)) =
-            pipeline.load_bsp_level_with_lightmap(&raw_bytes)
+        if let Ok((mesh_buffer, textures, lightmap_atlas, sky_name)) =
+            pipeline.load_bsp_level_full(&raw_bytes)
         {
+            // 0. Spawn GoldSrc 6-sided Skybox cube
+            let sky = sky_name.as_deref().unwrap_or("green");
+            skybox::spawn_skybox(&mut commands, &mut meshes, &mut materials, &mut images, sky);
+
             // 1. Create native GPU Image for Lightmap Atlas
             let mut lm_img = Image::new(
                 bevy::render::render_resource::Extent3d {
@@ -117,10 +134,10 @@ fn setup_level(
                 let mat_handle = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(img_handle),
-                    perceptual_roughness: 0.9,
-                    reflectance: 0.05,
+                    perceptual_roughness: 0.95,
+                    reflectance: 0.02,
                     cull_mode: None,
-                    lightmap_exposure: 2.2,
+                    lightmap_exposure: 3.6,
                     alpha_mode: if is_cutout {
                         AlphaMode::Mask(0.5)
                     } else {
@@ -135,9 +152,9 @@ fn setup_level(
             // Fallback material for textures without diffuse image
             let fallback_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.6, 0.6, 0.6),
-                perceptual_roughness: 0.9,
-                reflectance: 0.05,
-                lightmap_exposure: 2.2,
+                perceptual_roughness: 0.95,
+                reflectance: 0.02,
+                lightmap_exposure: 3.6,
                 cull_mode: None,
                 ..default()
             });
