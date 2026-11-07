@@ -53,12 +53,7 @@ impl FixedSubtickSimulator {
     ///
     /// Executes zero, one, or multiple fixed 128 Hz sub-ticks depending on accumulated time.
     #[allow(clippy::while_float)]
-    pub fn advance(
-        &mut self,
-        delta_seconds: f32,
-        cmd: &PlayerCmd,
-        world: &impl WorldTrace,
-    ) {
+    pub fn advance(&mut self, delta_seconds: f32, cmd: &PlayerCmd, world: &impl WorldTrace) {
         // Prevent spiral of death on long frame hiccups (cap at 8 ticks = 62.5ms)
         const MAX_ACCUMULATED_TICKS: f32 = 8.0;
         self.accumulator += delta_seconds.min(self.dt * MAX_ACCUMULATED_TICKS);
@@ -77,9 +72,12 @@ impl FixedSubtickSimulator {
     pub fn interpolate_for_render(&self) -> ([f32; 3], f32) {
         let alpha = (self.accumulator / self.dt).clamp(0.0, 1.0);
 
-        let x = self.previous.origin[0] + (self.current.origin[0] - self.previous.origin[0]) * alpha;
-        let y = self.previous.origin[1] + (self.current.origin[1] - self.previous.origin[1]) * alpha;
-        let z = self.previous.origin[2] + (self.current.origin[2] - self.previous.origin[2]) * alpha;
+        let x =
+            self.previous.origin[0] + (self.current.origin[0] - self.previous.origin[0]) * alpha;
+        let y =
+            self.previous.origin[1] + (self.current.origin[1] - self.previous.origin[1]) * alpha;
+        let z =
+            self.previous.origin[2] + (self.current.origin[2] - self.previous.origin[2]) * alpha;
 
         let view_h = self.previous.view_height
             + (self.current.view_height - self.previous.view_height) * alpha;

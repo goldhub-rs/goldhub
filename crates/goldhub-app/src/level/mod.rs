@@ -194,7 +194,7 @@ fn setup_level(
                             lightmap_exposure: 2.2,
                             ..default()
                         })
-                    } else if is_cutout {
+                    } else if is_cutout || part.render_mode == 4 {
                         materials.add(StandardMaterial {
                             base_color: Color::WHITE,
                             base_color_texture: img_handle,

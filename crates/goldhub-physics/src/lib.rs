@@ -12,7 +12,10 @@ pub mod trace;
 
 pub use constants::*;
 pub use controller::FixedSubtickSimulator;
-pub use movement::{angle_vectors, pm_air_accelerate, pm_clip_velocity, pm_friction, pm_player_move};
+pub use movement::{
+    HALF_HUMAN_HEIGHT, STUCK_MOVEDOWN, STUCK_MOVEUP, angle_vectors, pm_air_accelerate,
+    pm_clip_velocity, pm_duck, pm_fix_player_crouch_stuck, pm_friction, pm_player_move, pm_unduck,
+};
 pub use player::{PlayerCmd, PlayerState};
 pub use trace::{BspWorldCollision, TraceResult, WorldTrace};
 
@@ -57,6 +60,10 @@ mod tests {
                 }
             }
         }
+
+        fn test_player_position(&self, pos: [f32; 3], _hull_idx: u32) -> Option<u32> {
+            if pos[2] < 0.0 { Some(0) } else { None }
+        }
     }
 
     #[test]
@@ -69,10 +76,16 @@ mod tests {
 
         pm_air_accelerate(&mut vel, wishdir, wishspeed, airaccel, dt);
 
-        assert_eq!(vel[0], 250.0, "Forward velocity must remain unaffected by pure orthogonal strafe");
+        assert_eq!(
+            vel[0], 250.0,
+            "Forward velocity must remain unaffected by pure orthogonal strafe"
+        );
         assert!(vel[1] > 0.0, "Lateral velocity must increase");
         let new_speed = vel[0].hypot(vel[1]);
-        assert!(new_speed > 250.0, "Total speed must increase during air strafe");
+        assert!(
+            new_speed > 250.0,
+            "Total speed must increase during air strafe"
+        );
     }
 
     #[test]
@@ -87,8 +100,14 @@ mod tests {
 
         pm_friction(&mut state, &vars, dt);
 
-        assert!(state.velocity[0] < 200.0, "Ground friction must decelerate player");
-        assert!(state.velocity[0] > 0.0, "Single tick of friction should not reverse velocity");
+        assert!(
+            state.velocity[0] < 200.0,
+            "Ground friction must decelerate player"
+        );
+        assert!(
+            state.velocity[0] > 0.0,
+            "Single tick of friction should not reverse velocity"
+        );
     }
 
     #[test]
@@ -107,8 +126,14 @@ mod tests {
 
         movement::pm_jump(&mut state, &cmd, &vars);
 
-        assert!(!state.on_ground, "Player must leave ground immediately upon jump");
-        assert_eq!(state.velocity[2], JUMP_IMPULSE, "Vertical impulse must match JUMP_IMPULSE");
+        assert!(
+            !state.on_ground,
+            "Player must leave ground immediately upon jump"
+        );
+        assert_eq!(
+            state.velocity[2], JUMP_IMPULSE,
+            "Vertical impulse must match JUMP_IMPULSE"
+        );
     }
 
     #[test]
@@ -118,7 +143,10 @@ mod tests {
 
         movement::pm_prevent_mega_bunny_jumping(&mut vel, maxspeed);
 
-        assert!(vel[0] < 450.0, "Mega bunny jumping must crop excess velocity");
+        assert!(
+            vel[0] < 450.0,
+            "Mega bunny jumping must crop excess velocity"
+        );
         assert!(vel[0] > 0.0);
     }
 
@@ -133,20 +161,31 @@ mod tests {
             sim.advance(1.0 / 60.0, &cmd, &world);
         }
 
-        assert!(sim.current.on_ground, "Player must land on flat ground at Z=0");
+        assert!(
+            sim.current.on_ground,
+            "Player must land on flat ground at Z=0"
+        );
         assert!(
             (sim.current.origin[2] - 0.03125).abs() < 1e-4,
             "Player Z must rest on floor with DIST_EPSILON clearance, got {}",
             sim.current.origin[2]
         );
-        assert_eq!(sim.current.velocity[2], 0.0, "Vertical velocity on ground must be zero");
+        assert_eq!(
+            sim.current.velocity[2], 0.0,
+            "Vertical velocity on ground must be zero"
+        );
     }
 
     #[test]
     fn test_step_climb_obstacle() {
         struct StepWorld;
         impl WorldTrace for StepWorld {
-            fn trace_player_hull(&self, start: [f32; 3], end: [f32; 3], _hull_idx: u32) -> TraceResult {
+            fn trace_player_hull(
+                &self,
+                start: [f32; 3],
+                end: [f32; 3],
+                _hull_idx: u32,
+            ) -> TraceResult {
                 const DIST_EPSILON: f32 = 0.03125;
                 // Ground at Z=0 for X < 50, Step of height 12 at Z=12 for X >= 50
                 // Vertical wall at X = 50 from Z=0 to Z=12
@@ -157,7 +196,11 @@ mod tests {
                         startsolid: false,
                         allsolid: false,
                         fraction: frac,
-                        endpos: [50.0 - DIST_EPSILON, start[1] + (end[1] - start[1]) * frac, start[2]],
+                        endpos: [
+                            50.0 - DIST_EPSILON,
+                            start[1] + (end[1] - start[1]) * frac,
+                            start[2],
+                        ],
                         plane_normal: [-1.0, 0.0, 0.0],
                         plane_dist: -50.0,
                         hit_entity: None,
@@ -194,6 +237,11 @@ mod tests {
                     hit_entity: None,
                 }
             }
+
+            fn test_player_position(&self, pos: [f32; 3], _hull_idx: u32) -> Option<u32> {
+                let floor_z = if pos[0] >= 50.0 { 12.0 } else { 0.0 };
+                if pos[2] < floor_z { Some(0) } else { None }
+            }
         }
 
         let mut sim = FixedSubtickSimulator::new([40.0, 0.0, 0.03125], 0.0);
@@ -208,11 +256,103 @@ mod tests {
             sim.advance(1.0 / 60.0, &cmd, &world);
         }
 
-        assert!(sim.current.origin[0] > 50.0, "Player must step up and cross X=50 step");
+        assert!(
+            sim.current.origin[0] > 50.0,
+            "Player must step up and cross X=50 step"
+        );
         assert!(
             (sim.current.origin[2] - 12.03125).abs() < 0.1,
             "Player must rest on top of the step at Z=12, got {}",
             sim.current.origin[2]
         );
+    }
+
+    #[test]
+    fn test_compound_duck_and_shift_speed() {
+        let mut sim = FixedSubtickSimulator::new([0.0, 0.0, 1.0], 0.0);
+        let world = FlatWorld;
+
+        // 1. Duck + Speed (Shift) both pressed
+        let cmd = PlayerCmd {
+            forward_move: 250.0,
+            buttons: IN_DUCK | IN_SPEED,
+            ..Default::default()
+        };
+
+        // Advance 1 second
+        for _ in 0..60 {
+            sim.advance(1.0 / 60.0, &cmd, &world);
+        }
+
+        let speed = sim.current.horizontal_speed();
+        // ducking_speed_multiplier is 0.333, walking_speed_multiplier is 0.52
+        // Under ground friction (stopspeed 100), compound speed stabilizes at ~36 u/s
+        assert!(
+            speed > 34.0 && speed < 38.0,
+            "Speed must compound to ~36 u/s (got {speed})"
+        );
+    }
+
+    #[test]
+    fn test_crouch_under_ceiling_remains_ducked() {
+        // Ceiling at Z = 40 (standing hull height 72 exceeds 40, ducking hull height 36 fits under 40)
+        struct ArchWorld;
+        impl WorldTrace for ArchWorld {
+            fn trace_player_hull(
+                &self,
+                start: [f32; 3],
+                end: [f32; 3],
+                hull_idx: u32,
+            ) -> TraceResult {
+                let is_standing = hull_idx == HULL_STANDING;
+                if is_standing && end[2] + 36.0 >= 40.0 {
+                    return TraceResult {
+                        startsolid: start[2] + 36.0 >= 40.0,
+                        allsolid: false,
+                        fraction: 0.0,
+                        endpos: start,
+                        plane_normal: [0.0, 0.0, -1.0],
+                        plane_dist: 40.0,
+                        hit_entity: None,
+                    };
+                }
+                TraceResult {
+                    startsolid: false,
+                    allsolid: false,
+                    fraction: 1.0,
+                    endpos: end,
+                    plane_normal: [0.0, 0.0, 1.0],
+                    plane_dist: 0.0,
+                    hit_entity: None,
+                }
+            }
+
+            fn test_player_position(&self, pos: [f32; 3], hull_idx: u32) -> Option<u32> {
+                let is_standing = hull_idx == HULL_STANDING;
+                if is_standing && pos[2] + 36.0 >= 40.0 {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut state = PlayerState {
+            origin: [0.0, 0.0, 0.0],
+            is_ducking: true,
+            view_height: VEC_VIEW_DUCKING,
+            on_ground: true,
+            ..Default::default()
+        };
+        let world = ArchWorld;
+
+        // Try to unduck under arch
+        pm_unduck(&mut state, &world);
+
+        assert!(
+            state.is_ducking,
+            "Player must remain ducked under low ceiling/arch!"
+        );
+        assert_eq!(state.view_height, VEC_VIEW_DUCKING);
     }
 }

@@ -43,10 +43,37 @@ impl Default for TraceResult {
     }
 }
 
+#[inline]
+const fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Returns the half-extents bounding box for a given player collision hull.
+#[inline]
+#[must_use]
+pub fn player_hull_bounds(hull_idx: u32) -> ([f32; 3], [f32; 3]) {
+    match hull_idx {
+        crate::constants::HULL_DUCKING => (
+            crate::constants::PLAYER_HULL_MIN_DUCKING,
+            crate::constants::PLAYER_HULL_MAX_DUCKING,
+        ),
+        crate::constants::HULL_POINT => ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+        crate::constants::HULL_LARGE => ([-32.0, -32.0, -32.0], [32.0, 32.0, 32.0]),
+        _ => (
+            crate::constants::PLAYER_HULL_MIN_STANDING,
+            crate::constants::PLAYER_HULL_MAX_STANDING,
+        ),
+    }
+}
+
 /// Abstract spatial query provider for player movement hulls.
 pub trait WorldTrace {
-    /// Traces an AABB hull from `start` to `end` against the world.
+    /// Traces an AABB hull from `start` to `end` against the world and all active solid brush entities.
     fn trace_player_hull(&self, start: [f32; 3], end: [f32; 3], hull_idx: u32) -> TraceResult;
+
+    /// Tests whether the designated player hull intersects any solid world or brush geometry at `pos`.
+    /// Returns `Some(hit_entity)` if inside solid (0 for worldspawn, entity_id for brush entity), or `None` if free.
+    fn test_player_position(&self, pos: [f32; 3], hull_idx: u32) -> Option<u32>;
 }
 
 /// Hardware-accelerated zero-copy BSP collision trace engine.
@@ -229,6 +256,68 @@ impl<'a> BspWorldCollision<'a> {
 }
 
 impl WorldTrace for BspWorldCollision<'_> {
+    fn test_player_position(&self, pos: [f32; 3], hull_idx: u32) -> Option<u32> {
+        let world_hull = self
+            .model
+            .hulls
+            .iter()
+            .find(|h| h.hull_index == hull_idx)
+            .or_else(|| self.model.hulls.first());
+
+        if let Some(hull) = world_hull
+            && self.hull_point_contents(hull, hull.root_node, pos) == CONTENTS_SOLID
+        {
+            return Some(0);
+        }
+
+        let (pmins, pmaxs) = player_hull_bounds(hull_idx);
+        for ent in &self.model.brush_entities {
+            if ent.solid != goldhub_formats::ir::SOLID_BSP {
+                continue;
+            }
+
+            // Broadphase AABB test with player hull expansion
+            if pos[0] < ent.mins[0] - pmaxs[0]
+                || pos[0] > ent.maxs[0] - pmins[0]
+                || pos[1] < ent.mins[1] - pmaxs[1]
+                || pos[1] > ent.maxs[1] - pmins[1]
+                || pos[2] < ent.mins[2] - pmaxs[2]
+                || pos[2] > ent.maxs[2] - pmins[2]
+            {
+                continue;
+            }
+
+            let root_node = ent.headnodes.get(hull_idx as usize).copied().unwrap_or(-1);
+            if root_node < 0 {
+                if root_node == i32::from(CONTENTS_SOLID) {
+                    return Some(ent.entity_id);
+                }
+                continue;
+            }
+
+            let mut local_pos = [
+                pos[0] - ent.origin[0],
+                pos[1] - ent.origin[1],
+                pos[2] - ent.origin[2],
+            ];
+
+            if ent.angles[0] != 0.0 || ent.angles[1] != 0.0 || ent.angles[2] != 0.0 {
+                let (forward, right, up) = crate::movement::angle_vectors(ent.angles);
+                let p = local_pos;
+                local_pos = [dot(forward, p), -dot(right, p), dot(up, p)];
+            }
+
+            if let Some(hull) = world_hull
+                && self.hull_point_contents(hull, root_node, local_pos) == CONTENTS_SOLID
+            {
+                return Some(ent.entity_id);
+            }
+        }
+
+        None
+    }
+
+    #[allow(clippy::too_many_lines, clippy::many_single_char_names)]
     fn trace_player_hull(&self, start: [f32; 3], end: [f32; 3], hull_idx: u32) -> TraceResult {
         let mut trace = TraceResult {
             startsolid: false,
@@ -240,14 +329,14 @@ impl WorldTrace for BspWorldCollision<'_> {
             hit_entity: None,
         };
 
-        let hull = self
+        let world_hull = self
             .model
             .hulls
             .iter()
             .find(|h| h.hull_index == hull_idx)
             .or_else(|| self.model.hulls.first());
 
-        let Some(hull) = hull else {
+        let Some(hull) = world_hull else {
             return trace;
         };
 
@@ -260,13 +349,130 @@ impl WorldTrace for BspWorldCollision<'_> {
             } else {
                 trace.allsolid = false;
             }
-            return trace;
+        } else {
+            self.recursive_hull_check(hull, hull.root_node, 0.0, 1.0, start, end, &mut trace);
+            if trace.allsolid {
+                trace.startsolid = true;
+            }
         }
 
-        self.recursive_hull_check(hull, hull.root_node, 0.0, 1.0, start, end, &mut trace);
+        // Trace against active solid brush entities (*1..*N)
+        let (pmins, pmaxs) = player_hull_bounds(hull_idx);
+        let ray_mins = [
+            start[0].min(end[0]) + pmins[0],
+            start[1].min(end[1]) + pmins[1],
+            start[2].min(end[2]) + pmins[2],
+        ];
+        let ray_maxs = [
+            start[0].max(end[0]) + pmaxs[0],
+            start[1].max(end[1]) + pmaxs[1],
+            start[2].max(end[2]) + pmaxs[2],
+        ];
 
-        if trace.allsolid {
-            trace.startsolid = true;
+        for ent in &self.model.brush_entities {
+            if ent.solid != goldhub_formats::ir::SOLID_BSP {
+                continue;
+            }
+
+            // Broadphase AABB overlap test
+            if ray_maxs[0] < ent.mins[0]
+                || ray_mins[0] > ent.maxs[0]
+                || ray_maxs[1] < ent.mins[1]
+                || ray_mins[1] > ent.maxs[1]
+                || ray_maxs[2] < ent.mins[2]
+                || ray_mins[2] > ent.maxs[2]
+            {
+                continue;
+            }
+
+            let root_node = ent.headnodes.get(hull_idx as usize).copied().unwrap_or(-1);
+            if root_node == i32::from(CONTENTS_EMPTY) {
+                continue;
+            }
+
+            let mut start_l = [
+                start[0] - ent.origin[0],
+                start[1] - ent.origin[1],
+                start[2] - ent.origin[2],
+            ];
+            let mut end_l = [
+                end[0] - ent.origin[0],
+                end[1] - ent.origin[1],
+                end[2] - ent.origin[2],
+            ];
+
+            let rotated = ent.angles[0] != 0.0 || ent.angles[1] != 0.0 || ent.angles[2] != 0.0;
+            let (forward, right, up) = if rotated {
+                let (f, r, u) = crate::movement::angle_vectors(ent.angles);
+                let s = start_l;
+                start_l = [dot(f, s), -dot(r, s), dot(u, s)];
+                let e = end_l;
+                end_l = [dot(f, e), -dot(r, e), dot(u, e)];
+                (f, r, u)
+            } else {
+                ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+            };
+
+            let mut sub_trace = TraceResult {
+                startsolid: false,
+                allsolid: true,
+                fraction: 1.0,
+                endpos: end_l,
+                plane_normal: [0.0, 0.0, 1.0],
+                plane_dist: 0.0,
+                hit_entity: Some(ent.entity_id),
+            };
+
+            if root_node < 0 {
+                if root_node == i32::from(CONTENTS_SOLID) {
+                    sub_trace.startsolid = true;
+                    sub_trace.allsolid = true;
+                    sub_trace.fraction = 0.0;
+                    sub_trace.endpos = start_l;
+                } else {
+                    sub_trace.allsolid = false;
+                }
+            } else {
+                self.recursive_hull_check(
+                    hull,
+                    root_node,
+                    0.0,
+                    1.0,
+                    start_l,
+                    end_l,
+                    &mut sub_trace,
+                );
+                if sub_trace.allsolid {
+                    sub_trace.startsolid = true;
+                }
+            }
+
+            if sub_trace.startsolid {
+                trace.startsolid = true;
+                trace.fraction = 0.0;
+                trace.hit_entity = Some(ent.entity_id);
+            }
+
+            if sub_trace.fraction < trace.fraction {
+                trace.fraction = sub_trace.fraction;
+                trace.hit_entity = Some(ent.entity_id);
+                if rotated {
+                    let n = sub_trace.plane_normal;
+                    trace.plane_normal = [
+                        forward[0] * n[0] - right[0] * n[1] + up[0] * n[2],
+                        forward[1] * n[0] - right[1] * n[1] + up[1] * n[2],
+                        forward[2] * n[0] - right[2] * n[1] + up[2] * n[2],
+                    ];
+                } else {
+                    trace.plane_normal = sub_trace.plane_normal;
+                }
+                trace.plane_dist = sub_trace.plane_dist;
+                trace.endpos = [
+                    start[0] + (end[0] - start[0]) * trace.fraction,
+                    start[1] + (end[1] - start[1]) * trace.fraction,
+                    start[2] + (end[2] - start[2]) * trace.fraction,
+                ];
+            }
         }
 
         if trace.fraction >= 1.0 {
@@ -303,6 +509,7 @@ mod tests {
         let model = CollisionModel {
             hulls,
             planes,
+            brush_entities: Vec::new(),
             visdata: Vec::new(),
         };
 
@@ -322,5 +529,76 @@ mod tests {
             col.hull_point_contents(&col.model.hulls[0], 0, [0.0, 0.0, -5.0]),
             CONTENTS_SOLID
         );
+    }
+
+    #[test]
+    fn test_bsp_brush_entity_collision() {
+        use goldhub_formats::ir::{BrushEntityCollision, SOLID_BSP};
+
+        let planes = vec![
+            // World floor at Z = 0
+            CollisionPlane {
+                normal: [0.0, 0.0, 1.0],
+                distance: 0.0,
+                plane_type: 2,
+            },
+            // Crate plane: front face at X = 50 facing -X (normal = [-1, 0, 0], dist = -50)
+            CollisionPlane {
+                normal: [-1.0, 0.0, 0.0],
+                distance: -50.0,
+                plane_type: 0,
+            },
+        ];
+        let clip_nodes = vec![
+            // Node 0: Floor
+            ClipNode {
+                plane_index: 0,
+                children: [CONTENTS_EMPTY, CONTENTS_SOLID],
+            },
+            // Node 1: Crate front face (front is empty, back is solid)
+            ClipNode {
+                plane_index: 1,
+                children: [CONTENTS_EMPTY, CONTENTS_SOLID],
+            },
+        ];
+        let hulls = vec![CollisionHull {
+            hull_index: 1,
+            root_node: 0,
+            clip_nodes,
+        }];
+        let brush_entities = vec![BrushEntityCollision {
+            entity_id: 42,
+            model_index: 1,
+            classname: "func_wall".to_string(),
+            origin: [0.0, 0.0, 0.0],
+            angles: [0.0, 0.0, 0.0],
+            mins: [50.0, -20.0, 0.0],
+            maxs: [90.0, 20.0, 40.0],
+            headnodes: [1, 1, 1, 1],
+            solid: SOLID_BSP,
+            rendermode: 0,
+            renderamt: 255,
+        }];
+        let model = CollisionModel {
+            hulls,
+            planes,
+            brush_entities,
+            visdata: Vec::new(),
+        };
+
+        let col = BspWorldCollision::new(&model);
+
+        // 1. Ray moving from X = 0 towards X = 100 at Z = 10 (should hit crate at X = 50)
+        let tr = col.trace_player_hull([0.0, 0.0, 10.0], [100.0, 0.0, 10.0], 1);
+        assert!(!tr.allsolid);
+        assert_eq!(tr.hit_entity, Some(42), "Must collide with brush entity 42");
+        assert!(tr.fraction < 1.0);
+        assert_eq!(tr.plane_normal, [-1.0, 0.0, 0.0]);
+
+        // 2. Position test inside crate (X = 60, Y = 0, Z = 20)
+        assert_eq!(col.test_player_position([60.0, 0.0, 20.0], 1), Some(42));
+
+        // 3. Position test outside crate in empty world air (X = 10, Y = 0, Z = 20)
+        assert_eq!(col.test_player_position([10.0, 0.0, 20.0], 1), None);
     }
 }

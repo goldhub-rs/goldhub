@@ -9,7 +9,10 @@ pub mod mesh;
 pub mod skeleton;
 pub mod texture;
 
-pub use collision::{ClipNode, CollisionHull, CollisionModel, CollisionPlane};
+pub use collision::{
+    BrushEntityCollision, ClipNode, CollisionHull, CollisionModel, CollisionPlane, SOLID_BBOX,
+    SOLID_BSP, SOLID_NOT, SOLID_SLIDEBOX, SOLID_TRIGGER,
+};
 pub use lightmap::{DynamicLightStyles, LightmapAtlas};
 pub use mesh::{MeshBuffer, SubMesh, Vertex};
 pub use skeleton::{BoneData, SequenceData, SkeletalRig};

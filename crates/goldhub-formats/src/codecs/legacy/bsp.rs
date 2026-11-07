@@ -209,6 +209,7 @@ impl<'a> BspLevel<'a> {
     }
 
     /// Extracts all embedded miptex textures into RGBA8 TextureDescriptors.
+    #[allow(clippy::too_many_lines)]
     pub fn extract_embedded_textures(&self) -> Vec<crate::ir::TextureDescriptor> {
         let lump = self.textures_lump;
         if lump.len() < 4 {
@@ -305,7 +306,10 @@ impl<'a> BspLevel<'a> {
                     && palette[255 * 3 + 2] == 255);
             for &idx in pixel_indices {
                 let p_idx = (idx as usize) * 3;
-                let is_transparent = is_transparent_tex && idx == 255;
+                let is_chroma_blue =
+                    palette[p_idx] == 0 && palette[p_idx + 1] == 0 && palette[p_idx + 2] == 255;
+                let is_transparent = (is_transparent_tex && idx == 255)
+                    || (mip_header.name[0] == b'{' && is_chroma_blue);
                 if is_transparent {
                     // Transparent pixels must be zeroed (RGB 0, Alpha 0) to avoid color bleeding during linear filtering and mipmapping
                     rgba.extend_from_slice(&[0, 0, 0, 0]);

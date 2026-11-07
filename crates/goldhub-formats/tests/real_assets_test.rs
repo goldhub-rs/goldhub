@@ -15,38 +15,87 @@ const SAMPLE_WAD_PATH: &str =
     "D:/Repo/GoldSrc.rs/references/regamedll/regamedll/extra/Test Maps/src/regamedll_zedit.wad";
 
 #[test]
-fn test_inspect_glass_med_texture() {
-    for wad_name in ["cstrike.wad", "halflife.wad", "nuke.wad", "cs_dust.wad"] {
-        let wad_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike").join(wad_name);
-        let wad_path = if wad_path.exists() {
-            wad_path
-        } else {
-            Path::new("C:/Games/CS 1.6 GoldClient/valve").join(wad_name)
-        };
-        if !wad_path.exists() {
-            continue;
-        }
-        let bytes = fs::read(&wad_path).unwrap();
-        let wad = Wad3Decoder.decode(&bytes).unwrap();
-        if let Some(entry) = wad.find_entry("glass_med") {
-            let tex = wad.unpack_miptex(entry).unwrap();
-            println!("Found in {}: glass_med: w={}, h={}, len={}", wad_name, tex.width, tex.height, tex.mips[0].data.len());
-            let data = &tex.mips[0].data;
-            let mut sum_r = 0u64;
-            let mut sum_g = 0u64;
-            let mut sum_b = 0u64;
-            let count = (data.len() / 4) as u64;
-            for chunk in data.as_chunks::<4>().0 {
-                sum_r += u64::from(chunk[0]);
-                sum_g += u64::from(chunk[1]);
-                sum_b += u64::from(chunk[2]);
+fn test_inspect_fence_entities() {
+    let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps/de_inferno.bsp");
+    if !path.exists() {
+        return;
+    }
+    let bytes = fs::read(path).unwrap();
+    let bsp = Bsp30Decoder.decode(&bytes).unwrap();
+    let textures = bsp.extract_embedded_textures();
+    let entities_str = std::str::from_utf8(bsp.entities).unwrap();
+
+    // Find texture indices for {fence and {cufence
+    let fence_tex_ids: Vec<usize> = textures
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            t.name.contains("fence") || t.name.contains("net") || t.name.contains("wire")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let td = tempdir().unwrap();
+    let pipeline = AssetPipeline::new(td.path());
+    let _bsp = Bsp30Decoder.decode(&bytes).unwrap();
+    let (mesh, textures, _, _) = pipeline
+        .load_bsp_level_full_with_search_dirs(&bytes, &[])
+        .unwrap();
+    let cufence_id = textures.iter().position(|t| t.name == "{cufence").unwrap() as u32;
+    let count = mesh
+        .submeshes
+        .iter()
+        .filter(|sm| sm.material_id == cufence_id)
+        .count();
+    println!("Compiled cufence submeshes count: {count}");
+    let face = &bsp.faces[7233];
+    let ti = &bsp.texture_infos[face.texture_info_id as usize];
+    println!(
+        "Face 7233: tex_id={}, s_vec={:?}, s_shift={}, t_vec={:?}, t_shift={}",
+        ti.texture_id, ti.s, ti.s_shift, ti.t, ti.t_shift
+    );
+    let sm = mesh
+        .submeshes
+        .iter()
+        .find(|s| s.name == "face_7233")
+        .unwrap();
+    println!(
+        "Submesh face_7233: start={}, count={}",
+        sm.index_start, sm.index_count
+    );
+    for idx in sm.index_start..sm.index_start + sm.index_count {
+        let v_idx = mesh.indices[idx as usize];
+        let v = &mesh.vertices[v_idx as usize];
+        println!("  vert {v_idx}: pos={:?}, uv={:?}", v.position, v.uv0);
+    }
+
+    for (m_idx, model) in bsp.models.iter().enumerate() {
+        let first = model.first_face as usize;
+        let num = model.num_faces as usize;
+        for f_idx in first..first + num {
+            if let Some(f) = bsp.faces.get(f_idx)
+                && let Some(ti) = bsp.texture_infos.get(f.texture_info_id as usize)
+                && fence_tex_ids.contains(&(ti.texture_id as usize))
+            {
+                println!(
+                    "Model *{m_idx} uses fence tex {} on face {f_idx}",
+                    ti.texture_id
+                );
+                break;
             }
-            println!("Average RGB: R={}, G={}, B={}", sum_r / count, sum_g / count, sum_b / count);
-            println!("First 5 pixels: {:?}", &data[..20]);
-            return;
         }
     }
-    println!("glass_med not found in tested WADs");
+
+    for block in entities_str.split('}') {
+        if block.contains("fence")
+            || block.contains("*1")
+            || block.contains("*2")
+            || block.contains("*3")
+            || block.contains("*4")
+            || block.contains("*5")
+        {
+            // println!("Entity:\n{}", block.trim());
+        }
+    }
 }
 
 #[test]
@@ -153,17 +202,28 @@ fn test_inspect_nuke_glass_doors_compiled() {
     let temp_cache = tempdir().unwrap();
     let pipeline = AssetPipeline::new(temp_cache.path());
     let extra_dirs = [Path::new("C:/Games/CS 1.6 GoldClient/cstrike")];
+    let _bsp = Bsp30Decoder.decode(&bytes).unwrap();
     let (mesh, textures, _, _) = pipeline
         .load_bsp_level_full_with_search_dirs(&bytes, &extra_dirs)
         .expect("load de_nuke with glass");
 
     // Verify glass_med is present and has rendered submeshes
     let glass_tex_id = textures.iter().position(|t| t.name == "glass_med");
-    assert!(glass_tex_id.is_some(), "de_nuke should have glass_med texture");
+    assert!(
+        glass_tex_id.is_some(),
+        "de_nuke should have glass_med texture"
+    );
     let glass_id = glass_tex_id.unwrap() as u32;
 
-    let glass_submeshes = mesh.submeshes.iter().filter(|s| s.material_id == glass_id).count();
-    assert!(glass_submeshes > 0, "de_nuke should have compiled glass submeshes");
+    let glass_submeshes = mesh
+        .submeshes
+        .iter()
+        .filter(|s| s.material_id == glass_id)
+        .count();
+    assert!(
+        glass_submeshes > 0,
+        "de_nuke should have compiled glass submeshes"
+    );
     println!("de_nuke compiled glass_med submeshes: {glass_submeshes}");
 }
 
@@ -217,6 +277,83 @@ fn test_inspect_de_dust2() {
 }
 
 #[test]
+fn test_compile_bsp_collision_brush_entities() {
+    let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps/de_inferno.bsp");
+    if !path.exists() {
+        return;
+    }
+    let bytes = fs::read(path).unwrap();
+    let bsp = Bsp30Decoder.decode(&bytes).unwrap();
+    let col = compile_bsp_collision(&bsp).expect("compile collision");
+
+    assert!(
+        !col.brush_entities.is_empty(),
+        "de_inferno must have brush entities!"
+    );
+    let solid_count = col
+        .brush_entities
+        .iter()
+        .filter(|e| e.solid == goldhub_formats::ir::SOLID_BSP)
+        .count();
+    let nonsolid_count = col
+        .brush_entities
+        .iter()
+        .filter(|e| e.solid == goldhub_formats::ir::SOLID_NOT)
+        .count();
+    println!(
+        "de_inferno collision: total physents = {}, solid = {}, nonsolid = {}",
+        col.brush_entities.len(),
+        solid_count,
+        nonsolid_count
+    );
+
+    // Verify crates, doors, breakables are solid
+    let breakables = col
+        .brush_entities
+        .iter()
+        .filter(|e| e.classname == "func_breakable")
+        .count();
+    let walls = col
+        .brush_entities
+        .iter()
+        .filter(|e| e.classname == "func_wall")
+        .count();
+    let doors = col
+        .brush_entities
+        .iter()
+        .filter(|e| e.classname.starts_with("func_door"))
+        .count();
+    println!("  func_breakable: {breakables}, func_wall: {walls}, doors: {doors}");
+    assert!(
+        solid_count > 50,
+        "Should have dozens of solid brush entities"
+    );
+}
+
+#[test]
+fn test_inspect_inferno_shutters() {
+    let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps/de_inferno.bsp");
+    if !path.exists() {
+        return;
+    }
+    let bytes = fs::read(path).unwrap();
+    let temp_cache = tempdir().unwrap();
+    let pipeline = AssetPipeline::new(temp_cache.path());
+    let extra_dirs = [Path::new("C:/Games/CS 1.6 GoldClient/cstrike")];
+    let bsp = Bsp30Decoder.decode(&bytes).unwrap();
+    let (_mesh, _textures, _, _) = pipeline
+        .load_bsp_level_full_with_search_dirs(&bytes, &extra_dirs)
+        .unwrap();
+
+    let entities_str = std::str::from_utf8(bsp.entities).unwrap();
+    for ent_block in entities_str.split('}') {
+        if ent_block.contains("\"model\" \"*1\"") || ent_block.contains("\"model\" \"*16\"") {
+            println!("FENCE ENTITY BLOCK:\n{}", ent_block.trim());
+        }
+    }
+}
+
+#[test]
 fn test_inspect_de_nuke_and_cs_assault() {
     let temp_cache = tempdir().unwrap();
     let pipeline = AssetPipeline::new(temp_cache.path());
@@ -233,7 +370,12 @@ fn test_inspect_de_nuke_and_cs_assault() {
             || n == "skip"
     };
 
-    for map_name in ["de_nuke.bsp", "cs_assault.bsp", "cs_italy.bsp", "de_inferno.bsp"] {
+    for map_name in [
+        "de_nuke.bsp",
+        "cs_assault.bsp",
+        "cs_italy.bsp",
+        "de_inferno.bsp",
+    ] {
         let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/maps").join(map_name);
         if !path.exists() {
             continue;
@@ -265,7 +407,10 @@ fn test_inspect_de_nuke_and_cs_assault() {
                     .iter()
                     .filter(|c| c[0] == 0 && c[1] == 0 && c[2] == 255)
                     .count();
-                println!("  Cutout texture: {} (w={}, h={}, zero_alpha={}, blue_pixels={})", t.name, t.width, t.height, has_zero_alpha, blue_count);
+                println!(
+                    "  Cutout texture: {} (w={}, h={}, zero_alpha={}, blue_pixels={})",
+                    t.name, t.width, t.height, has_zero_alpha, blue_count
+                );
             }
         }
 

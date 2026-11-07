@@ -5,11 +5,11 @@
 
 #![allow(clippy::float_cmp)]
 
-use crate::constants::{
-    BUNNYJUMP_MAX_SPEED_FACTOR, HULL_STANDING, IN_DUCK, IN_JUMP, IN_SPEED,
-    JUMP_IMPULSE, STOP_EPSILON, TIME_TO_DUCK, VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
-};
 use crate::constants::MoveVars;
+use crate::constants::{
+    BUNNYJUMP_MAX_SPEED_FACTOR, HULL_STANDING, IN_DUCK, IN_JUMP, IN_SPEED, JUMP_IMPULSE,
+    STOP_EPSILON, TIME_TO_DUCK, VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
+};
 use crate::player::{PlayerCmd, PlayerState};
 use crate::trace::WorldTrace;
 
@@ -55,16 +55,8 @@ pub fn angle_vectors(angles: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let cr = (angles[2] * to_rad).cos();
 
     let forward = [cp * cy, cp * sy, -sp];
-    let right = [
-        -sr * sp * cy + cr * sy,
-        -sr * sp * sy - cr * cy,
-        -sr * cp,
-    ];
-    let up = [
-        cr * sp * cy + sr * sy,
-        cr * sp * sy - sr * cy,
-        cr * cp,
-    ];
+    let right = [-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp];
+    let up = [cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp];
 
     (forward, right, up)
 }
@@ -335,18 +327,32 @@ pub fn pm_walk_move(
     let (f, _) = normalize([forward[0], forward[1], 0.0]);
     let (r, _) = normalize([right[0], right[1], 0.0]);
 
+    let mut fmove = cmd.forward_move;
+    let mut smove = cmd.side_move;
+
+    let is_duck_active = (cmd.buttons & IN_DUCK) != 0 || state.in_duck || state.is_ducking;
+    if is_duck_active {
+        fmove *= vars.ducking_speed_multiplier;
+        smove *= vars.ducking_speed_multiplier;
+    }
+    if (cmd.buttons & IN_SPEED) != 0 {
+        fmove *= vars.walking_speed_multiplier;
+        smove *= vars.walking_speed_multiplier;
+    }
+
     let wishvel = [
-        f[0] * cmd.forward_move + r[0] * cmd.side_move,
-        f[1] * cmd.forward_move + r[1] * cmd.side_move,
+        f[0] * fmove + r[0] * smove,
+        f[1] * fmove + r[1] * smove,
         0.0,
     ];
 
     let (wishdir, mut wishspeed) = normalize(wishvel);
 
     let mut max_speed = vars.maxspeed;
-    if state.is_ducking {
+    if is_duck_active {
         max_speed *= vars.ducking_speed_multiplier;
-    } else if (cmd.buttons & IN_SPEED) != 0 {
+    }
+    if (cmd.buttons & IN_SPEED) != 0 {
         max_speed *= vars.walking_speed_multiplier;
     }
 
@@ -390,7 +396,11 @@ pub fn pm_walk_move(
     state.origin = original;
     state.velocity = original_vel;
 
-    let step_dest = [state.origin[0], state.origin[1], state.origin[2] + vars.stepsize];
+    let step_dest = [
+        state.origin[0],
+        state.origin[1],
+        state.origin[2] + vars.stepsize,
+    ];
     let step_tr = world.trace_player_hull(state.origin, step_dest, state.active_hull());
     if !step_tr.startsolid && !step_tr.allsolid {
         state.origin = step_tr.endpos;
@@ -405,7 +415,11 @@ pub fn pm_walk_move(
         world,
     );
 
-    let down_dest = [state.origin[0], state.origin[1], state.origin[2] - vars.stepsize];
+    let down_dest = [
+        state.origin[0],
+        state.origin[1],
+        state.origin[2] - vars.stepsize,
+    ];
     let down_tr = world.trace_player_hull(state.origin, down_dest, state.active_hull());
 
     let mut use_down = false;
@@ -512,6 +526,33 @@ pub fn pm_spline_fraction(value: f32, scale: f32) -> f32 {
     3.0 * v_sq - 2.0 * v_sq * v
 }
 
+pub const HALF_HUMAN_HEIGHT: i32 = 18;
+pub const STUCK_MOVEUP: f32 = 1.0;
+pub const STUCK_MOVEDOWN: f32 = -1.0;
+
+/// Resolves player collision penetration when ducking or standing near walls/bevels (`PM_FixPlayerCrouchStuck`).
+pub fn pm_fix_player_crouch_stuck(
+    state: &mut PlayerState,
+    direction: f32,
+    world: &impl WorldTrace,
+) {
+    let hull = state.active_hull();
+    if world.test_player_position(state.origin, hull).is_none() {
+        return;
+    }
+
+    let test_origin = state.origin;
+    for _ in 0..HALF_HUMAN_HEIGHT {
+        state.origin[2] += direction;
+        if world.test_player_position(state.origin, hull).is_none() {
+            return; // Successfully unstuck!
+        }
+    }
+
+    // Failed to unstick, restore original origin
+    state.origin = test_origin;
+}
+
 /// Manages ducking transitions and instant Double Duck / Duck Tap mechanics (`PM_Duck`).
 pub fn pm_duck(
     state: &mut PlayerState,
@@ -549,6 +590,8 @@ pub fn pm_duck(
                 // Adjust origin for duck hull difference if on ground
                 if state.on_ground {
                     state.origin[2] -= 18.0;
+                    // Fix wall/slope collision sticking
+                    pm_fix_player_crouch_stuck(state, STUCK_MOVEUP, world);
                     pm_categorize_position(state, world);
                 }
             } else {
@@ -573,28 +616,28 @@ pub fn pm_duck(
 
 /// Attempts to stand up from a crouch (`PM_UnDuck`).
 pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
-    if state.in_duck || !state.is_ducking {
-        state.is_ducking = false;
-        state.in_duck = false;
-        state.view_height = VEC_VIEW_STANDING;
-        state.duck_time_ms = 0.0;
-        return;
-    }
-
     let mut new_origin = state.origin;
     if state.on_ground {
         new_origin[2] += 18.0;
     }
 
+    // Check if player has clearance to stand up
     let trace = world.trace_player_hull(new_origin, new_origin, HULL_STANDING);
-    if !trace.startsolid {
-        state.is_ducking = false;
+    if trace.startsolid {
+        // Obstructed by ceiling or archway overhead! Must remain ducked.
+        state.is_ducking = true;
         state.in_duck = false;
-        state.view_height = VEC_VIEW_STANDING;
-        state.duck_time_ms = 0.0;
-        state.origin = new_origin;
-        pm_categorize_position(state, world);
+        state.view_height = VEC_VIEW_DUCKING;
+        return;
     }
+
+    // Has clearance: stand up safely
+    state.is_ducking = false;
+    state.in_duck = false;
+    state.view_height = VEC_VIEW_STANDING;
+    state.duck_time_ms = 0.0;
+    state.origin = new_origin;
+    pm_categorize_position(state, world);
 }
 
 /// Master single-tick player physics update (128 Hz sub-tick step, ReGameDLL standard).

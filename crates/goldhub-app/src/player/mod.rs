@@ -8,8 +8,8 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use goldhub_formats::ir::CollisionModel;
 use goldhub_physics::{
-    BspWorldCollision, FixedSubtickSimulator, PlayerCmd, WorldTrace,
-    IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, IN_SPEED,
+    BspWorldCollision, FixedSubtickSimulator, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT,
+    IN_MOVERIGHT, IN_SPEED, PlayerCmd, WorldTrace,
 };
 
 use crate::camera::SpectatorCamera;
@@ -56,13 +56,7 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraControlMode>();
         app.init_resource::<LevelCollisionResource>();
-        app.add_systems(
-            Update,
-            (
-                player_movement_system,
-                controller_toggle_system,
-            ),
-        );
+        app.add_systems(Update, (player_movement_system, controller_toggle_system));
     }
 }
 
@@ -107,6 +101,10 @@ impl WorldTrace for FallbackFlatWorld {
                 hit_entity: None,
             }
         }
+    }
+
+    fn test_player_position(&self, pos: [f32; 3], _hull_idx: u32) -> Option<u32> {
+        if pos[2] < 0.0 { Some(0) } else { None }
     }
 }
 
@@ -202,7 +200,8 @@ fn player_movement_system(
         let bevy_cam_pos = Vec3::new(gs_pos[0], gs_pos[2] + view_h, -gs_pos[1]);
 
         transform.translation = bevy_cam_pos;
-        transform.rotation = Quat::from_rotation_y(player.yaw) * Quat::from_rotation_x(player.pitch);
+        transform.rotation =
+            Quat::from_rotation_y(player.yaw) * Quat::from_rotation_x(player.pitch);
     }
 }
 
@@ -227,7 +226,9 @@ fn controller_toggle_system(
                 CameraControlMode::Spectator
             }
             CameraControlMode::Spectator => {
-                tracing::info!("Switched to First-Person Player Controller (128 Hz Tournament CS 1.6)");
+                tracing::info!(
+                    "Switched to First-Person Player Controller (128 Hz Tournament CS 1.6)"
+                );
                 // Convert back from Bevy coordinates to GoldSrc coordinates
                 let gs_x = transform.translation.x;
                 let gs_y = -transform.translation.z;
