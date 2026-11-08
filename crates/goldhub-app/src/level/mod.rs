@@ -37,10 +37,10 @@ fn setup_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // 1. Illumination: Balanced ambient illumination matching GoldSrc daylight & shadow levels
+    // 1. Illumination: Ambient illumination matching authentic GoldSrc dark corners and daylight
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.82, 0.86, 0.92),
-        brightness: 140.0,
+        brightness: 40.0,
     });
 
     // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
@@ -67,7 +67,8 @@ fn setup_level(
                 });
             }
             spawn_point = crate::player::parse_first_player_spawn(bsp.entities);
-            spawn_bsp_lights(&mut commands, bsp.entities);
+            // In authentic GoldSrc, map lights ('light', 'light_spot') are 100% baked into BSP lightmaps.
+            // Spawning dynamic high-lumen PointLights blows out lightmaps and washes out shadows.
         }
 
         let mut search_dirs = Vec::new();
@@ -345,7 +346,7 @@ fn setup_level(
 }
 
 /// Parses entity string lumps and spawns authentic PointLight fixtures and environment lighting.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, dead_code)]
 fn spawn_bsp_lights(commands: &mut Commands, entities_bytes: &[u8]) {
     let Ok(entities_str) = std::str::from_utf8(entities_bytes) else {
         return;

@@ -182,8 +182,10 @@ fn player_movement_system(
         }
 
         // GoldSrc angles: pitch in degrees [-89, 89], yaw in degrees [0, 360]
-        // Bevy camera forward (-Z) maps to GoldSrc +Y (yaw = 90 deg). GoldSrc yaw 0 deg is +X.
-        let pitch_deg = player.pitch.to_degrees();
+        // In GoldSrc convention (and angle_vectors): negative pitch is looking UP (-sp > 0 -> +Z).
+        // In Bevy mouse look, looking up gives positive player.pitch.
+        // Therefore, pitch_deg must be inverted to match GoldSrc coordinate convention.
+        let pitch_deg = -player.pitch.to_degrees();
         let yaw_deg = (player.yaw.to_degrees() + 90.0).rem_euclid(360.0);
 
         // 2. Keyboard Input mapping to PlayerCmd
