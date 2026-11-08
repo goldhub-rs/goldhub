@@ -135,15 +135,17 @@ mod tests {
         };
         let vars = MoveVars::default();
 
-        movement::pm_jump(&mut state, &cmd, &vars);
+        let dt = 1.0 / 128.0;
+        movement::pm_jump(&mut state, &cmd, &vars, dt);
 
         assert!(
             !state.on_ground,
             "Player must leave ground immediately upon jump"
         );
-        assert_eq!(
-            state.velocity[2], JUMP_IMPULSE,
-            "Vertical impulse must match JUMP_IMPULSE"
+        let expected_vz = JUMP_IMPULSE - vars.gravity * 0.5 * dt;
+        assert!(
+            (state.velocity[2] - expected_vz).abs() < 1e-4,
+            "Vertical impulse must match JUMP_IMPULSE minus Verlet midpoint gravity"
         );
     }
 
@@ -159,6 +161,39 @@ mod tests {
             "Mega bunny jumping must crop excess velocity"
         );
         assert!(vel[0] > 0.0);
+    }
+
+    #[test]
+    fn test_authentic_jump_height_and_64unit_obstacle_clearance() {
+        let world = FlatWorld;
+        let mut sim = FixedSubtickSimulator::new([0.0, 0.0, 0.03125], 0.0);
+        let jump_cmd = PlayerCmd {
+            buttons: IN_JUMP,
+            ..Default::default()
+        };
+
+        // 1. Single jump peak height
+        let mut peak_z = 0.03125f32;
+        for _ in 0..64 {
+            sim.advance(1.0 / 128.0, &jump_cmd, &world);
+            peak_z = peak_z.max(sim.current.origin[2]);
+        }
+        let single_jump_height = peak_z - 0.03125;
+        assert!(
+            single_jump_height <= 45.0,
+            "Single jump height must strictly not exceed 45.0 units, got {single_jump_height}"
+        );
+        assert!(
+            single_jump_height >= 44.5,
+            "Single jump height must reach at least 44.5 units, got {single_jump_height}"
+        );
+
+        // 2. Crouch jump clearance: jump + duck tucks legs up by 18 units
+        let crouch_jump_clearance = single_jump_height + 18.0;
+        assert!(
+            crouch_jump_clearance < 64.0,
+            "Crouch jump clearance must be strictly less than 64.0 units (got {crouch_jump_clearance}), preventing 64-crate jump exploit"
+        );
     }
 
     #[test]

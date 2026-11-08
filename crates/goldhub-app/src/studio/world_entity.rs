@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 
-use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
+use crate::audio::GameSearchPaths;
 use crate::player::LevelCollisionResource;
 use super::animation::StudioAnimatedModel;
 use super::store::{StudioModelStore, create_initial_bevy_mesh};
@@ -16,6 +16,8 @@ pub struct BspEntitiesLump(pub Vec<u8>);
 pub struct WorldStudioEntity {
     pub classname: String,
     pub model_path: String,
+    pub targetname: String,
+    pub is_solid: bool,
 }
 
 /// Bounding box component in Bevy coordinates for physical interaction and ray intersection.
@@ -26,15 +28,13 @@ pub struct EntityCollisionBounds {
 }
 
 /// Spawns interactive 3D studio entities parsed from the BSP map's entity lump.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
 pub fn spawn_map_studio_entities(
     mut commands: Commands,
     mut model_store: ResMut<StudioModelStore>,
     search_paths: Res<GameSearchPaths>,
     entities_res: Option<Res<BspEntitiesLump>>,
     collision_res: Res<LevelCollisionResource>,
-    mut audio_bank: ResMut<GoldSrcAudioBank>,
-    mut audio_sources: ResMut<Assets<AudioSource>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -49,8 +49,7 @@ pub fn spawn_map_studio_entities(
             let mut origin_str = "";
             let mut angle_str = "";
             let mut model_str = "";
-            let mut message_str = "";
-            let mut spawnflags_str = "";
+            let mut targetname_str = "";
 
             for line in block.lines() {
                 let trimmed = line.trim();
@@ -62,8 +61,7 @@ pub fn spawn_map_studio_entities(
                             "origin" => origin_str = parts[3],
                             "angle" | "angles" => angle_str = parts[3],
                             "model" => model_str = parts[3],
-                            "message" => message_str = parts[3],
-                            "spawnflags" => spawnflags_str = parts[3],
+                            "targetname" => targetname_str = parts[3],
                             _ => {}
                         }
                     }
@@ -85,38 +83,11 @@ pub fn spawn_map_studio_entities(
                 continue;
             };
 
-            // 1. Handle Ambient Sound Entities (e.g. cs_italy Opera Radio, cs_office ambience)
-            if classname == "ambient_generic" && !message_str.is_empty() {
-                let spawnflags = spawnflags_str.parse::<u32>().unwrap_or(0);
-                // SF_AMBIENT_SOUND_START_OFF = 1
-                if (spawnflags & 1) == 0 {
-                    let bevy_pos = Vec3::new(gx, gz, -gy);
-                    if let Some(handle) = audio_bank.get_or_load_sound(
-                        message_str,
-                        &search_paths.dirs,
-                        &mut audio_sources,
-                    ) {
-                        commands.spawn((
-                            AudioPlayer::new(handle),
-                            PlaybackSettings::LOOP.with_spatial(true),
-                            Transform::from_translation(bevy_pos),
-                        ));
-                        tracing::info!(
-                            message = message_str,
-                            pos = ?bevy_pos,
-                            "Spawned active spatial ambient_generic radio audio"
-                        );
-                    }
-                }
-                continue;
-            }
-
             // Parse GoldSrc yaw angle
             let mut gyaw = 0.0f32;
             if !angle_str.is_empty() {
                 let mut ap = angle_str.split_whitespace();
                 if let Some(first) = ap.next() {
-                    // Check if 3-component "pitch yaw roll" or single "yaw"
                     if let Some(second) = ap.next() {
                         if let Ok(y) = second.parse::<f32>() {
                             gyaw = y;
@@ -127,9 +98,13 @@ pub fn spawn_map_studio_entities(
                 }
             }
 
-            // Determine model path based on entity classname
+            // Determine model path based on entity classname and map-specified model
             let target_model = if classname == "hostage_entity" || classname == "monster_scientist" {
-                "models/hostage.mdl"
+                if model_str.is_empty() {
+                    "models/hostage.mdl"
+                } else {
+                    model_str
+                }
             } else if (classname == "cycler_sprite" || classname == "env_model")
                 && std::path::Path::new(model_str)
                     .extension()
@@ -141,6 +116,8 @@ pub fn spawn_map_studio_entities(
             } else {
                 continue;
             };
+
+            let is_solid = classname == "hostage_entity" || classname == "monster_scientist";
 
             // Authentic GoldSrc DROP_TO_FLOOR: trace downwards 256 units against BSP collision to snap to floor
             let mut floor_z = gz;
@@ -170,6 +147,8 @@ pub fn spawn_map_studio_entities(
                 bevy_pos,
                 bevy_rot,
                 classname,
+                targetname_str,
+                is_solid,
             ) {
                 spawned_any = true;
             }
@@ -181,7 +160,6 @@ pub fn spawn_map_studio_entities(
     if !spawned_any {
         tracing::info!("No model entities in map lump; spawning ambient test hostage and chicken");
 
-        // Spawn test hostage at [120.0, 36.0, -80.0]
         spawn_studio_entity(
             &mut commands,
             &mut model_store,
@@ -189,13 +167,14 @@ pub fn spawn_map_studio_entities(
             &mut images,
             &mut materials,
             &mut meshes,
-            "models/hostage.mdl",
+            "models/scientist.mdl",
             Vec3::new(120.0, 36.0, -80.0),
             Quat::from_rotation_y(-45.0_f32.to_radians()),
             "hostage_entity",
+            "demo_hostage",
+            true,
         );
 
-        // Spawn test chicken at [60.0, 36.0, -100.0]
         spawn_studio_entity(
             &mut commands,
             &mut model_store,
@@ -207,6 +186,8 @@ pub fn spawn_map_studio_entities(
             Vec3::new(60.0, 36.0, -100.0),
             Quat::from_rotation_y(30.0_f32.to_radians()),
             "cycler_sprite",
+            "demo_chicken",
+            false,
         );
     }
 }
@@ -224,6 +205,8 @@ pub fn spawn_studio_entity(
     position: Vec3,
     rotation: Quat,
     classname: &str,
+    targetname: &str,
+    is_solid: bool,
 ) -> bool {
     let Some(model_data) = model_store.get_or_load(model_path, search_paths, images, materials)
     else {
@@ -235,8 +218,8 @@ pub fn spawn_studio_entity(
     let mut seq_fps = 30.0;
     let sequences = &model_data.model.rig.sequences;
 
-    // For hostages, prefer "idle1" or "idle3" over walk
-    if model_path.contains("hostage") {
+    // For hostages/scientists, prefer "idle1" or "idle" over walk
+    if model_path.contains("hostage") || model_path.contains("scientist") {
         if let Some(idx) = sequences.iter().position(|s| s.name == "idle1") {
             initial_seq = idx;
         } else if let Some(idx) = sequences.iter().position(|s| s.name.contains("idle")) {
@@ -250,20 +233,33 @@ pub fn spawn_studio_entity(
     let mut anim_component = StudioAnimatedModel::new(model_path, false);
     anim_component.set_sequence(initial_seq, seq_fps, true);
 
-    let bounds = if model_path.contains("hostage") || classname.contains("hostage") {
+    // Compute dynamic bounding box from rest-pose vertices
+    let mut min_pt = Vec3::splat(f32::INFINITY);
+    let mut max_pt = Vec3::splat(f32::NEG_INFINITY);
+    for sub in &model_data.submeshes {
+        for v in &sub.rest_vertices {
+            // Bevy coordinates: X_bevy = X_gs, Y_bevy = Z_gs, Z_bevy = -Y_gs
+            let p = Vec3::new(v.position[0], v.position[2], -v.position[1]);
+            min_pt = min_pt.min(p);
+            max_pt = max_pt.max(p);
+        }
+    }
+
+    let bounds = if is_solid {
+        // Standard GoldSrc player/hostage collision hull 0
         EntityCollisionBounds {
             mins: Vec3::new(-16.0, 0.0, -16.0),
             maxs: Vec3::new(16.0, 72.0, 16.0),
         }
-    } else if model_path.contains("chick") {
+    } else if min_pt.x.is_finite() && max_pt.x.is_finite() {
         EntityCollisionBounds {
-            mins: Vec3::new(-8.0, 0.0, -8.0),
-            maxs: Vec3::new(8.0, 16.0, 8.0),
+            mins: min_pt,
+            maxs: max_pt,
         }
     } else {
         EntityCollisionBounds {
-            mins: Vec3::new(-16.0, 0.0, -16.0),
-            maxs: Vec3::new(16.0, 36.0, 16.0),
+            mins: Vec3::new(-8.0, 0.0, -8.0),
+            maxs: Vec3::new(8.0, 16.0, 8.0),
         }
     };
 
@@ -273,6 +269,8 @@ pub fn spawn_studio_entity(
             WorldStudioEntity {
                 classname: classname.to_string(),
                 model_path: model_path.to_string(),
+                targetname: targetname.to_string(),
+                is_solid,
             },
             bounds,
             Transform::from_translation(position).with_rotation(rotation),
@@ -304,6 +302,7 @@ pub fn spawn_studio_entity(
     tracing::info!(
         model = model_path,
         classname = classname,
+        targetname = targetname,
         pos = ?position,
         "Spawned World 3D StudioModel Entity"
     );

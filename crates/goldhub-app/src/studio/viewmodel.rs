@@ -97,12 +97,7 @@ pub fn spawn_viewmodel_system(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KnifeHitType {
-    Miss,
-    Wall,
-    Flesh,
-}
+
 
 /// Ray-AABB slab intersection test returning distance `t` along `dir` if hit.
 fn ray_intersects_aabb(
@@ -152,6 +147,14 @@ fn ray_intersects_aabb(
 const KNIFE_REACH: f32 = 48.0;
 
 /// Handles player attack inputs (LMB slash, RMB stab) and audio triggers with forward ray tracing.
+#[derive(Debug, Clone, Copy)]
+enum HitTarget {
+    Breakable(Entity, crate::entity::BreakableMaterial),
+    Flesh,
+    Wall,
+    Miss,
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn viewmodel_input_system(
     mut commands: Commands,
@@ -164,9 +167,10 @@ pub fn viewmodel_input_system(
     collision_res: Res<LevelCollisionResource>,
     camera_query: Query<&GlobalTransform, (With<Camera3d>, With<PlayerController>)>,
     entity_query: Query<
-        (&GlobalTransform, &EntityCollisionBounds),
-        With<WorldStudioEntity>,
+        (&GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity),
     >,
+    mut breakable_query: Query<(Entity, &mut crate::entity::BreakableEntity)>,
+    mut fire_events: EventWriter<crate::entity::FireTargetEvent>,
     mut vm_query: Query<(&mut ViewModelWeapon, &mut StudioAnimatedModel)>,
 ) {
     let dt = time.delta_secs();
@@ -196,7 +200,7 @@ pub fn viewmodel_input_system(
             }
         }
 
-        // Only allow new attack if not mid-animation or cooldown expired
+        // Only allow new attack if cooldown expired
         if vm.attack_cooldown > 0.0 {
             continue;
         }
@@ -213,9 +217,25 @@ pub fn viewmodel_input_system(
             |cam_t| (cam_t.translation(), cam_t.forward().as_vec3()),
         );
 
-        // 1. Trace against solid world entities (hostages, chickens, props)
+        // 1. Trace against func_breakable entities (bottles, chickens, radio)
+        let mut closest_breakable: Option<(Entity, f32, crate::entity::BreakableMaterial)> = None;
+        for (b_ent, b) in &breakable_query {
+            if b.is_broken {
+                continue;
+            }
+            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, b.bmin, b.bmax)
+                && closest_breakable.as_ref().is_none_or(|(_, d, _)| t < *d)
+            {
+                closest_breakable = Some((b_ent, t, b.material));
+            }
+        }
+
+        // 2. Trace against solid world entities (hostages)
         let mut closest_entity_dist: Option<f32> = None;
-        for (ent_t, bounds) in &entity_query {
+        for (ent_t, bounds, studio_ent) in &entity_query {
+            if !studio_ent.is_solid {
+                continue;
+            }
             let ep = ent_t.translation();
             let bmin = ep + bounds.mins;
             let bmax = ep + bounds.maxs;
@@ -226,11 +246,10 @@ pub fn viewmodel_input_system(
             }
         }
 
-        // 2. Trace against world BSP collision geometry
+        // 3. Trace against world BSP collision geometry
         let mut wall_hit_dist: Option<f32> = None;
         if let Some(ref col_model) = collision_res.model {
             let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
-            // Convert Bevy ray to GoldSrc coordinates: X_gs = X_bevy, Y_gs = -Z_bevy, Z_gs = Y_bevy
             let gs_start = [cam_pos.x, -cam_pos.z, cam_pos.y];
             let ray_end = cam_pos + cam_forward * KNIFE_REACH;
             let gs_end = [ray_end.x, -ray_end.z, ray_end.y];
@@ -241,30 +260,66 @@ pub fn viewmodel_input_system(
             }
         }
 
-        let hit_type = match (closest_entity_dist, wall_hit_dist) {
-            (Some(edist), Some(wdist)) => {
-                if edist <= wdist {
-                    KnifeHitType::Flesh
-                } else {
-                    KnifeHitType::Wall
-                }
-            }
-            (Some(_), None) => KnifeHitType::Flesh,
-            (None, Some(_)) => KnifeHitType::Wall,
-            (None, None) => KnifeHitType::Miss,
-        };
+        // Determine closest struck object
+
+        let mut hit = HitTarget::Miss;
+        let mut min_t = KNIFE_REACH + 1.0;
+
+        if let Some((b_ent, b_t, mat)) = closest_breakable
+            && b_t < min_t
+        {
+            min_t = b_t;
+            hit = HitTarget::Breakable(b_ent, mat);
+        }
+        if let Some(e_t) = closest_entity_dist
+            && e_t < min_t
+        {
+            min_t = e_t;
+            hit = HitTarget::Flesh;
+        }
+        if let Some(w_t) = wall_hit_dist
+            && w_t < min_t
+        {
+            hit = HitTarget::Wall;
+        }
+
+        let damage = if lmb { 25.0f32 } else { 65.0f32 };
 
         if lmb {
-            // Primary Attack: alternating midslash1 (seq 6) and midslash2 (seq 7), 55 FPS, 66 frames!
+            // Primary Attack: alternating midslash1 (seq 6) and midslash2 (seq 7)
             vm.last_swing = 1 - vm.last_swing;
             let target_seq = if vm.last_swing == 0 { 6 } else { 7 };
-            let slash_fps = sequences.get(target_seq).map_or(55.0, |s| s.fps);
-
-            anim.set_sequence(target_seq, slash_fps, false);
+            anim.set_sequence(target_seq, 75.0, false);
             vm.attack_cooldown = 0.35;
 
-            let sound_name = match hit_type {
-                KnifeHitType::Flesh => {
+            let sound_name = match hit {
+                HitTarget::Breakable(b_ent, mat) => {
+                    if let Ok((_, mut breakable)) = breakable_query.get_mut(b_ent) {
+                        breakable.health -= damage;
+                        if breakable.health <= 0.0 && !breakable.is_broken {
+                            breakable.is_broken = true;
+                            fire_events.send(crate::entity::FireTargetEvent {
+                                target: breakable.target.clone(),
+                            });
+                            match mat {
+                                crate::entity::BreakableMaterial::Glass => "debris/bustglass1.wav",
+                                crate::entity::BreakableMaterial::Wood => "debris/bustcrate1.wav",
+                                crate::entity::BreakableMaterial::Flesh => "debris/bustflesh1.wav",
+                                _ => "debris/bustmetal1.wav",
+                            }
+                        } else {
+                            match mat {
+                                crate::entity::BreakableMaterial::Glass => "debris/glass1.wav",
+                                crate::entity::BreakableMaterial::Wood => "debris/wood1.wav",
+                                crate::entity::BreakableMaterial::Flesh => "weapons/knife_hit1.wav",
+                                _ => "debris/metal1.wav",
+                            }
+                        }
+                    } else {
+                        "weapons/knife_hitwall1.wav"
+                    }
+                }
+                HitTarget::Flesh => {
                     const HITS: [&str; 4] = [
                         "weapons/knife_hit1.wav",
                         "weapons/knife_hit2.wav",
@@ -274,8 +329,8 @@ pub fn viewmodel_input_system(
                     let pick = ((time.elapsed_secs() * 1000.0) as usize) % HITS.len();
                     HITS[pick]
                 }
-                KnifeHitType::Wall => "weapons/knife_hitwall1.wav",
-                KnifeHitType::Miss => {
+                HitTarget::Wall => "weapons/knife_hitwall1.wav",
+                HitTarget::Miss => {
                     if vm.last_swing == 0 {
                         "weapons/knife_slash1.wav"
                     } else {
@@ -293,18 +348,45 @@ pub fn viewmodel_input_system(
             }
         } else if rmb {
             // Secondary Attack: heavy stab (seq 4 if hit, seq 5 if miss)
-            let (target_seq, stab_fps, sound_name) = match hit_type {
-                KnifeHitType::Flesh => {
+            let (target_seq, stab_fps, sound_name) = match hit {
+                HitTarget::Breakable(b_ent, mat) => {
+                    let fps = sequences.get(4).map_or(35.0, |s| s.fps);
+                    let snd = if let Ok((_, mut breakable)) = breakable_query.get_mut(b_ent) {
+                        breakable.health -= damage;
+                        if breakable.health <= 0.0 && !breakable.is_broken {
+                            breakable.is_broken = true;
+                            fire_events.send(crate::entity::FireTargetEvent {
+                                target: breakable.target.clone(),
+                            });
+                            match mat {
+                                crate::entity::BreakableMaterial::Glass => "debris/bustglass2.wav",
+                                crate::entity::BreakableMaterial::Wood => "debris/bustcrate2.wav",
+                                crate::entity::BreakableMaterial::Flesh => "debris/bustflesh1.wav",
+                                _ => "debris/bustmetal1.wav",
+                            }
+                        } else {
+                            match mat {
+                                crate::entity::BreakableMaterial::Glass => "debris/glass2.wav",
+                                crate::entity::BreakableMaterial::Wood => "debris/wood2.wav",
+                                crate::entity::BreakableMaterial::Flesh => "weapons/knife_hit2.wav",
+                                _ => "debris/metal2.wav",
+                            }
+                        }
+                    } else {
+                        "weapons/knife_hitwall1.wav"
+                    };
+                    (4, fps, snd)
+                }
+                HitTarget::Flesh => {
                     let fps = sequences.get(4).map_or(35.0, |s| s.fps);
                     (4, fps, "weapons/knife_stab.wav")
                 }
-                KnifeHitType::Wall => {
+                HitTarget::Wall => {
                     let fps = sequences.get(4).map_or(35.0, |s| s.fps);
                     (4, fps, "weapons/knife_hitwall1.wav")
                 }
-                KnifeHitType::Miss => {
+                HitTarget::Miss => {
                     let fps = sequences.get(5).map_or(40.0, |s| s.fps);
-                    // Stabbing air in CS 1.6 plays slash whoosh sound!
                     (5, fps, "weapons/knife_slash1.wav")
                 }
             };

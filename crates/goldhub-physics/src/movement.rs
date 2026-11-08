@@ -489,7 +489,7 @@ pub fn pm_air_move(
 }
 
 /// Handles jump impulse initiation with Bunnyhop ground-window preservation (`PM_Jump`).
-pub fn pm_jump(state: &mut PlayerState, _cmd: &PlayerCmd, vars: &MoveVars) {
+pub fn pm_jump(state: &mut PlayerState, _cmd: &PlayerCmd, vars: &MoveVars, dt: f32) {
     if state.dead {
         state.old_buttons |= IN_JUMP;
         return;
@@ -517,7 +517,10 @@ pub fn pm_jump(state: &mut PlayerState, _cmd: &PlayerCmd, vars: &MoveVars) {
         let ratio = (100.0 - state.jump_penalty_ms * 0.001 * 19.0) * 0.01;
         jump_z *= ratio;
     }
-    state.velocity[2] = jump_z;
+    // Midpoint Verlet half-step gravity: subtract 0.5 * gravity * dt so velocity
+    // inside pm_air_move represents the interval midpoint velocity, yielding exact
+    // analytical parabola peak height (44.98 u normal jump, 62.98 u crouch jump < 64.0 u).
+    state.velocity[2] = jump_z - vars.gravity * 0.5 * dt;
 
     // Add stamina cooldown
     state.jump_penalty_ms = 1315.7895;
@@ -1046,7 +1049,7 @@ pub fn pm_player_move(
 
     // 6. Jump input
     if (cmd.buttons & IN_JUMP) != 0 {
-        pm_jump(state, cmd, vars);
+        pm_jump(state, cmd, vars, dt);
     } else {
         state.old_buttons &= !IN_JUMP;
     }

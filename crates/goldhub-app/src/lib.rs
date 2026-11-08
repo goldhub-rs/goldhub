@@ -5,12 +5,18 @@
 
 pub mod audio;
 pub mod camera;
+pub mod entity;
 pub mod level;
 pub mod mesh_bridge;
 pub mod player;
 pub mod studio;
 pub mod video_settings;
 pub mod window;
+
+pub use entity::{
+    AmbientAudioEntity, BreakableEntity, BreakableMaterial, EntityRuntimePlugin, EnvRenderEntity,
+    EnvShooterEntity, FireTargetEvent, GibParticle,
+};
 
 pub use audio::{
     GameSearchPaths, GoldSrcAudioBank, GoldSrcAudioPlugin, GroundFace, LevelGroundMaterialIndex,
@@ -61,6 +67,7 @@ pub fn build_goldhub_app() -> App {
         VideoSettingsPlugin,
         GoldSrcAudioPlugin,
         StudioModelPlugin,
+        EntityRuntimePlugin,
     ));
 
     app

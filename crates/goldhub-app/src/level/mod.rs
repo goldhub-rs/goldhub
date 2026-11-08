@@ -27,14 +27,19 @@ impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Startup,
-            (setup_level, crate::studio::spawn_map_studio_entities).chain(),
+            (
+                setup_level,
+                apply_deferred,
+                crate::studio::spawn_map_studio_entities,
+            )
+                .chain(),
         );
         app.add_systems(Update, skybox::update_skybox_position);
     }
 }
 
 #[allow(clippy::too_many_lines)]
-fn setup_level(
+pub fn setup_level(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -75,21 +80,27 @@ fn setup_level(
             // Spawning dynamic high-lumen PointLights blows out lightmaps and washes out shadows.
         }
 
-        let mut search_dirs = Vec::new();
+        let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
         if let Some(dir) = bsp_path.parent() {
-            search_dirs.push(dir);
+            search_dirs.push(dir.to_path_buf());
             if let Some(parent) = dir.parent() {
-                search_dirs.push(parent);
+                search_dirs.push(parent.to_path_buf());
+                if let Some(grandparent) = parent.parent() {
+                    search_dirs.push(grandparent.to_path_buf());
+                    search_dirs.push(grandparent.join("valve"));
+                    search_dirs.push(grandparent.join("cstrike"));
+                }
             }
         }
 
         commands.insert_resource(crate::audio::GameSearchPaths {
-            dirs: search_dirs.iter().map(|p| (*p).to_path_buf()).collect(),
+            dirs: search_dirs.clone(),
         });
 
+        let search_dirs_refs: Vec<&Path> = search_dirs.iter().map(std::path::PathBuf::as_path).collect();
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
         if let Ok((mesh_buffer, textures, lightmap_atlas, sky_name)) =
-            pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs)
+            pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs_refs)
         {
             // Build ground materials index for authentic GoldSrc footstep sounds
             if let Ok(bsp) = goldhub_formats::codecs::legacy::bsp::BspLevel::from_bytes(&raw_bytes)

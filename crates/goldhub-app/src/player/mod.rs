@@ -177,9 +177,17 @@ pub fn player_movement_system(
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut query: Query<(&mut Transform, &mut PlayerController)>,
     solid_query: Query<
-        (&Transform, &crate::studio::EntityCollisionBounds),
+        (
+            &Transform,
+            &crate::studio::EntityCollisionBounds,
+            &crate::studio::WorldStudioEntity,
+        ),
         Without<PlayerController>,
     >,
+    mut commands: Commands,
+    mut audio_bank: ResMut<crate::audio::GoldSrcAudioBank>,
+    mut audio_sources: ResMut<Assets<AudioSource>>,
+    search_paths: Res<crate::audio::GameSearchPaths>,
 ) {
     if *mode != CameraControlMode::Player {
         return;
@@ -190,9 +198,12 @@ pub fn player_movement_system(
         return;
     }
 
-    // Query active solid studio entities using true extents (chicken = 16 high, hostage = 72 high)
+    // Query active solid studio entities (filtering by is_solid so props/chickens don't block)
     let mut solid_entities = Vec::with_capacity(8);
-    for (ent_trans, bounds) in &solid_query {
+    for (ent_trans, bounds, studio_ent) in &solid_query {
+        if !studio_ent.is_solid {
+            continue;
+        }
         let p = ent_trans.translation;
         // Bevy to GoldSrc: gx = p.x, gy = -p.z, gz = p.y
         let gx = p.x;
@@ -253,6 +264,16 @@ pub fn player_movement_system(
         }
         if keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight) {
             buttons |= IN_SPEED;
+        }
+        if keyboard.just_pressed(KeyCode::KeyE) {
+            // GoldSrc +use interact sound (wpn_denyselect.wav)
+            if let Some(handle) = audio_bank.get_or_load_sound(
+                "common/wpn_denyselect.wav",
+                &search_paths.dirs,
+                &mut audio_sources,
+            ) {
+                commands.spawn((AudioPlayer::new(handle), PlaybackSettings::DESPAWN));
+            }
         }
 
         let cmd = PlayerCmd {

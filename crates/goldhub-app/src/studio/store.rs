@@ -9,7 +9,6 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use goldhub_formats::codecs::AssetDecoder;
 use goldhub_formats::codecs::legacy::StudioMdlDecoder;
 use goldhub_formats::ir::{StudioModel, StudioVertex};
 
@@ -54,7 +53,25 @@ impl StudioModelStore {
         let raw_bytes = fs::read(&file_path).ok()?;
         let decoder = StudioMdlDecoder;
 
-        let model: StudioModel = match decoder.decode(&raw_bytes) {
+        // Check if companion external texture model exists (e.g. scientistT.mdl for scientist.mdl)
+        let mut external_tex_bytes = None;
+        if let Some(stem) = file_path.file_stem().and_then(|s| s.to_str()) {
+            let t_name_upper = format!("{stem}T.mdl");
+            let t_name_lower = format!("{stem}t.mdl");
+            let t_path_direct_upper = file_path.with_file_name(&t_name_upper);
+            let t_path_direct_lower = file_path.with_file_name(&t_name_lower);
+            if t_path_direct_upper.exists() {
+                external_tex_bytes = fs::read(&t_path_direct_upper).ok();
+            } else if t_path_direct_lower.exists() {
+                external_tex_bytes = fs::read(&t_path_direct_lower).ok();
+            } else if let Some(resolved_t) = resolve_model_file_path(&format!("models/{t_name_upper}"), search_paths) {
+                external_tex_bytes = fs::read(&resolved_t).ok();
+            } else if let Some(resolved_t) = resolve_model_file_path(&format!("models/{t_name_lower}"), search_paths) {
+                external_tex_bytes = fs::read(&resolved_t).ok();
+            }
+        }
+
+        let model: StudioModel = match decoder.decode_model_with_textures(&raw_bytes, external_tex_bytes.as_deref()) {
             Ok(m) => m,
             Err(err) => {
                 tracing::warn!(path = ?file_path, error = ?err, "Failed to decode StudioModel");

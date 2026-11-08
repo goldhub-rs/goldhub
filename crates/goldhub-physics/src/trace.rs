@@ -703,29 +703,30 @@ impl<'a, W: WorldTrace> EntityCompositeTrace<'a, W> {
 
 impl<W: WorldTrace> WorldTrace for EntityCompositeTrace<'_, W> {
     fn test_player_position(&self, pos: [f32; 3], hull_idx: u32) -> Option<u32> {
+        const DIST_EPSILON: f32 = 0.03125;
+
         if let Some(hit) = self.base.test_player_position(pos, hull_idx) {
             return Some(hit);
         }
-
         let (pmins, pmaxs) = player_hull_bounds(hull_idx);
         for (i, &(emins, emaxs)) in self.solid_entities.iter().enumerate() {
             let exp_min = [
-                emins[0] - pmaxs[0],
-                emins[1] - pmaxs[1],
-                emins[2] - pmaxs[2],
+                emins[0] - pmaxs[0] + DIST_EPSILON,
+                emins[1] - pmaxs[1] + DIST_EPSILON,
+                emins[2] - pmaxs[2] + DIST_EPSILON,
             ];
             let exp_max = [
-                emaxs[0] - pmins[0],
-                emaxs[1] - pmins[1],
-                emaxs[2] - pmins[2],
+                emaxs[0] - pmins[0] - DIST_EPSILON,
+                emaxs[1] - pmins[1] - DIST_EPSILON,
+                emaxs[2] - pmins[2] - DIST_EPSILON,
             ];
 
-            if pos[0] >= exp_min[0]
-                && pos[0] <= exp_max[0]
-                && pos[1] >= exp_min[1]
-                && pos[1] <= exp_max[1]
-                && pos[2] >= exp_min[2]
-                && pos[2] <= exp_max[2]
+            if pos[0] > exp_min[0]
+                && pos[0] < exp_max[0]
+                && pos[1] > exp_min[1]
+                && pos[1] < exp_max[1]
+                && pos[2] > exp_min[2]
+                && pos[2] < exp_max[2]
             {
                 return Some(10_000 + i as u32);
             }
