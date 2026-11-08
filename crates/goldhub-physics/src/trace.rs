@@ -636,16 +636,36 @@ impl WorldTrace for BspWorldCollision<'_> {
                         sub_trace.plane_normal
                     }
                 } else {
-                    let diff = [
-                        origin[0] - ladder_center[0],
-                        origin[1] - ladder_center[1],
-                        0.0,
-                    ];
-                    let len = diff[0].hypot(diff[1]);
-                    if len > 0.001 {
-                        [diff[0] / len, diff[1] / len, 0.0]
+                    // Start is inside the ladder brush (common because player hull overlaps the brush).
+                    // In GoldSrc/CS 1.6, func_ladder is an oriented bounding box whose face normal is
+                    // along its thinnest horizontal dimension (depth of ladder is usually 2-8 units).
+                    let dx = (ent.maxs[0] - ent.mins[0]).abs();
+                    let dy = (ent.maxs[1] - ent.mins[1]).abs();
+
+                    let face_normal = if dx < dy {
+                        // Thin in X: ladder surface plane is perpendicular to X axis
+                        if origin[0] < ladder_center[0] {
+                            [-1.0, 0.0, 0.0]
+                        } else {
+                            [1.0, 0.0, 0.0]
+                        }
                     } else {
-                        [0.0, 1.0, 0.0]
+                        // Thin in Y: ladder surface plane is perpendicular to Y axis
+                        if origin[1] < ladder_center[1] {
+                            [0.0, -1.0, 0.0]
+                        } else {
+                            [0.0, 1.0, 0.0]
+                        }
+                    };
+
+                    if rotated {
+                        [
+                            forward[0] * face_normal[0] - right[0] * face_normal[1] + up[0] * face_normal[2],
+                            forward[1] * face_normal[0] - right[1] * face_normal[1] + up[1] * face_normal[2],
+                            forward[2] * face_normal[0] - right[2] * face_normal[1] + up[2] * face_normal[2],
+                        ]
+                    } else {
+                        face_normal
                     }
                 };
 
