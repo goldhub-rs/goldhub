@@ -3,6 +3,7 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::type_complexity)]
 
+pub mod audio;
 pub mod camera;
 pub mod level;
 pub mod mesh_bridge;
@@ -10,6 +11,7 @@ pub mod player;
 pub mod video_settings;
 pub mod window;
 
+pub use audio::{GameSearchPaths, GoldSrcAudioBank, GoldSrcAudioPlugin};
 pub use camera::{SpectatorCamera, SpectatorCameraPlugin};
 pub use level::LevelPlugin;
 pub use mesh_bridge::{PartitionedMesh, to_bevy_mesh, to_bevy_submeshes};
@@ -50,6 +52,7 @@ pub fn build_goldhub_app() -> App {
         PlayerPlugin,
         LevelPlugin,
         VideoSettingsPlugin,
+        GoldSrcAudioPlugin,
     ));
 
     app
@@ -67,5 +70,14 @@ mod tests {
         app.add_plugins((WindowControlPlugin, SpectatorCameraPlugin));
         assert!(app.is_plugin_added::<WindowControlPlugin>());
         assert!(app.is_plugin_added::<SpectatorCameraPlugin>());
+    }
+    #[test]
+    fn test_goldsrc_audio_bank_resource_and_plugin() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<GameSearchPaths>();
+        app.init_resource::<GoldSrcAudioBank>();
+        assert!(app.world().contains_resource::<GoldSrcAudioBank>());
+        assert!(app.world().contains_resource::<GameSearchPaths>());
     }
 }

@@ -79,6 +79,10 @@ fn setup_level(
             }
         }
 
+        commands.insert_resource(crate::audio::GameSearchPaths {
+            dirs: search_dirs.iter().map(|p| (*p).to_path_buf()).collect(),
+        });
+
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
         if let Ok((mesh_buffer, textures, lightmap_atlas, sky_name)) =
             pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs)
@@ -324,6 +328,7 @@ fn setup_level(
             )),
             ..default()
         },
+        bevy::audio::SpatialListener::new(2.0),
         bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
         initial_grading,
         Transform::from_translation(bevy_spawn_pos).with_rotation(Quat::from_rotation_y(bevy_yaw)),
@@ -333,6 +338,7 @@ fn setup_level(
             yaw: bevy_yaw,
             mouse_sensitivity: 0.002,
             is_active: true,
+            ..default()
         },
         SpectatorCamera {
             move_speed: 600.0,

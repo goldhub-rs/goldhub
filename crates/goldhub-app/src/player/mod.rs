@@ -36,6 +36,10 @@ pub struct PlayerController {
     pub yaw: f32,
     pub mouse_sensitivity: f32,
     pub is_active: bool,
+    pub step_controller: goldhub_audio::StepSoundController,
+    pub was_on_ground: bool,
+    pub seed_step: u8,
+    pub seed_vol: u8,
 }
 
 impl Default for PlayerController {
@@ -46,6 +50,10 @@ impl Default for PlayerController {
             yaw: 0.0,
             mouse_sensitivity: 0.002,
             is_active: true,
+            step_controller: goldhub_audio::StepSoundController::default(),
+            was_on_ground: false,
+            seed_step: 0,
+            seed_vol: 0,
         }
     }
 }
@@ -151,7 +159,7 @@ impl WorldTrace for FallbackFlatWorld {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn player_movement_system(
+pub fn player_movement_system(
     time: Res<Time>,
     mode: Res<CameraControlMode>,
     collision_res: Res<LevelCollisionResource>,
