@@ -291,7 +291,7 @@ impl WorldTrace for BspWorldCollision<'_> {
 
         let (pmins, pmaxs) = player_hull_bounds(hull_idx);
         for ent in &self.model.brush_entities {
-            if ent.solid != goldhub_formats::ir::SOLID_BSP {
+            if ent.solid != goldhub_formats::ir::SOLID_BSP || ent.classname == "func_ladder" {
                 continue;
             }
 
@@ -398,7 +398,7 @@ impl WorldTrace for BspWorldCollision<'_> {
         ];
 
         for ent in &self.model.brush_entities {
-            if ent.solid != goldhub_formats::ir::SOLID_BSP {
+            if ent.solid != goldhub_formats::ir::SOLID_BSP || ent.classname == "func_ladder" {
                 continue;
             }
 

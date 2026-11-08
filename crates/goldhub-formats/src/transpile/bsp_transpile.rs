@@ -162,7 +162,7 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
     for block in entities_str.split('}') {
         let mut model_idx = None;
         let mut rendermode = 0u32;
-        let mut renderamt = 255u32;
+        let mut renderamt_opt: Option<u32> = None;
         let mut rendercolor = [0u8, 0u8, 0u8];
         let mut is_trigger = false;
         let mut origin = None;
@@ -180,7 +180,7 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
                 }
             } else if trimmed.starts_with("\"renderamt\"") {
                 if let Some(a_str) = trimmed.split('"').nth(3) {
-                    renderamt = a_str.parse::<u32>().unwrap_or(255);
+                    renderamt_opt = a_str.parse::<u32>().ok();
                 }
             } else if trimmed.starts_with("\"rendercolor\"") {
                 if let Some(c_str) = trimmed.split('"').nth(3) {
@@ -217,6 +217,7 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
         {
             let first = model.first_face.max(0) as usize;
             let num = model.num_faces.max(0) as usize;
+            let renderamt = renderamt_opt.unwrap_or(if rendermode == 2 { 0 } else { 255 });
 
             // In GoldSrc: only truly invisible triggers or rendermode 2 with renderamt == 0 are culled
             if is_trigger || (rendermode == 2 && renderamt == 0) {
@@ -290,13 +291,14 @@ pub fn compile_bsp_geometry_and_lightmap(
             .unwrap_or([0.0, 0.0, 0.0]);
         let (s_vec, s_shift, t_vec, t_shift, tex_id) = resolve_texture_projection(face, bsp);
 
-        // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN)
+        // Filter out invisible engine tool textures (AAATRIGGER, CLIP, ORIGIN) and SKY brushes
         if let Some(tex) = textures.get(tex_id as usize) {
             let tex_lower = tex.name.to_ascii_lowercase();
             if tex_lower == "aaatrigger"
                 || tex_lower == "clip"
                 || tex_lower == "origin"
                 || tex_lower == "{invisible"
+                || tex_lower == "sky"
             {
                 continue;
             }

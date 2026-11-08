@@ -197,34 +197,13 @@ fn setup_level(
                         .map_or("", String::as_str)
                         .to_ascii_lowercase();
 
-                    if tex_name == "sky" {
-                        // Sky brush surfaces: in GoldSrc, sky brushes clip the 3D skybox and occlude geometry behind them.
-                        // We use an unlit sky color matching atmospheric clear color.
-                        materials.add(StandardMaterial {
-                            base_color: Color::srgb(0.55, 0.68, 0.85),
-                            unlit: true,
-                            cull_mode: Some(bevy::render::render_resource::Face::Back),
-                            alpha_mode: AlphaMode::Opaque,
-                            ..default()
-                        })
-                    } else if part.render_mode == 2 {
+                    if part.render_mode == 2 {
                         // GoldSrc rendermode 2 (kRenderTransTexture).
-                        // Solid brush entities with default renderamt (255) and non-glass textures (e.g. wooden poles)
-                        // are treated as standard lightmapped opaque geometry per GoldSrc specification.
+                        // Transparent glass panels: soft ambient lighting, authentic opacity & tint.
+                        // Non-glass submeshes (such as door metal frames drkmtlt_ceil01b, handles, wooden posts)
+                        // are rendered as standard lightmapped opaque surfaces.
                         let is_glass = tex_name.contains("glass") || tex_name.contains("window");
-                        if part.render_amt == 255 && !is_glass {
-                            materials.add(StandardMaterial {
-                                base_color: Color::WHITE,
-                                base_color_texture: img_handle,
-                                perceptual_roughness: 0.95,
-                                reflectance: 0.02,
-                                cull_mode: Some(bevy::render::render_resource::Face::Back),
-                                alpha_mode: AlphaMode::Opaque,
-                                lightmap_exposure: BSP_LIGHTMAP_EXPOSURE,
-                                ..default()
-                            })
-                        } else {
-                            // Translucent glass panes: soft ambient lighting, double-sided visibility, authentic tint
+                        if is_glass {
                             let alpha = f32::from(part.render_amt) / 255.0;
                             let base_col = if part.render_color == [0, 0, 0] {
                                 Color::srgba(1.0, 1.0, 1.0, alpha)
@@ -246,6 +225,17 @@ fn setup_level(
                                 double_sided: true,
                                 alpha_mode: AlphaMode::Blend,
                                 lightmap_exposure: 150.0,
+                                ..default()
+                            })
+                        } else {
+                            materials.add(StandardMaterial {
+                                base_color: Color::WHITE,
+                                base_color_texture: img_handle,
+                                perceptual_roughness: 0.95,
+                                reflectance: 0.02,
+                                cull_mode: Some(bevy::render::render_resource::Face::Back),
+                                alpha_mode: AlphaMode::Opaque,
+                                lightmap_exposure: BSP_LIGHTMAP_EXPOSURE,
                                 ..default()
                             })
                         }
