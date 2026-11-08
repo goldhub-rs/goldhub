@@ -6,6 +6,7 @@ members = [
     "crates/goldhub-formats",
     "crates/goldhub-net",
     "crates/goldhub-physics",
+    "crates/goldhub-audio",
     "crates/goldhub-app",
 ]
 

@@ -5,7 +5,8 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use goldhub_formats::codecs::AssetDecoder;
-use goldhub_formats::codecs::legacy::{Bsp30Decoder, Wad3Decoder};
+use goldhub_formats::codecs::legacy::{Bsp30Decoder, StudioMdlDecoder, Wad3Decoder};
+use goldhub_formats::ir::{SkeletalRig, StudioModel};
 use goldhub_formats::pipeline::AssetPipeline;
 use goldhub_formats::transpile::{compile_bsp_collision, compile_bsp_geometry};
 
@@ -424,6 +425,78 @@ fn test_inspect_de_nuke_and_cs_assault() {
         assert_eq!(
             unresolved, 0,
             "All visible world textures for {map_name} should be resolved!"
+        );
+    }
+}
+
+#[test]
+fn test_decode_real_studio_models() {
+    let knife_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/v_knife.mdl");
+    if knife_path.exists() {
+        let bytes = fs::read(knife_path).expect("read v_knife.mdl");
+        let decoder = StudioMdlDecoder;
+
+        // Decode SkeletalRig
+        let rig: SkeletalRig = decoder.decode(&bytes).expect("decode knife rig");
+        assert_eq!(rig.bones.len(), 39, "v_knife should have 39 bones");
+        assert_eq!(rig.hitboxes.len(), 5, "v_knife should have 5 hitboxes");
+        assert_eq!(rig.sequences.len(), 8, "v_knife should have 8 sequences");
+        assert_eq!(rig.sequences[0].name, "idle");
+        assert_eq!(rig.sequences[0].frame_count, 151);
+        assert_eq!(rig.sequences[0].bone_matrices.len(), 151);
+        assert_eq!(rig.sequences[0].bone_matrices[0].len(), 39);
+
+        // Decode Full StudioModel
+        let model: StudioModel = decoder.decode(&bytes).expect("decode knife model");
+        assert_eq!(model.textures.len(), 4, "v_knife has 4 embedded textures");
+        assert_eq!(model.textures[0].name, "knifeskin.bmp");
+        assert_eq!(model.textures[0].width, 512);
+        assert_eq!(model.textures[0].height, 512);
+        assert_eq!(model.textures[0].rgba_pixels.len(), 512 * 512 * 4);
+
+        assert_eq!(model.body_parts.len(), 1);
+        let bp = &model.body_parts[0];
+        assert_eq!(bp.name, "studio");
+        assert_eq!(bp.models.len(), 1);
+        let sub = &bp.models[0];
+        assert_eq!(sub.name, "reference");
+        assert_eq!(sub.meshes.len(), 4);
+
+        for (m_idx, mesh) in sub.meshes.iter().enumerate() {
+            assert!(!mesh.vertices.is_empty(), "mesh {m_idx} has vertices");
+            assert!(!mesh.indices.is_empty(), "mesh {m_idx} has indices");
+            assert_eq!(
+                mesh.indices.len() % 3,
+                0,
+                "mesh {m_idx} indices form triangles"
+            );
+        }
+    }
+
+    let guerilla_path =
+        Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/player/guerilla/guerilla.mdl");
+    if guerilla_path.exists() {
+        let bytes = fs::read(guerilla_path).expect("read guerilla.mdl");
+        let decoder = StudioMdlDecoder;
+        let model: StudioModel = decoder.decode(&bytes).expect("decode guerilla model");
+        assert!(!model.rig.bones.is_empty());
+        assert!(!model.rig.sequences.is_empty());
+        assert_eq!(model.textures.len(), 13, "guerilla has 13 textures");
+    }
+
+    let arctic_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/arcticorange.mdl");
+    let arctic_t_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/arcticorangeT.mdl");
+    if arctic_path.exists() && arctic_t_path.exists() {
+        let model_bytes = fs::read(arctic_path).expect("read arcticorange.mdl");
+        let tex_bytes = fs::read(arctic_t_path).expect("read arcticorangeT.mdl");
+        let decoder = StudioMdlDecoder;
+        let model = decoder
+            .decode_model_with_textures(&model_bytes, Some(&tex_bytes))
+            .expect("decode arctic with external T.mdl");
+        assert_eq!(
+            model.textures.len(),
+            3,
+            "arcticorange external textures loaded"
         );
     }
 }

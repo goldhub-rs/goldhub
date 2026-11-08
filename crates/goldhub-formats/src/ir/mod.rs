@@ -1,11 +1,11 @@
-//! Canonical Graphics & World Intermediate Representation (Data IR).
+//! Intermediate Representation (IR) for assets.
 //!
-//! Pure, engine-native data structures completely decoupled from disk formats.
 //! All asset codecs (glTF, KTX2, BSP30, WAD3, Studio MDL) decode into these unified structures.
 
 pub mod collision;
 pub mod lightmap;
 pub mod mesh;
+pub mod model;
 pub mod skeleton;
 pub mod texture;
 
@@ -15,7 +15,13 @@ pub use collision::{
 };
 pub use lightmap::{DynamicLightStyles, LightmapAtlas};
 pub use mesh::{MeshBuffer, SubMesh, Vertex};
-pub use skeleton::{BoneData, SequenceData, SkeletalRig};
+pub use model::{
+    StudioBodyPart, StudioMesh, StudioModel, StudioSubModel, StudioTexture, StudioVertex,
+};
+pub use skeleton::{
+    AnimEventData, AttachmentData, BoneControllerData, BoneData, BoneTransformKeyframe, HitboxData,
+    SequenceData, SkeletalRig,
+};
 pub use texture::{
     AtlasRegion, MipLevel, TextureAtlas, TextureDescriptor, TextureFormat, generate_rgba8_mipmaps,
 };

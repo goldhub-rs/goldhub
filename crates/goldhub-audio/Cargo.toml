@@ -1,0 +1,21 @@
+[package]
+name = "goldhub-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical GoldSrc/CS 1.6 audio engine, WAV PCM decoder, materials texture parser, spatial attenuation, and step sound system"
+
+[dependencies]
+bytemuck = { workspace = true }
+zerocopy = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

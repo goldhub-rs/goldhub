@@ -660,9 +660,12 @@ impl WorldTrace for BspWorldCollision<'_> {
 
                     if rotated {
                         [
-                            forward[0] * face_normal[0] - right[0] * face_normal[1] + up[0] * face_normal[2],
-                            forward[1] * face_normal[0] - right[1] * face_normal[1] + up[1] * face_normal[2],
-                            forward[2] * face_normal[0] - right[2] * face_normal[1] + up[2] * face_normal[2],
+                            forward[0] * face_normal[0] - right[0] * face_normal[1]
+                                + up[0] * face_normal[2],
+                            forward[1] * face_normal[0] - right[1] * face_normal[1]
+                                + up[1] * face_normal[2],
+                            forward[2] * face_normal[0] - right[2] * face_normal[1]
+                                + up[2] * face_normal[2],
                         ]
                     } else {
                         face_normal
