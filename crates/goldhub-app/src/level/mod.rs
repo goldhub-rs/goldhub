@@ -25,7 +25,10 @@ pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_level);
+        app.add_systems(
+            Startup,
+            (setup_level, crate::studio::spawn_map_studio_entities).chain(),
+        );
         app.add_systems(Update, skybox::update_skybox_position);
     }
 }
@@ -67,6 +70,7 @@ fn setup_level(
                 });
             }
             spawn_point = crate::player::parse_first_player_spawn(bsp.entities);
+            commands.insert_resource(crate::studio::BspEntitiesLump(bsp.entities.to_vec()));
             // In authentic GoldSrc, map lights ('light', 'light_spot') are 100% baked into BSP lightmaps.
             // Spawning dynamic high-lumen PointLights blows out lightmaps and washes out shadows.
         }

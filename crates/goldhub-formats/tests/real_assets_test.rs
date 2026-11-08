@@ -499,4 +499,30 @@ fn test_decode_real_studio_models() {
             "arcticorange external textures loaded"
         );
     }
+
+    let chick_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/chick.mdl");
+    if chick_path.exists() {
+        let bytes = fs::read(chick_path).expect("read chick.mdl");
+        let decoder = StudioMdlDecoder;
+        let model: StudioModel = decoder.decode(&bytes).expect("decode chick model");
+        assert!(!model.rig.bones.is_empty(), "chick has bones");
+        assert!(!model.rig.sequences.is_empty(), "chick has sequences");
+        println!(
+            "Chick sequences: {:?}",
+            model.rig.sequences.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    let hostage_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/hostage.mdl");
+    if hostage_path.exists() {
+        let bytes = fs::read(hostage_path).expect("read hostage.mdl");
+        let decoder = StudioMdlDecoder;
+        let model: StudioModel = decoder.decode(&bytes).expect("decode hostage model");
+        assert!(!model.rig.bones.is_empty(), "hostage has bones");
+        assert!(!model.rig.sequences.is_empty(), "hostage has sequences");
+        println!(
+            "Hostage sequences: {:?}",
+            model.rig.sequences.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
 }

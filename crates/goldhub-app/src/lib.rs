@@ -8,6 +8,7 @@ pub mod camera;
 pub mod level;
 pub mod mesh_bridge;
 pub mod player;
+pub mod studio;
 pub mod video_settings;
 pub mod window;
 
@@ -18,6 +19,10 @@ pub use camera::{SpectatorCamera, SpectatorCameraPlugin};
 pub use level::LevelPlugin;
 pub use mesh_bridge::{PartitionedMesh, to_bevy_mesh, to_bevy_submeshes};
 pub use player::{CameraControlMode, LevelCollisionResource, PlayerController, PlayerPlugin};
+pub use studio::{
+    BspEntitiesLump, StudioAnimatedModel, StudioModelData, StudioModelPlugin, StudioModelStore,
+    ViewModelWeapon, WorldStudioEntity,
+};
 pub use video_settings::{VideoSettings, VideoSettingsPlugin};
 pub use window::WindowControlPlugin;
 
@@ -55,6 +60,7 @@ pub fn build_goldhub_app() -> App {
         LevelPlugin,
         VideoSettingsPlugin,
         GoldSrcAudioPlugin,
+        StudioModelPlugin,
     ));
 
     app
@@ -81,5 +87,14 @@ mod tests {
         app.init_resource::<GoldSrcAudioBank>();
         assert!(app.world().contains_resource::<GoldSrcAudioBank>());
         assert!(app.world().contains_resource::<GameSearchPaths>());
+    }
+
+    #[test]
+    fn test_studio_model_plugin_and_resources_registration() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(StudioModelPlugin);
+        assert!(app.world().contains_resource::<StudioModelStore>());
+        assert!(app.world().contains_resource::<BspEntitiesLump>());
     }
 }
