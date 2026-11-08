@@ -17,12 +17,9 @@ const SAMPLE_BSP_PATH: &str = "D:/Repo/CS16/hlmsl/test_maps/de_inferno.bsp";
 const FALLBACK_BSP_PATH: &str =
     "D:/Repo/GoldSrc.rs/references/regamedll/regamedll/extra/Test Maps/regamedll_test_map_v8.bsp";
 
-/// Master lightmap exposure scaling factor matching authentic GoldSrc overbright rendering (`gl_overbright 1`).
-///
-/// In GoldSrc OpenGL (`gl_rsurf.c`), multi-texturing modulates diffuse and lightmap with a 2x overbright factor
-/// (`GL_RGB_SCALE = 2.0`). Luxels are decoded via `lightgammatable` into sRGB and converted to linear by the GPU
-/// (`Rgba8UnormSrgb`), scaled by 2.0 in the PBR diffuse lighting stage.
-const BSP_LIGHTMAP_EXPOSURE: f32 = 2.0;
+/// Master lightmap exposure scaling factor converting normalized [0, 1] BSP luxels
+/// into Bevy's physical PBR photometric illuminance range (~1200 lux for full sun).
+const BSP_LIGHTMAP_EXPOSURE: f32 = 1200.0;
 
 pub struct LevelPlugin;
 
@@ -40,13 +37,10 @@ fn setup_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // 1. Illumination: In authentic GoldSrc, static world lighting is 100% baked into BSP lightmaps.
-    // Dynamic lighting is NOT used for static lamps, and world surfaces receive 0 ambient light.
-    // Setting ambient brightness to 0.0 ensures dark vents, tunnels, and rooms retain authentic contrast
-    // and soft gradients rather than flattening to washed-out grey.
+    // 1. Illumination: Ambient daylight illumination matching GoldSrc outdoors
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.82, 0.86, 0.92),
-        brightness: 0.0,
+        brightness: 40.0,
     });
 
     // 2. Geometry Loading: Load BSP Level from CLI args, de_inferno.bsp or fallback
@@ -231,7 +225,7 @@ fn setup_level(
                                 cull_mode: None,
                                 double_sided: true,
                                 alpha_mode: AlphaMode::Blend,
-                                lightmap_exposure: 0.25,
+                                lightmap_exposure: 150.0,
                                 ..default()
                             })
                         } else {
