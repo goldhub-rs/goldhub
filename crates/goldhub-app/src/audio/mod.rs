@@ -14,6 +14,43 @@ use goldhub_audio::{MaterialTable, StepSoundContext, WaterPosition};
 
 use crate::player::{CameraControlMode, PlayerController};
 
+/// Default CS 1.6 game directories for resolving audio and materials.txt.
+pub const DEFAULT_GAME_DIRS: &[&str] = &[
+    "C:/Games/CS 1.6 GoldClient/cstrike",
+    "C:/Games/CS 1.6 GoldClient/valve",
+    "C:/Games/CS 1.6 GoldClient/cstrike_downloads",
+    "D:/Repo/CS16/cstrike",
+    "D:/Repo/CS16/valve",
+    "cstrike",
+    "valve",
+];
+
+/// Collects candidate game search directories in priority order:
+/// 1. Extra directories provided from level setup (e.g. BSP directory and parent)
+/// 2. GOLDHUB_GAME_DIR / GOLDS_GAME_DIR environment variable overrides
+/// 3. DEFAULT_GAME_DIRS known installations
+#[must_use]
+pub fn collect_game_search_dirs(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for d in extra_dirs {
+        dirs.push(d.clone());
+    }
+    if let Ok(env_dir) = std::env::var("GOLDHUB_GAME_DIR") {
+        dirs.push(PathBuf::from(&env_dir));
+        dirs.push(PathBuf::from(&env_dir).join("cstrike"));
+        dirs.push(PathBuf::from(&env_dir).join("valve"));
+    }
+    if let Ok(env_dir) = std::env::var("GOLDS_GAME_DIR") {
+        dirs.push(PathBuf::from(&env_dir));
+        dirs.push(PathBuf::from(&env_dir).join("cstrike"));
+        dirs.push(PathBuf::from(&env_dir).join("valve"));
+    }
+    for def in DEFAULT_GAME_DIRS {
+        dirs.push(PathBuf::from(def));
+    }
+    dirs
+}
+
 /// Search paths for resolving game assets (WAD, BSP, WAV sounds).
 #[derive(Resource, Default, Debug, Clone)]
 pub struct GameSearchPaths {
@@ -50,9 +87,9 @@ impl GoldSrcAudioBank {
             return Some(handle.clone());
         }
 
-        // Search candidates across search directories
+        let all_search_dirs = collect_game_search_dirs(search_dirs);
         let mut candidates = Vec::new();
-        for dir in search_dirs {
+        for dir in &all_search_dirs {
             candidates.push(dir.join("sound").join(&clean_path));
             candidates.push(dir.join(&clean_path));
             if let Some(parent) = dir.parent() {
@@ -78,7 +115,7 @@ impl GoldSrcAudioBank {
             }
         }
 
-        tracing::debug!("GoldSrc sound not found on disk: {}", clean_path);
+        tracing::warn!("GoldSrc sound not found on disk: {}", clean_path);
         None
     }
 }
@@ -102,9 +139,9 @@ fn setup_goldsrc_audio_bank(
     search_paths: Res<GameSearchPaths>,
     mut audio_bank: ResMut<GoldSrcAudioBank>,
 ) {
-    // Attempt to load materials.txt from search paths or standard CS 1.6 directories
+    let all_dirs = collect_game_search_dirs(&search_paths.dirs);
     let mut material_candidates = Vec::new();
-    for dir in &search_paths.dirs {
+    for dir in &all_dirs {
         material_candidates.push(dir.join("sound").join("materials.txt"));
         material_candidates.push(dir.join("materials.txt"));
         if let Some(parent) = dir.parent() {
@@ -112,13 +149,6 @@ fn setup_goldsrc_audio_bank(
             material_candidates.push(parent.join("valve").join("sound").join("materials.txt"));
         }
     }
-    // Hardcoded common locations check
-    material_candidates.push(PathBuf::from(
-        "C:/Games/CS 1.6 GoldClient/cstrike/sound/materials.txt",
-    ));
-    material_candidates.push(PathBuf::from(
-        "C:/Games/CS 1.6 GoldClient/valve/sound/materials.txt",
-    ));
 
     for candidate in material_candidates {
         if candidate.exists()
@@ -157,7 +187,7 @@ pub fn footstep_sound_system(
         return;
     }
 
-    for (transform, mut player) in &mut query {
+    for (_transform, mut player) in &mut query {
         if !player.is_active {
             continue;
         }
@@ -199,13 +229,15 @@ pub fn footstep_sound_system(
                 &mut audio_assets,
             )
         {
-            let foot_pos = transform.translation - Vec3::new(0.0, 36.0, 0.0);
+            tracing::info!(
+                "Playing fall landing sound: {} (vol: {:.2})",
+                fall_event.sound_path,
+                fall_event.volume
+            );
+            // Local player's own impact is direct stereo on CHAN_BODY in GoldSrc
             commands.spawn((
                 AudioPlayer::new(handle),
-                PlaybackSettings::DESPAWN
-                    .with_spatial(true)
-                    .with_volume(Volume::new(fall_event.volume)),
-                Transform::from_translation(foot_pos),
+                PlaybackSettings::DESPAWN.with_volume(Volume::new(fall_event.volume)),
             ));
         }
 
@@ -226,16 +258,47 @@ pub fn footstep_sound_system(
             &search_paths.dirs,
             &mut audio_assets,
         ) {
-            let foot_pos = transform.translation - Vec3::new(0.0, 36.0, 0.0);
+            tracing::info!(
+                "Playing footstep/ladder sound: {} (vol: {:.2})",
+                step_event.sound_path,
+                step_event.volume
+            );
+            // Local player's own footsteps are direct stereo on CHAN_BODY in GoldSrc
             commands.spawn((
                 AudioPlayer::new(handle),
-                PlaybackSettings::DESPAWN
-                    .with_spatial(true)
-                    .with_volume(Volume::new(step_event.volume)),
-                Transform::from_translation(foot_pos),
+                PlaybackSettings::DESPAWN.with_volume(Volume::new(step_event.volume)),
             ));
         }
 
         player.was_on_ground = on_ground;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_collect_game_search_dirs_contains_defaults() {
+        let extra = vec![PathBuf::from("custom/path")];
+        let dirs = collect_game_search_dirs(&extra);
+        assert!(!dirs.is_empty());
+        assert_eq!(dirs[0], PathBuf::from("custom/path"));
+        assert!(dirs.iter().any(|d| d.to_string_lossy().contains("cstrike")));
+    }
+
+    #[test]
+    fn test_audio_bank_loads_real_sound() {
+        let mut bank = GoldSrcAudioBank::default();
+        let mut audio_assets = Assets::<AudioSource>::default();
+        let handle = bank.get_or_load_sound("player/pl_step1.wav", &[], &mut audio_assets);
+        if Path::new("C:/Games/CS 1.6 GoldClient/cstrike/sound/player/pl_step1.wav").exists() {
+            assert!(
+                handle.is_some(),
+                "Expected pl_step1.wav to be resolved and cached"
+            );
+            assert!(bank.sound_cache.contains_key("player/pl_step1.wav"));
+        }
     }
 }
