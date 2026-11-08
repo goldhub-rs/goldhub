@@ -8,8 +8,8 @@
 use crate::constants::MoveVars;
 use crate::constants::{
     BUNNYJUMP_MAX_SPEED_FACTOR, HULL_STANDING, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT,
-    IN_MOVERIGHT, IN_SPEED, JUMP_IMPULSE, STOP_EPSILON, TIME_TO_DUCK, TIME_TO_UNDUCK,
-    VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
+    IN_MOVERIGHT, IN_SPEED, JUMP_IMPULSE, MAX_CLIMB_SPEED, STOP_EPSILON, TIME_TO_DUCK,
+    TIME_TO_UNDUCK, VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
 };
 use crate::player::{PlayerCmd, PlayerState};
 use crate::trace::WorldTrace;
@@ -674,12 +674,16 @@ pub fn pm_duck(
         state.old_buttons &= !IN_DUCK;
     }
 
-    if state.dead
-        || ((cmd.buttons & IN_DUCK) == 0
-            && !state.in_duck
-            && !state.is_ducking
-            && state.unduck_time_ms <= 0.0)
+    if state.dead {
+        return;
+    }
+
+    if (cmd.buttons & IN_DUCK) == 0
+        && !state.in_duck
+        && !state.is_ducking
+        && state.unduck_time_ms <= 0.0
     {
+        state.view_height = VEC_VIEW_STANDING;
         return;
     }
 
@@ -730,71 +734,79 @@ pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
     if state.in_duck && !state.is_ducking {
         state.in_duck = false;
         state.duck_time_ms = 0.0;
+        state.unduck_time_ms = 0.0;
         state.view_height = VEC_VIEW_STANDING;
         return;
     }
 
-    let mut new_origin = state.origin;
-    if state.on_ground && state.is_ducking {
-        new_origin[2] += 18.0;
-    }
-
-    // Check if player has clearance to stand up
-    // 1. Direct standing position test
-    let mut clear = world
-        .test_player_position(new_origin, HULL_STANDING)
-        .is_none();
-
-    // 2. If close to floor or slight penetration, test vertical micro-lift (+0.125 .. +2.0)
-    if !clear {
-        for lift in [0.125, 0.25, 0.5, 1.0, 2.0] {
-            let test_pos = [new_origin[0], new_origin[1], new_origin[2] + lift];
-            if world
-                .test_player_position(test_pos, HULL_STANDING)
-                .is_none()
-            {
-                new_origin = test_pos;
-                clear = true;
-                break;
-            }
-        }
-    }
-
-    // 3. If still blocked, test STUCK_TABLE micro-offsets
-    if !clear {
-        for offset in &STUCK_TABLE {
-            let test_pos = [
-                new_origin[0] + offset[0],
-                new_origin[1] + offset[1],
-                new_origin[2] + offset[2],
-            ];
-            if world
-                .test_player_position(test_pos, HULL_STANDING)
-                .is_none()
-            {
-                new_origin = test_pos;
-                clear = true;
-                break;
-            }
-        }
-    }
-
-    if !clear {
-        // Obstructed by ceiling or archway overhead! Must remain ducked.
-        state.is_ducking = true;
-        state.in_duck = false;
-        state.unduck_time_ms = 0.0;
-        state.view_height = VEC_VIEW_DUCKING;
-        return;
-    }
-
-    // Trigger smooth unduck animation if transitioning from crouching
     if state.is_ducking {
+        let mut new_origin = state.origin;
+        if state.on_ground {
+            new_origin[2] += 18.0;
+        }
+
+        // Check if player has clearance to stand up
+        // 1. Direct standing position test
+        let mut clear = world
+            .test_player_position(new_origin, HULL_STANDING)
+            .is_none();
+
+        // 2. If close to floor or slight penetration, test vertical micro-lift (+0.125 .. +2.0)
+        if !clear {
+            for lift in [0.125, 0.25, 0.5, 1.0, 2.0] {
+                let test_pos = [new_origin[0], new_origin[1], new_origin[2] + lift];
+                if world
+                    .test_player_position(test_pos, HULL_STANDING)
+                    .is_none()
+                {
+                    new_origin = test_pos;
+                    clear = true;
+                    break;
+                }
+            }
+        }
+
+        // 3. If still blocked, test STUCK_TABLE micro-offsets
+        if !clear {
+            for offset in &STUCK_TABLE {
+                let test_pos = [
+                    new_origin[0] + offset[0],
+                    new_origin[1] + offset[1],
+                    new_origin[2] + offset[2],
+                ];
+                if world
+                    .test_player_position(test_pos, HULL_STANDING)
+                    .is_none()
+                {
+                    new_origin = test_pos;
+                    clear = true;
+                    break;
+                }
+            }
+        }
+
+        if !clear {
+            // Obstructed by ceiling or archway overhead! Must remain ducked.
+            state.is_ducking = true;
+            state.in_duck = false;
+            state.unduck_time_ms = 0.0;
+            state.view_height = VEC_VIEW_DUCKING;
+            return;
+        }
+
+        // Trigger smooth unduck animation if transitioning from crouching
         state.is_ducking = false;
         state.in_duck = false;
         state.origin = new_origin;
-        state.unduck_time_ms = TIME_TO_UNDUCK * 1000.0;
-        pm_categorize_position(state, world);
+
+        if state.on_ground {
+            state.unduck_time_ms = TIME_TO_UNDUCK * 1000.0;
+            pm_categorize_position(state, world);
+        } else {
+            state.unduck_time_ms = 0.0;
+            state.view_height = VEC_VIEW_STANDING;
+            return;
+        }
     }
 
     if state.unduck_time_ms > 0.0 {
@@ -828,11 +840,21 @@ pub fn pm_ladder_move(
     right: [f32; 3],
     dt: f32,
     world: &impl WorldTrace,
-) {
+) -> bool {
     // 1. Check if standing on solid ground at foot level
-    let floor_point = [state.origin[0], state.origin[1], state.origin[2] - 2.0];
-    let floor_tr = world.trace_player_hull(state.origin, floor_point, state.active_hull());
-    let on_floor = floor_tr.fraction < 1.0 && floor_tr.plane_normal[2] >= 0.7;
+    let (hull_mins, _) = crate::trace::player_hull_bounds(state.active_hull());
+    let floor = [
+        state.origin[0],
+        state.origin[1],
+        state.origin[2] + hull_mins[2] - 1.0,
+    ];
+    let on_floor = world
+        .test_player_position(floor, crate::constants::HULL_POINT)
+        .is_some()
+        || {
+            let tr = world.trace_player_hull(state.origin, floor, state.active_hull());
+            tr.fraction < 1.0 && tr.plane_normal[2] >= 0.7
+        };
 
     // 2. Jumping off the ladder: pushes directly away along the ladder normal
     if (cmd.buttons & IN_JUMP) != 0 {
@@ -842,11 +864,11 @@ pub fn pm_ladder_move(
             ladder.normal[1] * 270.0,
             ladder.normal[2] * 270.0,
         ];
-        return;
+        return true;
     }
 
     // 3. Movement speed scaling on ladder (max 200 u/s)
-    let mut climb_speed = 200.0f32;
+    let mut climb_speed = MAX_CLIMB_SPEED;
     if climb_speed > vars.maxspeed {
         climb_speed = vars.maxspeed;
     }
@@ -855,65 +877,70 @@ pub fn pm_ladder_move(
     if is_duck_active {
         climb_speed *= vars.ducking_speed_multiplier;
     }
-    if (cmd.buttons & IN_SPEED) != 0 {
-        climb_speed *= vars.walking_speed_multiplier;
-    }
 
-    let mut forward_impulse = 0.0f32;
-    let mut right_impulse = 0.0f32;
+    let mut forward_val = 0.0f32;
+    let mut right_val = 0.0f32;
 
-    if (cmd.buttons & IN_FORWARD) != 0 || cmd.forward_move > 0.0 {
-        forward_impulse += climb_speed;
-    }
     if (cmd.buttons & IN_BACK) != 0 || cmd.forward_move < 0.0 {
-        forward_impulse -= climb_speed;
+        forward_val -= climb_speed;
     }
-    if (cmd.buttons & IN_MOVERIGHT) != 0 || cmd.side_move > 0.0 {
-        right_impulse += climb_speed;
+    if (cmd.buttons & IN_FORWARD) != 0 || cmd.forward_move > 0.0 {
+        forward_val += climb_speed;
     }
     if (cmd.buttons & IN_MOVELEFT) != 0 || cmd.side_move < 0.0 {
-        right_impulse -= climb_speed;
+        right_val -= climb_speed;
+    }
+    if (cmd.buttons & IN_MOVERIGHT) != 0 || cmd.side_move > 0.0 {
+        right_val += climb_speed;
     }
 
-    if forward_impulse != 0.0 || right_impulse != 0.0 {
-        // Desired velocity in view direction
-        let vel = [
-            forward[0] * forward_impulse + right[0] * right_impulse,
-            forward[1] * forward_impulse + right[1] * right_impulse,
-            forward[2] * forward_impulse + right[2] * right_impulse,
+    if forward_val != 0.0 || right_val != 0.0 {
+        // Desired velocity in view direction:
+        // VectorScale(vpn, forward, velocity); VectorMA(velocity, right, v_right, velocity);
+        let wish_vel = [
+            forward[0] * forward_val + right[0] * right_val,
+            forward[1] * forward_val + right[1] * right_val,
+            forward[2] * forward_val + right[2] * right_val,
         ];
 
-        // Normal perpendicular to world up [0, 0, 1] and ladder normal
-        let up_ref = [0.0, 0.0, 1.0];
-        let (perp, _) = normalize(cross(up_ref, ladder.normal));
+        // VectorClear(tmp); tmp[2] = 1;
+        // CrossProduct(tmp, trace.plane.normal, perp); VectorNormalize(perp);
+        let tmp = [0.0, 0.0, 1.0];
+        let (perp, _) = normalize(cross(tmp, ladder.normal));
 
-        // Component into the face of the ladder
-        let normal_comp = dot(vel, ladder.normal);
-        let cross_vel = [
+        // Decompose velocity into ladder plane:
+        // normal = DotProduct(velocity, trace.plane.normal);
+        let normal_comp = dot(wish_vel, ladder.normal);
+
+        // VectorScale(trace.plane.normal, normal, cross);
+        let cross_comp = [
             ladder.normal[0] * normal_comp,
             ladder.normal[1] * normal_comp,
             ladder.normal[2] * normal_comp,
         ];
+
+        // VectorSubtract(velocity, cross, lateral);
         let lateral = [
-            vel[0] - cross_vel[0],
-            vel[1] - cross_vel[1],
-            vel[2] - cross_vel[2],
+            wish_vel[0] - cross_comp[0],
+            wish_vel[1] - cross_comp[1],
+            wish_vel[2] - cross_comp[2],
         ];
 
-        // Turn velocity into the ladder into vertical velocity roughly perpendicular to ladder
-        let ladder_up = cross(ladder.normal, perp);
-
+        // CrossProduct(trace.plane.normal, perp, tmp);
+        // VectorMA(lateral, -normal, tmp, pmove->velocity);
+        let tmp2 = cross(ladder.normal, perp);
         state.velocity = [
-            lateral[0] - normal_comp * ladder_up[0],
-            lateral[1] - normal_comp * ladder_up[1],
-            lateral[2] - normal_comp * ladder_up[2],
+            lateral[0] - normal_comp * tmp2[0],
+            lateral[1] - normal_comp * tmp2[1],
+            lateral[2] - normal_comp * tmp2[2],
         ];
 
-        // On ground moving away from the ladder
+        // On ground moving away from the ladder:
+        // if (onFloor && normal > 0) { VectorMA(pmove->velocity, MAX_CLIMB_SPEED, trace.plane.normal, pmove->velocity); }
         if on_floor && normal_comp > 0.0 {
-            state.velocity[0] += ladder.normal[0] * 200.0;
-            state.velocity[1] += ladder.normal[1] * 200.0;
-            state.velocity[2] += ladder.normal[2] * 200.0;
+            state.velocity[0] += MAX_CLIMB_SPEED * ladder.normal[0];
+            state.velocity[1] += MAX_CLIMB_SPEED * ladder.normal[1];
+            state.velocity[2] += MAX_CLIMB_SPEED * ladder.normal[2];
         }
     } else {
         state.velocity = [0.0, 0.0, 0.0];
@@ -928,6 +955,8 @@ pub fn pm_ladder_move(
         dt,
         world,
     );
+
+    false
 }
 
 /// Master single-tick player physics update (128 Hz sub-tick step, ReGameDLL standard).
@@ -969,10 +998,33 @@ pub fn pm_player_move(
     // 3. Ladder detection
     let ladder_contact = world.find_ladder(state.origin, state.active_hull());
     if let Some(ladder) = ladder_contact {
+        pm_duck(state, cmd, vars, dt, world);
+        let jumped_off = pm_ladder_move(state, cmd, vars, &ladder, forward, right, dt, world);
+        if jumped_off {
+            state.on_ladder = false;
+            state.on_ground = false;
+
+            // Half-step Velocity Verlet gravity
+            state.velocity[2] -= vars.gravity * 0.5 * dt;
+
+            // In air movement with jump impulse carries player away from ladder
+            pm_air_move(state, cmd, vars, forward, right, dt, world);
+
+            // Re-categorize position after move
+            pm_categorize_position(state, world);
+
+            // Second half-step Velocity Verlet gravity
+            state.velocity[2] -= vars.gravity * 0.5 * dt;
+            if state.on_ground {
+                state.velocity[2] = 0.0;
+            }
+
+            state.old_buttons = cmd.buttons;
+            return;
+        }
+
         state.on_ladder = true;
         state.on_ground = false;
-        pm_duck(state, cmd, vars, dt, world);
-        pm_ladder_move(state, cmd, vars, &ladder, forward, right, dt, world);
         state.old_buttons = cmd.buttons;
         return;
     }

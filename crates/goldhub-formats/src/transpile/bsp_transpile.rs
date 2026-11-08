@@ -5,6 +5,46 @@ use crate::error::FormatError;
 use crate::ir::lightmap::LightmapAtlas;
 use crate::ir::{MeshBuffer, SubMesh, Vertex};
 
+/// Canonical GoldSrc standard display gamma constant matching original Half-Life / CS 1.6 (`v_lightgamma 2.5`).
+pub const DEFAULT_LIGHTGAMMA: f32 = 2.5;
+
+/// Canonical GoldSrc OpenGL overbright lightscale factor (`gl_overbright 1`).
+pub const DEFAULT_LIGHTSCALE: u32 = 256;
+
+/// Canonical GoldSrc 1024-entry display gamma lookup table.
+///
+/// Ported from `D:\Repo\GoldSrc.rs\references\xash3d-fwgs\ref\gl\gl_rsurf.c` and
+/// `references\xash3d-fwgs\engine\client\gamma.c`.
+///
+/// Formula:
+/// `val = (pow((i / 1023.0), (1.0 / v_lightgamma)) * 1023.0) as u16`
+#[must_use]
+pub fn build_lightgamma_table(lightgamma: f32) -> [u16; 1024] {
+    let mut table = [0u16; 1024];
+    let inv_gamma = 1.0 / f64::from(lightgamma);
+    for (i, entry) in table.iter_mut().enumerate() {
+        let normalized = (i as f64) / 1023.0;
+        let val = (normalized.powf(inv_gamma) * 1023.0).round();
+        *entry = (val as i32).clamp(0, 1023) as u16;
+    }
+    table
+}
+
+/// Decodes a raw BSP luxel byte into an authentic gamma-corrected display luxel byte
+/// following canonical GoldSrc `gl_rsurf.c`:
+///
+/// Formula:
+/// `bl = luxel_val * 256`
+/// `t = ((bl * lightscale) >> 14).min(1023)`
+/// `final_byte = (lightgammatable[t] >> 2) as u8`
+#[inline]
+#[must_use]
+pub fn decode_luxel(luxel_val: u8, lightscale: u32, table: &[u16; 1024]) -> u8 {
+    let bl = u32::from(luxel_val) * 256;
+    let t = (((bl * lightscale) >> 14).min(1023)) as usize;
+    (table[t] >> 2) as u8
+}
+
 /// Metadata computed for a BSP face's lightmap block before packing into the global atlas.
 struct FaceLightmapInfo {
     face_idx: usize,
@@ -19,6 +59,7 @@ struct FaceLightmapInfo {
 type FaceUvMapping = std::collections::HashMap<usize, (f32, f32, [f32; 2], [f32; 2])>;
 
 /// Computes the lightmap extents and allocates positions in a single RGBA8 Lightmap Atlas (2048px width).
+#[allow(clippy::too_many_lines)]
 fn build_lightmap_atlas(
     bsp: &BspLevel<'_>,
     invisible_faces: &std::collections::HashSet<usize>,
@@ -106,6 +147,7 @@ fn build_lightmap_atlas(
 
     let total_height = (current_y + row_h).max(1).next_power_of_two();
     let mut atlas = LightmapAtlas::new(atlas_width, total_height);
+    let lightgamma_table = build_lightgamma_table(DEFAULT_LIGHTGAMMA);
 
     for (info, x_pos, y_pos) in placements {
         face_uv_map.insert(
@@ -118,7 +160,7 @@ fn build_lightmap_atlas(
             ),
         );
 
-        // Copy raw RGB luxels into the atlas RGBA8 buffer
+        // Copy raw RGB luxels into the atlas RGBA8 buffer using authentic GoldSrc gamma decoding
         let luxel_count = (info.w * info.h) as usize;
         let src_start = info.light_offset as usize;
         let src_end = src_start + luxel_count * 3;
@@ -131,9 +173,18 @@ fn build_lightmap_atlas(
                     let dst_idx = (((y_pos + ly) * atlas_width + (x_pos + lx)) * 4) as usize;
 
                     if src_idx + 2 < luxels.len() && dst_idx + 3 < atlas.rgba_bytes.len() {
-                        atlas.rgba_bytes[dst_idx] = luxels[src_idx];
-                        atlas.rgba_bytes[dst_idx + 1] = luxels[src_idx + 1];
-                        atlas.rgba_bytes[dst_idx + 2] = luxels[src_idx + 2];
+                        atlas.rgba_bytes[dst_idx] =
+                            decode_luxel(luxels[src_idx], DEFAULT_LIGHTSCALE, &lightgamma_table);
+                        atlas.rgba_bytes[dst_idx + 1] = decode_luxel(
+                            luxels[src_idx + 1],
+                            DEFAULT_LIGHTSCALE,
+                            &lightgamma_table,
+                        );
+                        atlas.rgba_bytes[dst_idx + 2] = decode_luxel(
+                            luxels[src_idx + 2],
+                            DEFAULT_LIGHTSCALE,
+                            &lightgamma_table,
+                        );
                         atlas.rgba_bytes[dst_idx + 3] = 255;
                     }
                 }
@@ -571,4 +622,59 @@ fn compute_face_normal(face_positions: &[[f32; 3]]) -> [f32; 3] {
         normal = [0.0, 1.0, 0.0];
     }
     normal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_lightgamma_table_canonical_bounds() {
+        let table = build_lightgamma_table(DEFAULT_LIGHTGAMMA);
+        assert_eq!(table.len(), 1024);
+        assert_eq!(table[0], 0);
+        assert_eq!(table[1023], 1023);
+
+        // Verify monotonic non-decreasing
+        for i in 0..1023 {
+            assert!(
+                table[i] <= table[i + 1],
+                "table[{i}] = {} > table[{}] = {}",
+                table[i],
+                i + 1,
+                table[i + 1]
+            );
+        }
+
+        // Spot-check canonical values
+        // i=4: ((4/1023)^(1/2.5))*1023 = 111
+        assert_eq!(table[4], 111);
+        // i=40: ((40/1023)^(1/2.5))*1023 = 280
+        assert_eq!(table[40], 280);
+        // i=1020: ((1020/1023)^(1/2.5))*1023 = 1022
+        assert_eq!(table[1020], 1022);
+    }
+
+    #[test]
+    fn test_decode_luxel_values() {
+        let table = build_lightgamma_table(DEFAULT_LIGHTGAMMA);
+        assert_eq!(decode_luxel(0, DEFAULT_LIGHTSCALE, &table), 0);
+        assert_eq!(decode_luxel(1, DEFAULT_LIGHTSCALE, &table), 27);
+        assert_eq!(decode_luxel(10, DEFAULT_LIGHTSCALE, &table), 70);
+        assert_eq!(decode_luxel(50, DEFAULT_LIGHTSCALE, &table), 133);
+        assert_eq!(decode_luxel(100, DEFAULT_LIGHTSCALE, &table), 175);
+        assert_eq!(decode_luxel(200, DEFAULT_LIGHTSCALE, &table), 231);
+        assert_eq!(decode_luxel(255, DEFAULT_LIGHTSCALE, &table), 255);
+
+        // Verify strictly monotonic for increasing luxels
+        for v in 0..255 {
+            let cur = decode_luxel(v, DEFAULT_LIGHTSCALE, &table);
+            let next = decode_luxel(v + 1, DEFAULT_LIGHTSCALE, &table);
+            assert!(
+                cur <= next,
+                "decode_luxel({v}) = {cur} > decode_luxel({}) = {next}",
+                v + 1
+            );
+        }
+    }
 }

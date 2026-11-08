@@ -14,7 +14,8 @@ pub use constants::*;
 pub use controller::FixedSubtickSimulator;
 pub use movement::{
     HALF_HUMAN_HEIGHT, STUCK_MOVEDOWN, STUCK_MOVEUP, angle_vectors, pm_air_accelerate,
-    pm_clip_velocity, pm_duck, pm_fix_player_crouch_stuck, pm_friction, pm_player_move, pm_unduck,
+    pm_clip_velocity, pm_duck, pm_fix_player_crouch_stuck, pm_friction, pm_ladder_move,
+    pm_player_move, pm_spline_fraction, pm_unduck,
 };
 pub use player::{PlayerCmd, PlayerState};
 pub use trace::{BspWorldCollision, TraceResult, WorldTrace};
@@ -491,5 +492,390 @@ mod tests {
             state.velocity[1], 270.0,
             "Jump must propel along ladder normal with 270 u/s"
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_diagonal_fast_ladder_climb_speed() {
+        struct TestLadderWorld;
+
+        impl WorldTrace for TestLadderWorld {
+            fn trace_player_hull(
+                &self,
+                _start: [f32; 3],
+                end: [f32; 3],
+                _hull_idx: u32,
+            ) -> TraceResult {
+                TraceResult {
+                    startsolid: false,
+                    allsolid: false,
+                    fraction: 1.0,
+                    endpos: end,
+                    plane_normal: [0.0, 0.0, 1.0],
+                    plane_dist: 0.0,
+                    hit_entity: None,
+                }
+            }
+
+            fn test_player_position(&self, _pos: [f32; 3], _hull_idx: u32) -> Option<u32> {
+                None
+            }
+
+            fn find_ladder(
+                &self,
+                _origin: [f32; 3],
+                _hull_idx: u32,
+            ) -> Option<crate::trace::LadderContact> {
+                Some(crate::trace::LadderContact {
+                    normal: [0.0, 1.0, 0.0], // Ladder surface facing +Y
+                    center: [0.0, 0.0, 100.0],
+                    entity_id: 42,
+                })
+            }
+        }
+
+        let world = TestLadderWorld;
+        let vars = MoveVars::default();
+        let dt = 1.0 / 128.0;
+
+        // 1. Pure 'W' climb: player facing straight into ladder (-Y, yaw = 270 deg)
+        let mut state_w = PlayerState {
+            origin: [0.0, 0.0, 50.0],
+            velocity: [0.0, 0.0, 0.0],
+            angles: [0.0, 270.0, 0.0],
+            ..Default::default()
+        };
+        let cmd_w = PlayerCmd {
+            forward_move: 200.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: IN_FORWARD,
+            view_angles: [0.0, 270.0, 0.0],
+        };
+        pm_player_move(&mut state_w, &cmd_w, &vars, dt, &world);
+        let vertical_speed_w = state_w.velocity[2];
+        assert_eq!(
+            vertical_speed_w, 200.0,
+            "Pure W ladder climb must produce exactly 200 u/s vertical speed"
+        );
+
+        // 2. 'AW' diagonal fast climb: yaw 225 deg (45 deg left of -Y), W + A held
+        let mut state_aw = PlayerState {
+            origin: [0.0, 0.0, 50.0],
+            velocity: [0.0, 0.0, 0.0],
+            angles: [0.0, 225.0, 0.0],
+            ..Default::default()
+        };
+        let cmd_aw = PlayerCmd {
+            forward_move: 200.0,
+            side_move: -200.0,
+            up_move: 0.0,
+            buttons: IN_FORWARD | IN_MOVELEFT,
+            view_angles: [0.0, 225.0, 0.0],
+        };
+        pm_player_move(&mut state_aw, &cmd_aw, &vars, dt, &world);
+        let vertical_speed_aw = state_aw.velocity[2];
+        assert!(
+            vertical_speed_aw > 280.0,
+            "AW diagonal climb must produce ~282.84 u/s vertical speed (got {vertical_speed_aw})"
+        );
+        assert!(
+            vertical_speed_aw > vertical_speed_w,
+            "AW diagonal climb must be faster than pure W climb"
+        );
+
+        // 3. 'WD' diagonal fast climb: yaw 315 deg (45 deg right of -Y), W + D held
+        let mut state_wd = PlayerState {
+            origin: [0.0, 0.0, 50.0],
+            velocity: [0.0, 0.0, 0.0],
+            angles: [0.0, 315.0, 0.0],
+            ..Default::default()
+        };
+        let cmd_wd = PlayerCmd {
+            forward_move: 200.0,
+            side_move: 200.0,
+            up_move: 0.0,
+            buttons: IN_FORWARD | IN_MOVERIGHT,
+            view_angles: [0.0, 315.0, 0.0],
+        };
+        pm_player_move(&mut state_wd, &cmd_wd, &vars, dt, &world);
+        let vertical_speed_wd = state_wd.velocity[2];
+        assert!(
+            vertical_speed_wd > 280.0,
+            "WD diagonal climb must produce ~282.84 u/s vertical speed (got {vertical_speed_wd})"
+        );
+        assert!(
+            vertical_speed_wd > vertical_speed_w,
+            "WD diagonal climb must be faster than pure W climb"
+        );
+
+        // 4. Crouch climbing on ladder: speed scaled by PLAYER_DUCKING_MULTIPLIER (0.333)
+        let mut state_duck = PlayerState {
+            origin: [0.0, 0.0, 50.0],
+            velocity: [0.0, 0.0, 0.0],
+            angles: [0.0, 270.0, 0.0],
+            is_ducking: true,
+            ..Default::default()
+        };
+        let cmd_duck = PlayerCmd {
+            forward_move: 200.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: IN_FORWARD | IN_DUCK,
+            view_angles: [0.0, 270.0, 0.0],
+        };
+        pm_player_move(&mut state_duck, &cmd_duck, &vars, dt, &world);
+        let vertical_speed_duck = state_duck.velocity[2];
+        let expected_duck_speed = 200.0 * PLAYER_DUCKING_MULTIPLIER;
+        assert!(
+            (vertical_speed_duck - expected_duck_speed).abs() < 0.1,
+            "Ducked ladder climb must scale speed by 0.333 (expected {expected_duck_speed}, got {vertical_speed_duck})"
+        );
+    }
+
+    #[test]
+    fn test_ladder_jump_impulse_and_detachment() {
+        struct TestLadderWorld;
+
+        impl WorldTrace for TestLadderWorld {
+            fn trace_player_hull(
+                &self,
+                _start: [f32; 3],
+                end: [f32; 3],
+                _hull_idx: u32,
+            ) -> TraceResult {
+                TraceResult {
+                    startsolid: false,
+                    allsolid: false,
+                    fraction: 1.0,
+                    endpos: end,
+                    plane_normal: [0.0, 0.0, 1.0],
+                    plane_dist: 0.0,
+                    hit_entity: None,
+                }
+            }
+
+            fn test_player_position(&self, _pos: [f32; 3], _hull_idx: u32) -> Option<u32> {
+                None
+            }
+
+            fn find_ladder(
+                &self,
+                origin: [f32; 3],
+                _hull_idx: u32,
+            ) -> Option<crate::trace::LadderContact> {
+                // Ladder plane at Y = 0 facing +Y. Detached once origin[1] > 1.0.
+                if origin[1] <= 1.0 {
+                    Some(crate::trace::LadderContact {
+                        normal: [0.0, 1.0, 0.0],
+                        center: [0.0, 0.0, 100.0],
+                        entity_id: 42,
+                    })
+                } else {
+                    None
+                }
+            }
+        }
+
+        let world = TestLadderWorld;
+        let vars = MoveVars::default();
+        let dt = 1.0 / 128.0;
+
+        let mut state = PlayerState {
+            origin: [0.0, 0.0, 50.0],
+            velocity: [0.0, 0.0, 0.0],
+            angles: [0.0, 270.0, 0.0],
+            on_ladder: true,
+            ..Default::default()
+        };
+
+        // Press Jump on ladder
+        let jump_cmd = PlayerCmd {
+            forward_move: 0.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: IN_JUMP,
+            view_angles: [0.0, 270.0, 0.0],
+        };
+
+        pm_player_move(&mut state, &jump_cmd, &vars, dt, &world);
+
+        // Sub-tick verification:
+        assert!(
+            !state.on_ladder,
+            "Player must be immediately detached from ladder upon jumping"
+        );
+        assert!(!state.on_ground, "Player must be in airborne state");
+        assert_eq!(
+            state.velocity[1], 270.0,
+            "Jump impulse must be exactly normal * 270 along Y axis"
+        );
+        assert!(
+            state.origin[1] > 2.0,
+            "Player origin must move away from ladder surface in this tick (got {})",
+            state.origin[1]
+        );
+
+        // Next tick: jump held or released, player must remain in air and not re-attach
+        let next_cmd = PlayerCmd {
+            forward_move: 0.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: IN_JUMP,
+            view_angles: [0.0, 270.0, 0.0],
+        };
+        pm_player_move(&mut state, &next_cmd, &vars, dt, &world);
+        assert!(
+            !state.on_ladder,
+            "Player must remain disconnected from ladder on subsequent ticks"
+        );
+        assert!(
+            state.origin[1] > 4.0,
+            "Player must continue coasting away from ladder"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_ducking_and_unducking_view_height_continuity() {
+        let world = FlatWorld;
+        let vars = MoveVars::default();
+        let dt = 1.0 / 128.0;
+
+        let mut state = PlayerState {
+            origin: [0.0, 0.0, 0.03125],
+            velocity: [0.0, 0.0, 0.0],
+            view_height: VEC_VIEW_STANDING,
+            on_ground: true,
+            ..Default::default()
+        };
+
+        let duck_cmd = PlayerCmd {
+            forward_move: 0.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: IN_DUCK,
+            view_angles: [0.0, 0.0, 0.0],
+        };
+
+        let mut prev_eye_z = state.origin[2] + state.view_height;
+        let mut duck_transition_verified = false;
+
+        // 1. Ducking phase: hold IN_DUCK for 64 ticks (~500 ms > 400 ms TIME_TO_DUCK)
+        for _ in 0..64 {
+            let was_ducking = state.is_ducking;
+            pm_player_move(&mut state, &duck_cmd, &vars, dt, &world);
+            let eye_z = state.origin[2] + state.view_height;
+
+            // Check continuity across the exact tick where duck finishes and origin drops by 18
+            if !was_ducking && state.is_ducking {
+                let delta = (eye_z - prev_eye_z).abs();
+                assert!(
+                    delta < 0.01,
+                    "Eye height delta at duck completion tick must be continuous (<0.01 u)! Got delta = {delta}"
+                );
+                assert_eq!(
+                    state.view_height, VEC_VIEW_DUCKING,
+                    "View height upon duck completion must snap to VEC_VIEW_DUCKING (12.0)"
+                );
+                duck_transition_verified = true;
+            } else {
+                let step_delta = (eye_z - prev_eye_z).abs();
+                assert!(
+                    step_delta < 1.0,
+                    "Sub-tick eye height step delta during ducking must be smooth (<1.0 u/tick), got {step_delta}"
+                );
+            }
+
+            prev_eye_z = eye_z;
+        }
+
+        assert!(
+            duck_transition_verified,
+            "Duck transition must have finished and been verified"
+        );
+        assert!(state.is_ducking, "Player must be fully ducked");
+
+        // 2. Unducking phase: release IN_DUCK for 40 ticks (~312 ms > 200 ms TIME_TO_UNDUCK)
+        let unduck_cmd = PlayerCmd {
+            forward_move: 0.0,
+            side_move: 0.0,
+            up_move: 0.0,
+            buttons: 0,
+            view_angles: [0.0, 0.0, 0.0],
+        };
+
+        let mut unduck_transition_verified = false;
+
+        for _ in 0..40 {
+            let was_ducking = state.is_ducking;
+            pm_player_move(&mut state, &unduck_cmd, &vars, dt, &world);
+            let eye_z = state.origin[2] + state.view_height;
+
+            // Check continuity at tick 0 of unducking where origin rises by 18
+            if was_ducking && !state.is_ducking {
+                let delta = (eye_z - prev_eye_z).abs();
+                assert!(
+                    delta < 1e-4,
+                    "Eye height delta at unduck initiation tick must be continuous! Got delta = {delta}"
+                );
+                unduck_transition_verified = true;
+            } else {
+                let step_delta = (eye_z - prev_eye_z).abs();
+                assert!(
+                    step_delta < 1.5,
+                    "Sub-tick eye height step delta during unducking must be smooth (<1.5 u/tick), got {step_delta}"
+                );
+            }
+
+            prev_eye_z = eye_z;
+        }
+
+        assert!(
+            unduck_transition_verified,
+            "Unduck transition initiation must have occurred"
+        );
+        assert!(
+            !state.is_ducking,
+            "Player must be fully standing after unducking"
+        );
+        assert_eq!(
+            state.view_height, VEC_VIEW_STANDING,
+            "View height must have returned to VEC_VIEW_STANDING (17.0)"
+        );
+
+        // 3. Quick tap cancel: release duck before finishing (100 ms < 400 ms)
+        let mut tap_state = PlayerState {
+            origin: [0.0, 0.0, 0.03125],
+            velocity: [0.0, 0.0, 0.0],
+            view_height: VEC_VIEW_STANDING,
+            on_ground: true,
+            ..Default::default()
+        };
+
+        // Duck for 12 ticks (~93.75 ms)
+        for _ in 0..12 {
+            pm_player_move(&mut tap_state, &duck_cmd, &vars, dt, &world);
+        }
+        assert!(
+            tap_state.in_duck && !tap_state.is_ducking,
+            "Player should be mid-duck transition"
+        );
+        assert_eq!(
+            tap_state.origin[2], 0.03125,
+            "Origin must not have dropped during transition"
+        );
+
+        // Release duck immediately
+        pm_player_move(&mut tap_state, &unduck_cmd, &vars, dt, &world);
+        assert!(
+            !tap_state.in_duck && !tap_state.is_ducking,
+            "Quick tap release must instantly cancel ducking"
+        );
+        assert_eq!(
+            tap_state.view_height, VEC_VIEW_STANDING,
+            "View height must instantly reset to VEC_VIEW_STANDING without jumping"
+        );
+        assert_eq!(tap_state.origin[2], 0.03125, "Origin must remain untouched");
     }
 }

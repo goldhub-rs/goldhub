@@ -40,6 +40,12 @@ pub const JUMP_IMPULSE: f32 = 268.328_16;
 /// Maximum speed factor when bunny hopping (1.2x maxspeed).
 pub const BUNNYJUMP_MAX_SPEED_FACTOR: f32 = 1.2;
 
+/// Maximum ladder climb speed in GoldSrc / CS 1.6 (`MAX_CLIMB_SPEED`).
+pub const MAX_CLIMB_SPEED: f32 = 200.0;
+
+/// Crouch speed multiplier in GoldSrc / CS 1.6 (`PLAYER_DUCKING_MULTIPLIER`).
+pub const PLAYER_DUCKING_MULTIPLIER: f32 = 0.333;
+
 /// Movement input button bitflags matching GoldSrc `cmd.buttons`.
 pub const IN_ATTACK: u32 = 1 << 0;
 pub const IN_JUMP: u32 = 1 << 1;
@@ -95,7 +101,7 @@ impl Default for MoveVars {
             airaccelerate: 10.0,
             friction: 4.0,
             stepsize: 18.0,
-            ducking_speed_multiplier: 0.333,
+            ducking_speed_multiplier: PLAYER_DUCKING_MULTIPLIER,
             walking_speed_multiplier: 0.52,
             bounce: 1.0,
         }
