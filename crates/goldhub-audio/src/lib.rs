@@ -22,7 +22,7 @@ pub use materials::{
 };
 pub use wav::{
     AudioChannels, PcmData, RiffChunkHeader, SampleFormat, WavSound, WaveFmtPcm, decode_wav,
-    encode_wav_pcm, is_supported_sample_rate,
+    encode_wav_pcm, is_supported_sample_rate, transcode_to_clean_16bit_44khz,
 };
 
 #[cfg(test)]

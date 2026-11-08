@@ -11,7 +11,9 @@ pub mod player;
 pub mod video_settings;
 pub mod window;
 
-pub use audio::{GameSearchPaths, GoldSrcAudioBank, GoldSrcAudioPlugin};
+pub use audio::{
+    GameSearchPaths, GoldSrcAudioBank, GoldSrcAudioPlugin, GroundFace, LevelGroundMaterialIndex,
+};
 pub use camera::{SpectatorCamera, SpectatorCameraPlugin};
 pub use level::LevelPlugin;
 pub use mesh_bridge::{PartitionedMesh, to_bevy_mesh, to_bevy_submeshes};

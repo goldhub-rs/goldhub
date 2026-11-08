@@ -87,6 +87,88 @@ fn setup_level(
         if let Ok((mesh_buffer, textures, lightmap_atlas, sky_name)) =
             pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs)
         {
+            // Build ground materials index for authentic GoldSrc footstep sounds
+            if let Ok(bsp) = goldhub_formats::codecs::legacy::bsp::BspLevel::from_bytes(&raw_bytes)
+            {
+                let mut ground_faces = Vec::new();
+                for face in bsp.faces {
+                    let plane = &bsp.planes[face.plane_id as usize];
+                    let sign = if face.side == 0 { 1.0 } else { -1.0 };
+                    let norm = [
+                        plane.normal[0] * sign,
+                        plane.normal[1] * sign,
+                        plane.normal[2] * sign,
+                    ];
+                    let dist = plane.distance * sign;
+
+                    // Walkable floor surface threshold in GoldSrc: normal.z >= 0.7
+                    if norm[2] >= 0.7 {
+                        let first_edge = face.first_surfedge_id as usize;
+                        let num_edges = face.surfedges_num as usize;
+                        if first_edge + num_edges <= bsp.surfedges.len() {
+                            let mut poly = Vec::with_capacity(num_edges);
+                            let mut min_x = f32::INFINITY;
+                            let mut max_x = f32::NEG_INFINITY;
+                            let mut min_y = f32::INFINITY;
+                            let mut max_y = f32::NEG_INFINITY;
+                            let mut avg_z = 0.0;
+
+                            for &surfedge in &bsp.surfedges[first_edge..first_edge + num_edges] {
+                                let (edge_idx, reverse) = if surfedge >= 0 {
+                                    (surfedge as usize, false)
+                                } else {
+                                    (surfedge.unsigned_abs() as usize, true)
+                                };
+                                if edge_idx < bsp.edges.len() {
+                                    let edge = &bsp.edges[edge_idx];
+                                    let v_idx = if reverse {
+                                        edge.vertices[1] as usize
+                                    } else {
+                                        edge.vertices[0] as usize
+                                    };
+                                    if v_idx < bsp.vertices.len() {
+                                        let v = bsp.vertices[v_idx];
+                                        poly.push([v[0], v[1]]);
+                                        min_x = min_x.min(v[0]);
+                                        max_x = max_x.max(v[0]);
+                                        min_y = min_y.min(v[1]);
+                                        max_y = max_y.max(v[1]);
+                                        avg_z += v[2];
+                                    }
+                                }
+                            }
+
+                            if poly.len() >= 3 {
+                                avg_z /= poly.len() as f32;
+                                let tex_info_idx = face.texture_info_id as usize;
+                                if tex_info_idx < bsp.texture_infos.len() {
+                                    let tex_id =
+                                        bsp.texture_infos[tex_info_idx].texture_id as usize;
+                                    let tex_name =
+                                        textures.get(tex_id).map_or("concrete", |t| &t.name);
+                                    ground_faces.push(crate::audio::GroundFace {
+                                        aabb_min: [min_x, min_y],
+                                        aabb_max: [max_x, max_y],
+                                        plane_z: avg_z,
+                                        plane_normal: norm,
+                                        plane_dist: dist,
+                                        vertices: poly,
+                                        texture_name: tex_name.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                tracing::info!(
+                    "Indexed {} walkable ground surfaces for material footstep audio",
+                    ground_faces.len()
+                );
+                commands.insert_resource(crate::audio::LevelGroundMaterialIndex {
+                    faces: ground_faces,
+                });
+            }
+
             // 0. Spawn GoldSrc 6-sided Skybox cube
             let sky = sky_name.as_deref().unwrap_or("green");
             skybox::spawn_skybox(&mut commands, &mut meshes, &mut materials, &mut images, sky);
