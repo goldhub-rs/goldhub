@@ -110,29 +110,29 @@ impl StudioModelStore {
             material_handles.push(materials.add(mat));
         }
 
-        // 2. Extract submeshes from the first bodypart and primary submodel
+        // 2. Extract submeshes from all bodyparts and primary submodels
         let mut submeshes = Vec::new();
-        if let Some(body_part) = model.body_parts.first()
-            && let Some(submodel) = body_part.models.first()
-        {
-            for mesh in &submodel.meshes {
-                let mat_handle = if mesh.skin_ref < material_handles.len() {
-                    material_handles[mesh.skin_ref].clone()
-                } else {
-                    // Fallback neutral material if skin_ref is out of range
-                    materials.add(StandardMaterial {
-                        base_color: Color::srgb(0.7, 0.7, 0.7),
-                        cull_mode: None,
-                        ..default()
-                    })
-                };
+        for body_part in &model.body_parts {
+            if let Some(submodel) = body_part.models.first() {
+                for mesh in &submodel.meshes {
+                    let mat_handle = if mesh.skin_ref < material_handles.len() {
+                        material_handles[mesh.skin_ref].clone()
+                    } else {
+                        // Fallback neutral material if skin_ref is out of range
+                        materials.add(StandardMaterial {
+                            base_color: Color::srgb(0.7, 0.7, 0.7),
+                            cull_mode: None,
+                            ..default()
+                        })
+                    };
 
-                submeshes.push(SubmeshTemplate {
-                    skin_ref: mesh.skin_ref,
-                    material: mat_handle,
-                    rest_vertices: mesh.vertices.clone(),
-                    indices: mesh.indices.clone(),
-                });
+                    submeshes.push(SubmeshTemplate {
+                        skin_ref: mesh.skin_ref,
+                        material: mat_handle,
+                        rest_vertices: mesh.vertices.clone(),
+                        indices: mesh.indices.clone(),
+                    });
+                }
             }
         }
 

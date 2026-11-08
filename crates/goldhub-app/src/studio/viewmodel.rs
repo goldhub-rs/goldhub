@@ -171,6 +171,7 @@ pub fn viewmodel_input_system(
     >,
     mut breakable_query: Query<(Entity, &mut crate::entity::BreakableEntity)>,
     mut fire_events: EventWriter<crate::entity::FireTargetEvent>,
+    mut break_events: EventWriter<crate::entity::BreakEntityEvent>,
     mut vm_query: Query<(&mut ViewModelWeapon, &mut StudioAnimatedModel)>,
 ) {
     let dt = time.delta_secs();
@@ -298,6 +299,11 @@ pub fn viewmodel_input_system(
                         breakable.health -= damage;
                         if breakable.health <= 0.0 && !breakable.is_broken {
                             breakable.is_broken = true;
+                            let center = (breakable.bmin + breakable.bmax) * 0.5;
+                            break_events.send(crate::entity::BreakEntityEvent {
+                                origin: center,
+                                material: mat,
+                            });
                             fire_events.send(crate::entity::FireTargetEvent {
                                 target: breakable.target.clone(),
                             });
@@ -355,6 +361,11 @@ pub fn viewmodel_input_system(
                         breakable.health -= damage;
                         if breakable.health <= 0.0 && !breakable.is_broken {
                             breakable.is_broken = true;
+                            let center = (breakable.bmin + breakable.bmax) * 0.5;
+                            break_events.send(crate::entity::BreakEntityEvent {
+                                origin: center,
+                                material: mat,
+                            });
                             fire_events.send(crate::entity::FireTargetEvent {
                                 target: breakable.target.clone(),
                             });

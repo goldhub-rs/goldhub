@@ -84,6 +84,8 @@ impl Plugin for PlayerPlugin {
                 player_movement_system,
                 controller_toggle_system,
                 update_speedometer_system,
+                spawn_player_character_model_system,
+                update_player_character_model_system,
             ),
         );
     }
@@ -376,7 +378,13 @@ fn controller_toggle_system(
                 let gs_z = transform.translation.y - 17.0;
                 player.sim.current.origin = [gs_x, gs_y, gs_z];
                 player.sim.previous.origin = [gs_x, gs_y, gs_z];
-                player.sim.current.velocity = [0.0; 3];
+                // Seamlessly transfer spectator flight inertia into player simulation velocity
+                // Bevy X = GS X, Bevy Y = GS Z, Bevy Z = -GS Y
+                let gs_vx = spec.velocity.x;
+                let gs_vy = -spec.velocity.z;
+                let gs_vz = spec.velocity.y;
+                player.sim.current.velocity = [gs_vx, gs_vy, gs_vz];
+                player.sim.previous.velocity = [gs_vx, gs_vy, gs_vz];
                 player.sim.current.on_ground = false;
                 player.yaw = spec.yaw;
                 player.pitch = spec.pitch;
@@ -429,4 +437,131 @@ pub fn parse_first_player_spawn(entities_raw: &[u8]) -> Option<([f32; 3], f32)> 
     }
 
     None
+}
+
+/// Marker component for the 3D player character model (rendered in 3rd person).
+#[derive(Component, Debug)]
+pub struct PlayerCharacterModel;
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_player_character_model_system(
+    mut commands: Commands,
+    player_model_query: Query<Entity, With<PlayerCharacterModel>>,
+    player_query: Query<(&PlayerController, &Transform)>,
+    mut model_store: ResMut<crate::studio::StudioModelStore>,
+    search_paths: Option<Res<crate::audio::GameSearchPaths>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if !player_model_query.is_empty() {
+        return;
+    }
+    let Some(ref paths) = search_paths else {
+        return;
+    };
+    let Ok((player, player_transform)) = player_query.get_single() else {
+        return;
+    };
+
+    // Authentic CS 1.6 CT player model (urban.mdl)
+    let model_path = "models/player/urban/urban.mdl";
+    let Some(model_data) = model_store.get_or_load(model_path, paths, &mut images, &mut materials)
+    else {
+        return;
+    };
+
+    let mut anim_component = crate::studio::StudioAnimatedModel::new(model_path, false);
+    anim_component.set_sequence(1, 15.0, true); // initial idle1
+
+    let parent = commands
+        .spawn((
+            PlayerCharacterModel,
+            Transform::from_translation(player_transform.translation)
+                .with_rotation(Quat::from_rotation_y(player.yaw)),
+            Visibility::Hidden, // Hidden in 1st person by default
+        ))
+        .id();
+
+    let mut mesh_children = Vec::with_capacity(model_data.submeshes.len());
+    for (sub_idx, template) in model_data.submeshes.iter().enumerate() {
+        let bevy_mesh = crate::studio::store::create_initial_bevy_mesh(template, false);
+        let mesh_handle = meshes.add(bevy_mesh);
+
+        let child = commands
+            .spawn((
+                Mesh3d(mesh_handle.clone()),
+                MeshMaterial3d(template.material.clone()),
+                Transform::IDENTITY,
+            ))
+            .id();
+        commands.entity(parent).add_child(child);
+        mesh_children.push((child, mesh_handle, sub_idx));
+    }
+
+    anim_component.mesh_entities = mesh_children;
+    commands.entity(parent).insert(anim_component);
+    tracing::info!("Spawned PlayerCharacterModel for third-person view");
+}
+
+fn update_player_character_model_system(
+    perspective: Res<CameraPerspective>,
+    player_query: Query<&PlayerController>,
+    mut model_query: Query<
+        (
+            &mut Transform,
+            &mut crate::studio::StudioAnimatedModel,
+            &mut Visibility,
+        ),
+        With<PlayerCharacterModel>,
+    >,
+) {
+    let Ok(player) = player_query.get_single() else {
+        return;
+    };
+    let Ok((mut transform, mut anim, mut visibility)) = model_query.get_single_mut() else {
+        return;
+    };
+
+    // Position feet at floor level:
+    // GoldSrc player origin is hull center. For standing (hull 0), feet = origin - 36.
+    // For crouching (hull 1), feet = origin - 18.
+    let gs_pos = player.sim.current.origin;
+    let feet_z = if player.sim.current.is_ducking {
+        gs_pos[2] - 18.0
+    } else {
+        gs_pos[2] - 36.0
+    };
+    transform.translation = Vec3::new(gs_pos[0], feet_z, -gs_pos[1]);
+    transform.rotation = Quat::from_rotation_y(player.yaw);
+
+    // Animation state machine based on movement
+    let speed = player.sim.current.horizontal_speed();
+    let on_ground = player.sim.current.on_ground;
+    let is_crouching = player.sim.current.is_ducking;
+
+    let (seq, fps) = if !on_ground {
+        (6, 30.0) // jump
+    } else if is_crouching {
+        if speed > 10.0 {
+            (5, 30.0) // crouchrun
+        } else {
+            (2, 20.0) // crouch_idle
+        }
+    } else if speed > 150.0 {
+        (4, 30.0) // run
+    } else if speed > 10.0 {
+        (3, 30.0) // walk
+    } else {
+        (1, 15.0) // idle1
+    };
+
+    anim.set_sequence(seq, fps, true);
+
+    // Visibility toggle: visible in ThirdPerson, hidden in FirstPerson
+    if *perspective == CameraPerspective::ThirdPerson {
+        *visibility = Visibility::Inherited;
+    } else {
+        *visibility = Visibility::Hidden;
+    }
 }

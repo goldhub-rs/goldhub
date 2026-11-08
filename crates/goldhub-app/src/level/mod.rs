@@ -444,6 +444,7 @@ pub fn setup_level(
             pitch: 0.0,
             yaw: bevy_yaw,
             is_active: false,
+            ..default()
         },
     ));
 }

@@ -99,9 +99,13 @@ pub fn spawn_map_studio_entities(
             }
 
             // Determine model path based on entity classname and map-specified model
-            let target_model = if classname == "hostage_entity" || classname == "monster_scientist" {
+            let target_model = if classname == "hostage_entity" {
+                // In authentic CS 1.6 (ReGameDLL CHostage::Spawn), hostages canonically use models/hostage.mdl,
+                // overriding legacy Half-Life "models/scientist.mdl" strings stored in early BSP entity lumps.
+                "models/hostage.mdl"
+            } else if classname == "monster_scientist" {
                 if model_str.is_empty() {
-                    "models/hostage.mdl"
+                    "models/scientist.mdl"
                 } else {
                     model_str
                 }
@@ -119,14 +123,21 @@ pub fn spawn_map_studio_entities(
 
             let is_solid = classname == "hostage_entity" || classname == "monster_scientist";
 
-            // Authentic GoldSrc DROP_TO_FLOOR: trace downwards 256 units against BSP collision to snap to floor
+            // Authentic GoldSrc DROP_TO_FLOOR:
+            // Entity origins in Hammer/BSP are often centered or placed slightly below the floor brush (e.g. Z=32 for Z=36 floor).
+            // We search downward starting from a small upward offset (gz + 16.0, gz + 8.0, gz) to avoid starting inside the floor brush.
             let mut floor_z = gz;
             if let Some(ref col_model) = collision_res.model {
                 use goldhub_physics::WorldTrace;
                 let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
-                let drop_tr = bsp_world.trace_player_hull([gx, gy, gz], [gx, gy, gz - 256.0], 0);
-                if drop_tr.fraction < 1.0 && !drop_tr.startsolid {
-                    floor_z = drop_tr.endpos[2];
+                for start_offset in [16.0f32, 8.0, 24.0, 0.0, 32.0] {
+                    let start = [gx, gy, gz + start_offset];
+                    let end = [gx, gy, gz - 256.0];
+                    let drop_tr = bsp_world.trace_player_hull(start, end, 0);
+                    if !drop_tr.startsolid && drop_tr.fraction < 1.0 {
+                        floor_z = drop_tr.endpos[2];
+                        break;
+                    }
                 }
             }
 

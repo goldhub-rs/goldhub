@@ -126,11 +126,19 @@ pub struct FireTargetEvent {
     pub target: String,
 }
 
+/// Event fired when an entity is destroyed, triggering material gib particles.
+#[derive(Event, Debug, Clone)]
+pub struct BreakEntityEvent {
+    pub origin: Vec3,
+    pub material: BreakableMaterial,
+}
+
 pub struct EntityRuntimePlugin;
 
 impl Plugin for EntityRuntimePlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<FireTargetEvent>();
+        app.add_event::<BreakEntityEvent>();
         app.add_systems(
             Startup,
             spawn_bsp_interactive_entities
@@ -139,7 +147,11 @@ impl Plugin for EntityRuntimePlugin {
         );
         app.add_systems(
             Update,
-            (handle_fire_target_events, update_gib_particles_system),
+            (
+                handle_fire_target_events,
+                handle_break_entity_events,
+                update_gib_particles_system,
+            ),
         );
     }
 }
@@ -270,11 +282,16 @@ pub fn spawn_bsp_interactive_entities(
             "ambient_generic" => {
                 if !message_str.is_empty() {
                     let spawnflags = spawnflags_str.parse::<u32>().unwrap_or(0);
-                    let is_start_off = (spawnflags & 1) != 0;
-                    let is_looping = (spawnflags & 32) != 0 || targetname == "operaWav" || spawnflags == 8;
+                    let is_everywhere = (spawnflags & 1) != 0;
+                    let is_start_off = (spawnflags & 16) != 0;
+                    let is_not_looping = (spawnflags & 32) != 0;
+                    let is_looping = !is_not_looping;
+
+                    // If entity is marked not-looping or start-off, it must only play when triggered
+                    let starts_active = !is_start_off && !is_not_looping;
 
                     let mut player_entity = None;
-                    let is_playing = !is_start_off;
+                    let is_playing = starts_active;
 
                     if is_playing
                         && let Some(handle) = audio_bank.get_or_load_sound(
@@ -283,10 +300,21 @@ pub fn spawn_bsp_interactive_entities(
                             &mut audio_sources,
                         )
                     {
+                        let mut settings = if is_looping {
+                            PlaybackSettings::LOOP
+                        } else {
+                            PlaybackSettings::DESPAWN
+                        };
+                        if !is_everywhere {
+                            settings = settings
+                                .with_spatial(true)
+                                .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 64.0));
+                        }
+
                         let p = commands
                             .spawn((
                                 AudioPlayer::new(handle),
-                                PlaybackSettings::LOOP.with_spatial(true),
+                                settings,
                                 Transform::from_translation(bevy_origin),
                             ))
                             .id();
@@ -294,6 +322,7 @@ pub fn spawn_bsp_interactive_entities(
                         tracing::info!(
                             message = message_str,
                             pos = ?bevy_origin,
+                            is_looping,
                             "Spawned active ambient_generic loop"
                         );
                     }
@@ -418,7 +447,9 @@ pub fn handle_fire_target_events(
                     ) {
                         commands.spawn((
                             AudioPlayer::new(handle),
-                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            PlaybackSettings::DESPAWN
+                                .with_spatial(true)
+                                .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 64.0)),
                             Transform::from_translation(ambient.position),
                         ));
                         tracing::info!(sound = ambient.message, "Triggered one-shot ambient sound");
@@ -441,6 +472,50 @@ pub fn handle_fire_target_events(
                 );
             }
         }
+    }
+}
+
+/// Handles material-based gib bursts when a breakable entity is shattered.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_break_entity_events(
+    mut commands: Commands,
+    mut events: EventReader<BreakEntityEvent>,
+    mut model_store: ResMut<StudioModelStore>,
+    search_paths: Res<GameSearchPaths>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for ev in events.read() {
+        let gib_model = match ev.material {
+            BreakableMaterial::Computer => "models/computergibs.mdl",
+            BreakableMaterial::Glass | BreakableMaterial::UnbreakableGlass => "models/glassgibs.mdl",
+            BreakableMaterial::Wood => "models/woodgibs.mdl",
+            BreakableMaterial::Metal => "models/metalplategibs.mdl",
+            BreakableMaterial::Flesh => "models/fleshgibs.mdl",
+            BreakableMaterial::CinderBlock => "models/cindergibs.mdl",
+            BreakableMaterial::CeilingTile => "models/ceilinggibs.mdl",
+            BreakableMaterial::Rocks => "models/rockgibs.mdl",
+        };
+
+        let shooter = EnvShooterEntity {
+            targetname: String::new(),
+            shootmodel: gib_model.to_string(),
+            gibs: 12,
+            variance: 6.0,
+            velocity: 120.0,
+            origin: ev.origin,
+        };
+
+        spawn_gibs(
+            &mut commands,
+            &shooter,
+            &mut model_store,
+            &search_paths,
+            &mut images,
+            &mut materials,
+            &mut meshes,
+        );
     }
 }
 
