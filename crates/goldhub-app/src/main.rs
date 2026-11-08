@@ -6,7 +6,6 @@ use proc_safety::ProcessSafetyBuilder;
 fn main() {
     // 1. Process Hardening & Zero-Trust Security Boundary
     if let Err(err) = ProcessSafetyBuilder::default()
-        .strict_handle_checks()
         .hide_current_thread()
         .disable_core_dumps()
         .best_effort(true)
