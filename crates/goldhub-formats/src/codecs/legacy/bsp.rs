@@ -94,6 +94,32 @@ pub struct BspEdge {
     pub vertices: [u16; 2],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct BspNode {
+    pub plane_id: u32,
+    pub children: [i16; 2],
+    pub mins: [i16; 3],
+    pub maxs: [i16; 3],
+    pub first_face: u16,
+    pub num_faces: u16,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct BspLeaf {
+    pub contents: i32,
+    pub vis_offset: i32,
+    pub mins: [i16; 3],
+    pub maxs: [i16; 3],
+    pub first_marksurface: u16,
+    pub num_marksurfaces: u16,
+    pub ambient_level: [u8; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<BspNode>() == 24);
+const _: () = assert!(core::mem::size_of::<BspLeaf>() == 28);
+
 /// In-memory view of parsed BSP30 lumps.
 pub struct BspLevel<'a> {
     pub planes: &'a [BspPlane],
@@ -104,6 +130,8 @@ pub struct BspLevel<'a> {
     pub edges: &'a [BspEdge],
     pub surfedges: &'a [i32],
     pub models: &'a [BspModel],
+    pub nodes: &'a [BspNode],
+    pub leafs: &'a [BspLeaf],
     pub lighting: &'a [u8],
     pub visdata: &'a [u8],
     pub entities: &'a [u8],
@@ -179,6 +207,8 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
         let faces = extract_lump_slice(bytes, &header.lumps[LUMP_FACES], "faces")?;
         let lighting = extract_lump_raw(bytes, &header.lumps[LUMP_LIGHTING], "lighting")?;
         let clip_nodes = extract_lump_slice(bytes, &header.lumps[LUMP_CLIPNODES], "clipnodes")?;
+        let nodes = extract_lump_slice(bytes, &header.lumps[LUMP_NODES], "nodes")?;
+        let leafs = extract_lump_slice(bytes, &header.lumps[LUMP_LEAVES], "leafs")?;
         let edges = extract_lump_slice(bytes, &header.lumps[LUMP_EDGES], "edges")?;
         let surfedges = extract_lump_slice(bytes, &header.lumps[LUMP_SURFEDGES], "surfedges")?;
         let models = extract_lump_slice(bytes, &header.lumps[LUMP_MODELS], "models")?;
@@ -193,6 +223,8 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
             edges,
             surfedges,
             models,
+            nodes,
+            leafs,
             lighting,
             visdata,
             entities,

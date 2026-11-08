@@ -146,6 +146,9 @@ fn ray_intersects_aabb(
 /// Maximum forward trace reach for knife slash and stab attacks (GoldSrc KnifeSwingDistance).
 const KNIFE_REACH: f32 = 48.0;
 
+/// Bounding hull half-extents expansion for authentic GoldSrc knife swept hull (UTIL_TraceHull).
+const KNIFE_HULL_EXPAND: Vec3 = Vec3::splat(16.0);
+
 /// Handles player attack inputs (LMB slash, RMB stab) and audio triggers with forward ray tracing.
 #[derive(Debug, Clone, Copy)]
 enum HitTarget {
@@ -218,32 +221,47 @@ pub fn viewmodel_input_system(
             |cam_t| (cam_t.translation(), cam_t.forward().as_vec3()),
         );
 
-        // 1. Trace against func_breakable entities (bottles, chickens, radio)
+        // 1. Trace against func_breakable entities (bottles, chickens, radio) with ±16u hull
         let mut closest_breakable: Option<(Entity, f32, crate::entity::BreakableMaterial)> = None;
         for (b_ent, b) in &breakable_query {
             if b.is_broken {
                 continue;
             }
-            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, b.bmin, b.bmax)
-                && closest_breakable.as_ref().is_none_or(|(_, d, _)| t < *d)
+            if let Some(t) = ray_intersects_aabb(
+                cam_pos,
+                cam_forward,
+                KNIFE_REACH,
+                b.bmin - KNIFE_HULL_EXPAND,
+                b.bmax + KNIFE_HULL_EXPAND,
+            ) && closest_breakable.as_ref().is_none_or(|(_, d, _)| t < *d)
             {
                 closest_breakable = Some((b_ent, t, b.material));
             }
         }
 
-        // 2. Trace against solid world entities (hostages)
+        // 2. Trace against studio world entities (hostages, chickens, bottles)
         let mut closest_entity_dist: Option<f32> = None;
         for (ent_t, bounds, studio_ent) in &entity_query {
-            if !studio_ent.is_solid {
-                continue;
-            }
             let ep = ent_t.translation();
-            let bmin = ep + bounds.mins;
-            let bmax = ep + bounds.maxs;
-            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, bmin, bmax)
-                && closest_entity_dist.is_none_or(|cd| t < cd)
-            {
-                closest_entity_dist = Some(t);
+            let bmin = ep + bounds.mins - KNIFE_HULL_EXPAND;
+            let bmax = ep + bounds.maxs + KNIFE_HULL_EXPAND;
+            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, bmin, bmax) {
+                if studio_ent.is_solid {
+                    if closest_entity_dist.is_none_or(|cd| t < cd) {
+                        closest_entity_dist = Some(t);
+                    }
+                } else if !studio_ent.targetname.is_empty() {
+                    // Route hit on visual studio entity (e.g. chicken, bottle) to any overlapping breakable
+                    for (b_ent, b) in &breakable_query {
+                        if !b.is_broken
+                            && ((b.bmin + b.bmax) * 0.5).distance(ep) < 64.0
+                            && closest_breakable.as_ref().is_none_or(|(_, d, _)| t < *d)
+                        {
+                            closest_breakable = Some((b_ent, t, b.material));
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -303,6 +321,7 @@ pub fn viewmodel_input_system(
                             break_events.send(crate::entity::BreakEntityEvent {
                                 origin: center,
                                 material: mat,
+                                model: breakable.model.clone(),
                             });
                             fire_events.send(crate::entity::FireTargetEvent {
                                 target: breakable.target.clone(),
@@ -365,6 +384,7 @@ pub fn viewmodel_input_system(
                             break_events.send(crate::entity::BreakEntityEvent {
                                 origin: center,
                                 material: mat,
+                                model: breakable.model.clone(),
                             });
                             fire_events.send(crate::entity::FireTargetEvent {
                                 target: breakable.target.clone(),

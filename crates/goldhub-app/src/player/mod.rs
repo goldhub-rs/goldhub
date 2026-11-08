@@ -85,7 +85,7 @@ impl Plugin for PlayerPlugin {
                 controller_toggle_system,
                 update_speedometer_system,
                 spawn_player_character_model_system,
-                update_player_character_model_system,
+                update_player_character_model_system.before(crate::studio::studio_animation_system),
             ),
         );
     }
@@ -478,7 +478,7 @@ fn spawn_player_character_model_system(
         .spawn((
             PlayerCharacterModel,
             Transform::from_translation(player_transform.translation)
-                .with_rotation(Quat::from_rotation_y(player.yaw)),
+                .with_rotation(Quat::from_rotation_y(player.yaw + std::f32::consts::FRAC_PI_2)),
             Visibility::Hidden, // Hidden in 1st person by default
         ))
         .id();
@@ -529,17 +529,11 @@ fn update_player_character_model_system(
         return;
     }
 
-    // Position feet at floor level:
-    // GoldSrc player origin is hull center. For standing (hull 0), feet = origin - 36.
-    // For crouching (hull 1), feet = origin - 18.
     let gs_pos = player.sim.current.origin;
-    let feet_z = if player.sim.current.is_ducking {
-        gs_pos[2] - 18.0
-    } else {
-        gs_pos[2] - 36.0
-    };
-    transform.translation = Vec3::new(gs_pos[0], feet_z, -gs_pos[1]);
-    transform.rotation = Quat::from_rotation_y(player.yaw);
+    let base_origin = Vec3::new(gs_pos[0], gs_pos[2], -gs_pos[1]);
+
+    // Align StudioModel rest pose (+X) to Bevy camera forward (-Z)
+    transform.rotation = Quat::from_rotation_y(player.yaw + std::f32::consts::FRAC_PI_2);
 
     // Animation state machine based on movement
     let speed = player.sim.current.horizontal_speed();
@@ -554,18 +548,31 @@ fn update_player_character_model_system(
         } else {
             (2, 20.0) // crouch_idle
         }
-    } else if speed > 150.0 {
-        (4, 30.0) // run
     } else if speed > 10.0 {
-        (3, 30.0) // walk
+        if speed > 150.0 {
+            (4, 30.0) // run
+        } else {
+            (3, 30.0) // walk
+        }
     } else {
         (1, 15.0) // idle1
     };
 
     anim.set_sequence(seq, fps, true);
 
-    // In FirstPerson, enable CS2-style first-person legs (head/neck collapsed, legs visible looking down).
-    // In ThirdPerson, render the complete full-body character model.
-    anim.is_first_person_legs = *perspective == CameraPerspective::FirstPerson;
-    *visibility = Visibility::Inherited;
+    if *perspective == CameraPerspective::ThirdPerson {
+        transform.translation = base_origin;
+        *visibility = Visibility::Inherited;
+    } else {
+        // First Person: CS2-style first-person legs
+        // Only visible when tilting camera down (pitch < -12 degrees).
+        // Offset backward by 12 units along horizontal camera forward so legs and boots are cleanly visible.
+        if player.pitch < -12.0_f32.to_radians() {
+            let forward_h = Vec3::new(-player.yaw.sin(), 0.0, -player.yaw.cos());
+            transform.translation = base_origin - forward_h * 12.0;
+            *visibility = Visibility::Inherited;
+        } else {
+            *visibility = Visibility::Hidden;
+        }
+    }
 }

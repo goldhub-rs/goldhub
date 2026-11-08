@@ -73,11 +73,18 @@ pub struct BreakableEntity {
     pub health: f32,
     pub max_health: f32,
     pub material: BreakableMaterial,
+    pub model: String,
     pub target: String,
     pub targetname: String,
     pub bmin: Vec3,
     pub bmax: Vec3,
     pub is_broken: bool,
+}
+
+/// Tag component marking BSP submodel brush meshes (e.g. "*65" for radio).
+#[derive(Component, Debug, Clone)]
+pub struct BspSubmodelMesh {
+    pub model: String,
 }
 
 /// Entity modifying rendering properties of targets (`env_render`).
@@ -131,6 +138,7 @@ pub struct FireTargetEvent {
 pub struct BreakEntityEvent {
     pub origin: Vec3,
     pub material: BreakableMaterial,
+    pub model: String,
 }
 
 pub struct EntityRuntimePlugin;
@@ -252,6 +260,7 @@ pub fn spawn_bsp_interactive_entities(
                         health,
                         max_health: health,
                         material,
+                        model: model_str.to_string(),
                         target: target.to_string(),
                         targetname: targetname.to_string(),
                         bmin,
@@ -475,11 +484,12 @@ pub fn handle_fire_target_events(
     }
 }
 
-/// Handles material-based gib bursts when a breakable entity is shattered.
+/// Handles material-based gib bursts and brush despawning when a breakable entity is shattered.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_break_entity_events(
     mut commands: Commands,
     mut events: EventReader<BreakEntityEvent>,
+    mut submodel_query: Query<(&BspSubmodelMesh, &mut Visibility)>,
     mut model_store: ResMut<StudioModelStore>,
     search_paths: Res<GameSearchPaths>,
     mut images: ResMut<Assets<Image>>,
@@ -487,6 +497,15 @@ pub fn handle_break_entity_events(
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     for ev in events.read() {
+        if !ev.model.is_empty() {
+            for (submodel, mut vis) in &mut submodel_query {
+                if submodel.model == ev.model {
+                    *vis = Visibility::Hidden;
+                    tracing::info!(model = ev.model, "Hidden BSP submodel on break");
+                }
+            }
+        }
+
         let gib_model = match ev.material {
             BreakableMaterial::Computer => "models/computergibs.mdl",
             BreakableMaterial::Glass | BreakableMaterial::UnbreakableGlass => "models/glassgibs.mdl",

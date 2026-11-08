@@ -201,6 +201,7 @@ pub struct EntityMetadata {
     pub invisible_faces: std::collections::HashSet<usize>,
     pub face_origins: std::collections::HashMap<usize, [f32; 3]>,
     pub face_render_props: std::collections::HashMap<usize, (u32, u8, [u8; 3])>,
+    pub face_submodels: std::collections::HashMap<usize, String>,
 }
 
 fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
@@ -290,6 +291,12 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
                     metadata.face_origins.insert(f, orig);
                 }
             }
+
+            // Tag submodel face index with model ID (e.g. "*65")
+            let submodel_tag = format!("*{m_idx}");
+            for f in first..first + num {
+                metadata.face_submodels.insert(f, submodel_tag.clone());
+            }
         }
     }
 
@@ -313,6 +320,7 @@ pub fn compile_bsp_geometry_submeshes(
 }
 
 /// Compiles raw BSP30 level geometry and generates the hardware-accelerated packed lightmap atlas.
+#[allow(clippy::too_many_lines)]
 pub fn compile_bsp_geometry_and_lightmap(
     bsp: &BspLevel<'_>,
     textures: &[crate::ir::TextureDescriptor],
@@ -422,8 +430,15 @@ pub fn compile_bsp_geometry_and_lightmap(
         }
 
         let submesh_count = (indices.len() as u32) - submesh_start;
+        let submesh_name = metadata
+            .face_submodels
+            .get(&face_idx)
+            .map_or_else(
+                || format!("face_{face_idx}"),
+                |sub| format!("{sub}:face_{face_idx}"),
+            );
         submeshes.push(SubMesh {
-            name: format!("face_{face_idx}"),
+            name: submesh_name,
             index_start: submesh_start,
             index_count: submesh_count,
             material_id: tex_id,
@@ -450,6 +465,7 @@ pub fn compile_bsp_geometry_with_atlas(
     bsp: &BspLevel<'_>,
     atlas: Option<&crate::ir::TextureAtlas>,
 ) -> Result<MeshBuffer, FormatError> {
+    let metadata = collect_entity_metadata(bsp);
     let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(bsp.faces.len() * 6);
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
@@ -512,8 +528,15 @@ pub fn compile_bsp_geometry_with_atlas(
         }
 
         let submesh_count = (indices.len() as u32) - submesh_start;
+        let submesh_name = metadata
+            .face_submodels
+            .get(&face_idx)
+            .map_or_else(
+                || format!("face_{face_idx}"),
+                |sub| format!("{sub}:face_{face_idx}"),
+            );
         submeshes.push(SubMesh {
-            name: format!("face_{face_idx}"),
+            name: submesh_name,
             index_start: submesh_start,
             index_count: submesh_count,
             material_id: tex_id,

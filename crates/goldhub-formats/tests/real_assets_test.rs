@@ -57,7 +57,7 @@ fn test_inspect_fence_entities() {
     let sm = mesh
         .submeshes
         .iter()
-        .find(|s| s.name == "face_7233")
+        .find(|s| s.name == "face_7233" || s.name.ends_with(":face_7233"))
         .unwrap();
     println!(
         "Submesh face_7233: start={}, count={}",

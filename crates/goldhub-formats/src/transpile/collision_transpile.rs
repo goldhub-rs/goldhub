@@ -27,17 +27,45 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
         });
     }
 
+    // Convert BSP visual nodes and leaves into Hull 0 (Point / Ray) collision tree:
+    let mut hull0_clip_nodes = Vec::with_capacity(bsp.nodes.len());
+    for node in bsp.nodes {
+        let mut children = [0i16; 2];
+        for (i, child_slot) in children.iter_mut().enumerate() {
+            let child = node.children[i];
+            if child >= 0 {
+                *child_slot = child;
+            } else {
+                let leaf_idx = (-child - 1) as usize;
+                let contents = bsp.leafs.get(leaf_idx).map_or(-1, |l| l.contents);
+                *child_slot = contents as i16;
+            }
+        }
+        hull0_clip_nodes.push(ClipNode {
+            plane_index: node.plane_id,
+            children,
+        });
+    }
+
     let world_model = bsp.models.first();
     let headnodes = world_model.map_or([0; 4], |m| m.headnode);
 
     // Extract all 4 hulls (0: Point/Ray, 1: Standing Player, 2: Large, 3: Ducking Player)
     let mut hulls = Vec::with_capacity(4);
     for (hull_idx, &headnode) in headnodes.iter().enumerate() {
-        hulls.push(CollisionHull {
-            hull_index: hull_idx as u32,
-            root_node: headnode,
-            clip_nodes: clip_nodes.clone(),
-        });
+        if hull_idx == 0 {
+            hulls.push(CollisionHull {
+                hull_index: 0,
+                root_node: headnode,
+                clip_nodes: hull0_clip_nodes.clone(),
+            });
+        } else {
+            hulls.push(CollisionHull {
+                hull_index: hull_idx as u32,
+                root_node: headnode,
+                clip_nodes: clip_nodes.clone(),
+            });
+        }
     }
 
     // Extract all brush entities (*1..*N) for multi-entity collision (physents)

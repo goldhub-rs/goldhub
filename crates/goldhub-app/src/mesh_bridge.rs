@@ -38,6 +38,7 @@ pub struct PartitionedMesh {
     pub render_mode: u32,
     pub render_amt: u8,
     pub render_color: [u8; 3],
+    pub submodel_id: Option<String>,
     pub mesh: Mesh,
 }
 
@@ -45,16 +46,23 @@ pub struct PartitionedMesh {
 pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
     use std::collections::HashMap;
 
-    // Group submesh index ranges by (material_id, render_mode, render_amt, render_color)
-    let mut material_groups: HashMap<(u32, u32, u8, [u8; 3]), Vec<u32>> = HashMap::new();
+    // Group submesh index ranges by (material_id, render_mode, render_amt, render_color, submodel_id)
+    let mut material_groups: HashMap<(u32, u32, u8, [u8; 3], Option<String>), Vec<u32>> =
+        HashMap::new();
 
     for submesh in &mesh_buffer.submeshes {
+        let submodel_id = if submesh.name.starts_with('*') {
+            submesh.name.split(':').next().map(String::from)
+        } else {
+            None
+        };
         let entry = material_groups
             .entry((
                 submesh.material_id,
                 submesh.render_mode,
                 submesh.render_amt,
                 submesh.render_color,
+                submodel_id,
             ))
             .or_default();
         let start = submesh.index_start as usize;
@@ -66,7 +74,7 @@ pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
 
     let mut result = Vec::with_capacity(material_groups.len());
 
-    for ((mat_id, r_mode, r_amt, r_color), sub_indices) in material_groups {
+    for ((mat_id, r_mode, r_amt, r_color, submodel_id), sub_indices) in material_groups {
         if sub_indices.is_empty() {
             continue;
         }
@@ -111,6 +119,7 @@ pub fn to_bevy_submeshes(mesh_buffer: &MeshBuffer) -> Vec<PartitionedMesh> {
             render_mode: r_mode,
             render_amt: r_amt,
             render_color: r_color,
+            submodel_id,
             mesh,
         });
     }

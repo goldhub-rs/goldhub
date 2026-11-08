@@ -8,7 +8,7 @@ pub mod tga;
 pub mod wad;
 pub mod wad_resolver;
 
-pub use bsp::{Bsp30Decoder, BspLevel};
+pub use bsp::{Bsp30Decoder, BspLeaf, BspLevel, BspNode};
 pub use mdl::{MdlHeader, StudioMdlDecoder};
 pub use tga::{TgaImage, decode_tga};
 pub use wad::{Wad3Decoder, WadArchive};

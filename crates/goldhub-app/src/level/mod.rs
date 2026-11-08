@@ -367,7 +367,7 @@ pub fn setup_level(
                     }
                 });
 
-                commands.spawn((
+                let mut entity_cmds = commands.spawn((
                     Mesh3d(mesh_handle),
                     MeshMaterial3d(mat_handle.clone()),
                     bevy::pbr::Lightmap {
@@ -376,6 +376,12 @@ pub fn setup_level(
                     },
                     Transform::from_xyz(0.0, 0.0, 0.0),
                 ));
+
+                if let Some(ref submodel) = part.submodel_id {
+                    entity_cmds.insert(crate::entity::BspSubmodelMesh {
+                        model: submodel.clone(),
+                    });
+                }
             }
 
             tracing::info!(
