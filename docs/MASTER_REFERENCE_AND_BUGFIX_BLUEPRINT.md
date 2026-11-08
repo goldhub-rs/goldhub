@@ -98,13 +98,41 @@ Our local repository now includes the complete canon of GoldSrc reverse engineer
 
 | Historical GoldSrc Bug / Flaw | Reference Solution | Rust/Bevy Architecture (`goldhub-app`) |
 | :--- | :--- | :--- |
+| **Primitive 2D green radar dots without terrain:** Original radar gave no positional orientation or map awareness. | `GoldClient & NextClient: overview radar` | Orthographic top-down map render (`overviews/<map>.tga`), dynamic view frustum cone, teammate elevation arrows, dynamic scaling (`hud_radar_mapscale_dynamic`). |
+| **Monochrome low-info killfeed:** Missing headshot, wallbang, smoke, and assist indicators. | `GoldClient: modern killfeed` | High-res SVG/raster weapon glyphs, colored icons for headshot, wallbang penetration, blind assist, and local player highlight border. |
+| **Physics framerate coupling (`fps_max > 100` glitches):** Running at 240+ FPS causes bunnyhop slowdowns, jump height loss, and stamina recharge bugs. | `GoldClient: cl_cmdtickrate` | Decouple physics tick loop from render FPS: fixed sub-tick accumulator (e.g. 100/128 Hz) independent of display refresh rate. |
 | **Washed-out / overly dark GoldSrc lighting:** Original software/OpenGL lightmaps suffered from color banding and overbright clipping. | `GoldClient: gl_use_shaders` & Bevy PBR | `TonyMcMapface` Tonemapping + exposure scaling (`1200 lux`) converting normalized luxels into linear radiance. |
 | **Texture wrapping seam artifacts:** Cutout decals and repeating wall textures clamp incorrectly at edges. | `Xash3D: R_LoadTexture` | Explicit `ImageAddressMode::Repeat` for standard textures and `ClampToEdge` for atlas lightmaps. |
 | **Mouse input pointer ballistics:** Windows default pointer ballistics cause inconsistent flick shots. | `NextClient: raw mouse input` | Native Win32 / Bevy raw mouse delta accumulation without desktop acceleration curves. |
 
 ---
 
-## 4. Immediate Execution Roadmap
+## 4. Deep Dive: Tactical Overview Radar & Killfeed Systems
+
+### 4.1 Overview Radar Architecture (Top-Down Ortho Map)
+As illustrated by GoldClient / modern CS clients, the radar pipeline consists of 4 distinct rendering passes:
+1. **Background Layer (`overviews/<mapname>.tga` & `.txt`):**
+   - Reads map origin coordinates `(x, y, z)` and zoom factor.
+   - Computes player offset: `u = (player.x - origin.x) * zoom`, `v = (origin.y - player.y) * zoom`.
+   - Supports circular/rounded clipping mask with dynamic auto-zoom (`hud_radar_mapscale_dynamic`).
+2. **Objective Layer:**
+   - Bomb sites `A` and `B` rendered at fixed world targets (yellow brackets in HUD).
+   - Dropped C4 / Hostages with blinking state and distance clamping at radar edge.
+3. **Player & View Cone Layer:**
+   - Centered circular blip (local player).
+   - Directional FOV viewing arc (frustum cone) projecting yaw orientation into 2D space.
+4. **Teammates & Elevation:**
+   - Teammate blips with directional pointer.
+   - Elevation status: `^` icon if teammate `Z > player.Z + 64`, `v` icon if `Z < player.Z - 64`.
+
+### 4.2 Modern Killfeed Pipeline
+- Weapon death notice icons rendered in right-hand stack with `hud_deathnotice_time` decay.
+- Modular badges: `[Attacker]` + `[Penetration Icon]` + `[Headshot Icon]` + `[Weapon Icon]` + `[Victim]`.
+- Local player highlight: golden/red glowing accent border when involved in the frag.
+
+---
+
+## 5. Immediate Execution Roadmap
 
 Following the user-approved strategy:
 1. **Vector 2 (In Progress):** ViewModel weapon rendering (`v_knife.mdl`) with skeletal bone matrix evaluation, Hor+ FOV math, and smooth animation interpolation.
