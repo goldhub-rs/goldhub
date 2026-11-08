@@ -2,7 +2,8 @@
 
 use bevy::prelude::*;
 
-use crate::audio::GameSearchPaths;
+use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
+use crate::player::LevelCollisionResource;
 use super::animation::StudioAnimatedModel;
 use super::store::{StudioModelStore, create_initial_bevy_mesh};
 
@@ -31,6 +32,9 @@ pub fn spawn_map_studio_entities(
     mut model_store: ResMut<StudioModelStore>,
     search_paths: Res<GameSearchPaths>,
     entities_res: Option<Res<BspEntitiesLump>>,
+    collision_res: Res<LevelCollisionResource>,
+    mut audio_bank: ResMut<GoldSrcAudioBank>,
+    mut audio_sources: ResMut<Assets<AudioSource>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -45,6 +49,8 @@ pub fn spawn_map_studio_entities(
             let mut origin_str = "";
             let mut angle_str = "";
             let mut model_str = "";
+            let mut message_str = "";
+            let mut spawnflags_str = "";
 
             for line in block.lines() {
                 let trimmed = line.trim();
@@ -56,6 +62,8 @@ pub fn spawn_map_studio_entities(
                             "origin" => origin_str = parts[3],
                             "angle" | "angles" => angle_str = parts[3],
                             "model" => model_str = parts[3],
+                            "message" => message_str = parts[3],
+                            "spawnflags" => spawnflags_str = parts[3],
                             _ => {}
                         }
                     }
@@ -76,6 +84,32 @@ pub fn spawn_map_studio_entities(
             else {
                 continue;
             };
+
+            // 1. Handle Ambient Sound Entities (e.g. cs_italy Opera Radio, cs_office ambience)
+            if classname == "ambient_generic" && !message_str.is_empty() {
+                let spawnflags = spawnflags_str.parse::<u32>().unwrap_or(0);
+                // SF_AMBIENT_SOUND_START_OFF = 1
+                if (spawnflags & 1) == 0 {
+                    let bevy_pos = Vec3::new(gx, gz, -gy);
+                    if let Some(handle) = audio_bank.get_or_load_sound(
+                        message_str,
+                        &search_paths.dirs,
+                        &mut audio_sources,
+                    ) {
+                        commands.spawn((
+                            AudioPlayer::new(handle),
+                            PlaybackSettings::LOOP.with_spatial(true),
+                            Transform::from_translation(bevy_pos),
+                        ));
+                        tracing::info!(
+                            message = message_str,
+                            pos = ?bevy_pos,
+                            "Spawned active spatial ambient_generic radio audio"
+                        );
+                    }
+                }
+                continue;
+            }
 
             // Parse GoldSrc yaw angle
             let mut gyaw = 0.0f32;
@@ -108,8 +142,19 @@ pub fn spawn_map_studio_entities(
                 continue;
             };
 
+            // Authentic GoldSrc DROP_TO_FLOOR: trace downwards 256 units against BSP collision to snap to floor
+            let mut floor_z = gz;
+            if let Some(ref col_model) = collision_res.model {
+                use goldhub_physics::WorldTrace;
+                let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
+                let drop_tr = bsp_world.trace_player_hull([gx, gy, gz], [gx, gy, gz - 256.0], 0);
+                if drop_tr.fraction < 1.0 && !drop_tr.startsolid {
+                    floor_z = drop_tr.endpos[2];
+                }
+            }
+
             // Coordinate transformation: Bevy X = GS X, Bevy Y = GS Z, Bevy Z = -GS Y
-            let bevy_pos = Vec3::new(gx, gz, -gy);
+            let bevy_pos = Vec3::new(gx, floor_z, -gy);
             // GoldSrc yaw 0 (+X) maps directly to Bevy yaw 0 (+X); 90 (+Y) to Bevy 90 (-Z)
             let bevy_yaw = gyaw.to_radians();
             let bevy_rot = Quat::from_rotation_y(bevy_yaw);

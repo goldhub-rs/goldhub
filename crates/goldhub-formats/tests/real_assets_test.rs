@@ -520,6 +520,7 @@ fn test_decode_real_studio_models() {
         let model: StudioModel = decoder.decode(&bytes).expect("decode hostage model");
         assert!(!model.rig.bones.is_empty(), "hostage has bones");
         assert!(!model.rig.sequences.is_empty(), "hostage has sequences");
+        println!("Hostage textures: {}", model.textures.len());
         println!(
             "Hostage sequences: {:?}",
             model.rig.sequences.iter().map(|s| &s.name).collect::<Vec<_>>()

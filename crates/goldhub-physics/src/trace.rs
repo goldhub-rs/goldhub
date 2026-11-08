@@ -736,6 +736,8 @@ impl<W: WorldTrace> WorldTrace for EntityCompositeTrace<'_, W> {
 
     #[allow(clippy::many_single_char_names)]
     fn trace_player_hull(&self, start: [f32; 3], end: [f32; 3], hull_idx: u32) -> TraceResult {
+        const DIST_EPSILON: f32 = 0.03125;
+
         let mut tr = self.base.trace_player_hull(start, end, hull_idx);
         if tr.allsolid {
             return tr;
@@ -755,13 +757,24 @@ impl<W: WorldTrace> WorldTrace for EntityCompositeTrace<'_, W> {
                 emaxs[2] - pmins[2],
             ];
 
-            // Check if starting inside
-            if start[0] >= exp_min[0]
-                && start[0] <= exp_max[0]
-                && start[1] >= exp_min[1]
-                && start[1] <= exp_max[1]
-                && start[2] >= exp_min[2]
-                && start[2] <= exp_max[2]
+            let strict_min = [
+                exp_min[0] + DIST_EPSILON,
+                exp_min[1] + DIST_EPSILON,
+                exp_min[2] + DIST_EPSILON,
+            ];
+            let strict_max = [
+                exp_max[0] - DIST_EPSILON,
+                exp_max[1] - DIST_EPSILON,
+                exp_max[2] - DIST_EPSILON,
+            ];
+
+            // Check if strictly starting inside with epsilon clearance
+            if start[0] >= strict_min[0]
+                && start[0] <= strict_max[0]
+                && start[1] >= strict_min[1]
+                && start[1] <= strict_max[1]
+                && start[2] >= strict_min[2]
+                && start[2] <= strict_max[2]
             {
                 tr.startsolid = true;
                 tr.fraction = 0.0;
@@ -810,12 +823,12 @@ impl<W: WorldTrace> WorldTrace for EntityCompositeTrace<'_, W> {
 
             if intersected && tmin >= 0.0 && tmin < tr.fraction {
                 tr.fraction = tmin;
-                tr.endpos = [
-                    start[0] + (end[0] - start[0]) * tmin,
-                    start[1] + (end[1] - start[1]) * tmin,
-                    start[2] + (end[2] - start[2]) * tmin,
-                ];
                 tr.plane_normal = hit_normal;
+                tr.endpos = [
+                    start[0] + (end[0] - start[0]) * tmin + hit_normal[0] * DIST_EPSILON,
+                    start[1] + (end[1] - start[1]) * tmin + hit_normal[1] * DIST_EPSILON,
+                    start[2] + (end[2] - start[2]) * tmin + hit_normal[2] * DIST_EPSILON,
+                ];
                 tr.hit_entity = Some(10_000 + i as u32);
             }
         }
@@ -979,6 +992,6 @@ mod tests {
         assert!(tr.fraction < 1.0, "Must hit hostage entity");
         assert_eq!(tr.hit_entity, Some(10_000));
         assert_eq!(tr.plane_normal, [-1.0, 0.0, 0.0]);
-        assert!((tr.endpos[0] - 68.0).abs() < 1e-4);
+        assert!((tr.endpos[0] - (68.0 - 0.03125)).abs() < 1e-4);
     }
 }

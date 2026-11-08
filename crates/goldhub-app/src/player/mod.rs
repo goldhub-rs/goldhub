@@ -22,6 +22,14 @@ pub enum CameraControlMode {
     Spectator,
 }
 
+/// Camera perspective mode (FirstPerson vs ThirdPerson).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraPerspective {
+    #[default]
+    FirstPerson,
+    ThirdPerson,
+}
+
 /// Stores the BSP collision model for physical hull tracing.
 #[derive(Resource, Default)]
 pub struct LevelCollisionResource {
@@ -67,6 +75,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraControlMode>();
+        app.init_resource::<CameraPerspective>();
         app.init_resource::<LevelCollisionResource>();
         app.add_systems(Startup, setup_speedometer_hud);
         app.add_systems(
@@ -158,15 +167,19 @@ impl WorldTrace for FallbackFlatWorld {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn player_movement_system(
     time: Res<Time>,
     mode: Res<CameraControlMode>,
+    perspective: Res<CameraPerspective>,
     collision_res: Res<LevelCollisionResource>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut query: Query<(&mut Transform, &mut PlayerController)>,
-    solid_query: Query<&Transform, (With<crate::studio::WorldStudioEntity>, Without<PlayerController>)>,
+    solid_query: Query<
+        (&Transform, &crate::studio::EntityCollisionBounds),
+        Without<PlayerController>,
+    >,
 ) {
     if *mode != CameraControlMode::Player {
         return;
@@ -177,16 +190,17 @@ pub fn player_movement_system(
         return;
     }
 
-    // Query active solid studio entities (e.g. hostages) to prevent player clipping through
+    // Query active solid studio entities using true extents (chicken = 16 high, hostage = 72 high)
     let mut solid_entities = Vec::with_capacity(8);
-    for ent_trans in &solid_query {
+    for (ent_trans, bounds) in &solid_query {
         let p = ent_trans.translation;
         // Bevy to GoldSrc: gx = p.x, gy = -p.z, gz = p.y
         let gx = p.x;
         let gy = -p.z;
         let gz = p.y;
-        // Hostage standard hull: [-16, -16, 0] to [16, 16, 72]
-        solid_entities.push(([gx - 16.0, gy - 16.0, gz], [gx + 16.0, gy + 16.0, gz + 72.0]));
+        let gs_mins = [gx + bounds.mins.x, gy - bounds.maxs.z, gz + bounds.mins.y];
+        let gs_maxs = [gx + bounds.maxs.x, gy - bounds.mins.z, gz + bounds.maxs.y];
+        solid_entities.push((gs_mins, gs_maxs));
     }
 
     for (mut transform, mut player) in &mut query {
@@ -264,21 +278,59 @@ pub fn player_movement_system(
         let (gs_pos, view_h) = player.sim.interpolate_for_render();
 
         // 5. Coordinate system transformation from GoldSrc (Z-up) to Bevy (Y-up)
-        // Bevy X = GoldSrc X, Bevy Y = GoldSrc Z + view_height, Bevy Z = -GoldSrc Y
-        let bevy_cam_pos = Vec3::new(gs_pos[0], gs_pos[2] + view_h, -gs_pos[1]);
-
-        transform.translation = bevy_cam_pos;
-        transform.rotation =
+        let eye_pos = Vec3::new(gs_pos[0], gs_pos[2] + view_h, -gs_pos[1]);
+        let cam_rot =
             Quat::from_rotation_y(player.yaw) * Quat::from_rotation_x(player.pitch);
+
+        // Support GoldSrc Third-Person View (cam_idealdist = 64) with wall-clip protection
+        let final_pos = if *perspective == CameraPerspective::ThirdPerson {
+            const THIRD_PERSON_DIST: f32 = 64.0;
+            let back_dir = cam_rot * Vec3::Z;
+            let target_pos = eye_pos + back_dir * THIRD_PERSON_DIST;
+
+            collision_res.model.as_ref().map_or(target_pos, |col_model| {
+                use goldhub_physics::WorldTrace;
+                let bsp_world = BspWorldCollision::new(col_model);
+                let gs_eye = [eye_pos.x, -eye_pos.z, eye_pos.y];
+                let gs_target = [target_pos.x, -target_pos.z, target_pos.y];
+                let tr = bsp_world.trace_player_hull(gs_eye, gs_target, 0);
+                if tr.fraction < 1.0 {
+                    let clipped_dist = (tr.fraction * THIRD_PERSON_DIST - 4.0).max(8.0);
+                    eye_pos + back_dir * clipped_dist
+                } else {
+                    target_pos
+                }
+            })
+        } else {
+            eye_pos
+        };
+
+        transform.translation = final_pos;
+        transform.rotation = cam_rot;
     }
 }
 
-/// Allows toggling between authentic Player movement and Spectator noclip camera with 'M' or 'F3'.
+/// Allows toggling between authentic Player movement and Spectator noclip camera with 'M' / 'F3',
+/// and toggling First-Person vs Third-Person with 'F5'.
 fn controller_toggle_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<CameraControlMode>,
+    mut perspective: ResMut<CameraPerspective>,
     mut query: Query<(&Transform, &mut PlayerController, &mut SpectatorCamera)>,
 ) {
+    if keyboard.just_pressed(KeyCode::F5) {
+        *perspective = match *perspective {
+            CameraPerspective::FirstPerson => {
+                tracing::info!("Camera perspective: ThirdPerson (GoldSrc cam_command 1)");
+                CameraPerspective::ThirdPerson
+            }
+            CameraPerspective::ThirdPerson => {
+                tracing::info!("Camera perspective: FirstPerson");
+                CameraPerspective::FirstPerson
+            }
+        };
+    }
+
     if keyboard.just_pressed(KeyCode::KeyM) || keyboard.just_pressed(KeyCode::F3) {
         let Ok((transform, mut player, mut spec)) = query.get_single_mut() else {
             return;

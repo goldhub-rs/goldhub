@@ -65,19 +65,6 @@ pub fn spawn_viewmodel_system(
                 Transform::IDENTITY,
                 Visibility::default(),
             ))
-            .with_children(|parent| {
-                // Dedicated StudioModel ViewModel illuminator to simulate GoldSrc R_StudioLighting
-                parent.spawn((
-                    PointLight {
-                        color: Color::srgb(1.0, 0.98, 0.95),
-                        intensity: 3500.0,
-                        range: 3.5,
-                        shadows_enabled: false,
-                        ..default()
-                    },
-                    Transform::from_xyz(0.15, 0.25, -0.2),
-                ));
-            })
             .id();
 
         // Spawn child entities for each submesh
@@ -336,12 +323,13 @@ pub fn viewmodel_input_system(
     }
 }
 
-/// Applies authentic weapon bobbing and mouse sway lag.
+/// Applies authentic weapon bobbing and mouse sway lag, and manages first/third person visibility.
 pub fn viewmodel_bob_and_sway_system(
     time: Res<Time>,
+    perspective: Option<Res<crate::player::CameraPerspective>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     player_query: Query<&PlayerController>,
-    mut vm_query: Query<(&mut ViewModelWeapon, &mut Transform)>,
+    mut vm_query: Query<(&mut ViewModelWeapon, &mut Transform, &mut Visibility)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -353,7 +341,16 @@ pub fn viewmodel_bob_and_sway_system(
     };
     let speed = player.sim.current.horizontal_speed();
 
-    for (mut vm, mut transform) in &mut vm_query {
+    for (mut vm, mut transform, mut visibility) in &mut vm_query {
+        // Hide viewmodel in Third-Person mode
+        if let Some(ref pers) = perspective {
+            if **pers == crate::player::CameraPerspective::ThirdPerson {
+                *visibility = Visibility::Hidden;
+                continue;
+            }
+            *visibility = Visibility::Inherited;
+        }
+
         // 1. Movement Bobbing
         if speed > 10.0 && player.sim.current.on_ground {
             let bob_freq = (speed / 120.0).clamp(2.0, 7.0);

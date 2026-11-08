@@ -81,10 +81,8 @@ impl StudioModelStore {
             let is_masked = (tex.flags & 0x0040) != 0;
             let mat = StandardMaterial {
                 base_color_texture: Some(img_handle),
-                perceptual_roughness: 0.6,
-                metallic: 0.05,
-                emissive: LinearRgba::rgb(0.08, 0.08, 0.08),
                 cull_mode: None, // Two-sided rendering
+                unlit: true,     // Authentic GoldSrc StudioModel fullbright texturing
                 alpha_mode: if is_masked {
                     AlphaMode::Mask(0.5)
                 } else {
