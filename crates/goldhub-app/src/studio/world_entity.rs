@@ -17,6 +17,13 @@ pub struct WorldStudioEntity {
     pub model_path: String,
 }
 
+/// Bounding box component in Bevy coordinates for physical interaction and ray intersection.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct EntityCollisionBounds {
+    pub mins: Vec3,
+    pub maxs: Vec3,
+}
+
 /// Spawns interactive 3D studio entities parsed from the BSP map's entity lump.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn spawn_map_studio_entities(
@@ -103,7 +110,8 @@ pub fn spawn_map_studio_entities(
 
             // Coordinate transformation: Bevy X = GS X, Bevy Y = GS Z, Bevy Z = -GS Y
             let bevy_pos = Vec3::new(gx, gz, -gy);
-            let bevy_yaw = (gyaw - 90.0).to_radians();
+            // GoldSrc yaw 0 (+X) maps directly to Bevy yaw 0 (+X); 90 (+Y) to Bevy 90 (-Z)
+            let bevy_yaw = gyaw.to_radians();
             let bevy_rot = Quat::from_rotation_y(bevy_yaw);
 
             if spawn_studio_entity(
@@ -197,13 +205,31 @@ pub fn spawn_studio_entity(
     let mut anim_component = StudioAnimatedModel::new(model_path, false);
     anim_component.set_sequence(initial_seq, seq_fps, true);
 
-    // Parent entity holding transform and animation state
+    let bounds = if model_path.contains("hostage") || classname.contains("hostage") {
+        EntityCollisionBounds {
+            mins: Vec3::new(-16.0, 0.0, -16.0),
+            maxs: Vec3::new(16.0, 72.0, 16.0),
+        }
+    } else if model_path.contains("chick") {
+        EntityCollisionBounds {
+            mins: Vec3::new(-8.0, 0.0, -8.0),
+            maxs: Vec3::new(8.0, 16.0, 8.0),
+        }
+    } else {
+        EntityCollisionBounds {
+            mins: Vec3::new(-16.0, 0.0, -16.0),
+            maxs: Vec3::new(16.0, 36.0, 16.0),
+        }
+    };
+
+    // Parent entity holding transform, collision bounds, and animation state
     let parent_entity = commands
         .spawn((
             WorldStudioEntity {
                 classname: classname.to_string(),
                 model_path: model_path.to_string(),
             },
+            bounds,
             Transform::from_translation(position).with_rotation(rotation),
             Visibility::default(),
         ))

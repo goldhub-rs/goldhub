@@ -8,8 +8,8 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use goldhub_formats::ir::CollisionModel;
 use goldhub_physics::{
-    BspWorldCollision, FixedSubtickSimulator, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT,
-    IN_MOVERIGHT, IN_SPEED, PlayerCmd, WorldTrace,
+    BspWorldCollision, EntityCompositeTrace, FixedSubtickSimulator, IN_BACK, IN_DUCK, IN_FORWARD,
+    IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, IN_SPEED, PlayerCmd, WorldTrace,
 };
 
 use crate::camera::SpectatorCamera;
@@ -166,6 +166,7 @@ pub fn player_movement_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut query: Query<(&mut Transform, &mut PlayerController)>,
+    solid_query: Query<&Transform, (With<crate::studio::WorldStudioEntity>, Without<PlayerController>)>,
 ) {
     if *mode != CameraControlMode::Player {
         return;
@@ -174,6 +175,18 @@ pub fn player_movement_system(
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
+    }
+
+    // Query active solid studio entities (e.g. hostages) to prevent player clipping through
+    let mut solid_entities = Vec::with_capacity(8);
+    for ent_trans in &solid_query {
+        let p = ent_trans.translation;
+        // Bevy to GoldSrc: gx = p.x, gy = -p.z, gz = p.y
+        let gx = p.x;
+        let gy = -p.z;
+        let gz = p.y;
+        // Hostage standard hull: [-16, -16, 0] to [16, 16, 72]
+        solid_entities.push(([gx - 16.0, gy - 16.0, gz], [gx + 16.0, gy + 16.0, gz + 72.0]));
     }
 
     for (mut transform, mut player) in &mut query {
@@ -236,13 +249,15 @@ pub fn player_movement_system(
             view_angles: [pitch_deg, yaw_deg, 0.0],
         };
 
-        // 3. Advance fixed 128 Hz simulation against BSP collision or fallback world
+        // 3. Advance fixed 128 Hz simulation against BSP collision or fallback world (with solid entities)
         if let Some(ref col_model) = collision_res.model {
             let bsp_world = BspWorldCollision::new(col_model);
-            player.sim.advance(dt, &cmd, &bsp_world);
+            let composite = EntityCompositeTrace::new(&bsp_world, &solid_entities);
+            player.sim.advance(dt, &cmd, &composite);
         } else {
             let flat_world = FallbackFlatWorld;
-            player.sim.advance(dt, &cmd, &flat_world);
+            let composite = EntityCompositeTrace::new(&flat_world, &solid_entities);
+            player.sim.advance(dt, &cmd, &composite);
         }
 
         // 4. Interpolate origin & view height for smooth sub-frame rendering

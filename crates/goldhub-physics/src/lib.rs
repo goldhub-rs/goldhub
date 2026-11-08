@@ -18,7 +18,7 @@ pub use movement::{
     pm_player_move, pm_spline_fraction, pm_unduck,
 };
 pub use player::{PlayerCmd, PlayerState};
-pub use trace::{BspWorldCollision, TraceResult, WorldTrace};
+pub use trace::{BspWorldCollision, EntityCompositeTrace, TraceResult, WorldTrace};
 
 #[cfg(test)]
 mod tests {

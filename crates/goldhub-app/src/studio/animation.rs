@@ -35,7 +35,7 @@ impl StudioAnimatedModel {
 
     /// Sets the active sequence, resetting frame progress and updating FPS.
     pub fn set_sequence(&mut self, seq_idx: usize, fps: f32, looping: bool) {
-        if self.sequence_index != seq_idx {
+        if self.sequence_index != seq_idx || !looping {
             self.sequence_index = seq_idx;
             self.frame_progress = 0.0;
             self.fps = fps;
