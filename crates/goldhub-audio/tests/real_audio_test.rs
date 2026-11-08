@@ -78,4 +78,38 @@ fn test_parse_real_cs16_materials_txt() {
     let table =
         MaterialTable::parse_materials_txt(&content).expect("Failed to parse materials.txt");
     assert!(table.len() > 100);
+
+    // Canonical fallback to Concrete:
+    // Unknown or unlisted textures must strictly return Concrete ('C')
+    assert_eq!(
+        table.find_texture_type("camo_wall16"),
+        goldhub_audio::MaterialType::Concrete
+    );
+    assert_eq!(
+        table.find_texture_type("out_roof4"),
+        goldhub_audio::MaterialType::Concrete
+    );
+    assert_eq!(
+        table.find_texture_type(""),
+        goldhub_audio::MaterialType::Concrete
+    );
+    assert_eq!(
+        table.find_texture_type("-0"),
+        goldhub_audio::MaterialType::Concrete
+    );
+    // Reverse prefix matching must never happen (e.g. query "cstrike_" must not match "cstrike_CE2XCng")
+    assert_eq!(
+        table.find_texture_type("cstrike_"),
+        goldhub_audio::MaterialType::Concrete
+    );
+
+    // Verified known textures from CS 1.6 materials.txt:
+    assert_eq!(
+        table.find_texture_type("generic015"),
+        goldhub_audio::MaterialType::Grate
+    );
+    assert_eq!(
+        table.find_texture_type("lab1_stair2b"),
+        goldhub_audio::MaterialType::Metal
+    );
 }

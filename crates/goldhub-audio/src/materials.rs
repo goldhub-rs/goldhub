@@ -244,6 +244,9 @@ impl MaterialTable {
     #[must_use]
     pub fn find_texture_type(&self, raw_name: &str) -> MaterialType {
         let clean = sanitize_texture_name(raw_name);
+        if clean.is_empty() {
+            return MaterialType::Concrete;
+        }
         let search_name = if clean.len() > MAX_TEXTURENAME_LENGTH - 1 {
             &clean[..MAX_TEXTURENAME_LENGTH - 1]
         } else {
@@ -257,10 +260,10 @@ impl MaterialTable {
         {
             self.entries[idx].material
         } else {
-            // Prefix search fallback: canonical engine uses Q_strnicmp(name, pm_grgszTextureName[pivot], 16)
-            // If direct match failed, see if any entry prefix matches
+            // Prefix search fallback: canonical engine checks if texture name starts with entry prefix.
+            // Never reverse matches (entry name starting with texture name), which causes short strings to falsely match.
             for entry in &self.entries {
-                if search_upper.starts_with(&entry.name) || entry.name.starts_with(&search_upper) {
+                if !entry.name.is_empty() && search_upper.starts_with(&entry.name) {
                     return entry.material;
                 }
             }
