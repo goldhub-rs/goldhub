@@ -505,6 +505,7 @@ fn spawn_player_character_model_system(
 }
 
 fn update_player_character_model_system(
+    mode: Res<CameraControlMode>,
     perspective: Res<CameraPerspective>,
     player_query: Query<&PlayerController>,
     mut model_query: Query<
@@ -522,6 +523,11 @@ fn update_player_character_model_system(
     let Ok((mut transform, mut anim, mut visibility)) = model_query.get_single_mut() else {
         return;
     };
+
+    if *mode == CameraControlMode::Spectator {
+        *visibility = Visibility::Hidden;
+        return;
+    }
 
     // Position feet at floor level:
     // GoldSrc player origin is hull center. For standing (hull 0), feet = origin - 36.
@@ -558,10 +564,8 @@ fn update_player_character_model_system(
 
     anim.set_sequence(seq, fps, true);
 
-    // Visibility toggle: visible in ThirdPerson, hidden in FirstPerson
-    if *perspective == CameraPerspective::ThirdPerson {
-        *visibility = Visibility::Inherited;
-    } else {
-        *visibility = Visibility::Hidden;
-    }
+    // In FirstPerson, enable CS2-style first-person legs (head/neck collapsed, legs visible looking down).
+    // In ThirdPerson, render the complete full-body character model.
+    anim.is_first_person_legs = *perspective == CameraPerspective::FirstPerson;
+    *visibility = Visibility::Inherited;
 }

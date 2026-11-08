@@ -14,6 +14,7 @@ pub struct StudioAnimatedModel {
     pub fps: f32,
     pub is_looping: bool,
     pub is_viewmodel: bool,
+    pub is_first_person_legs: bool,
     /// List of (child_entity, mesh_asset_handle, submesh_index)
     pub mesh_entities: Vec<(Entity, Handle<Mesh>, usize)>,
 }
@@ -29,6 +30,7 @@ impl StudioAnimatedModel {
             fps: 30.0,
             is_looping: true,
             is_viewmodel,
+            is_first_person_legs: false,
             mesh_entities: Vec::new(),
         }
     }
@@ -126,6 +128,7 @@ pub fn studio_animation_system(
                 continue;
             };
 
+            let is_fp_legs = anim.is_first_person_legs;
             // In-place position transformation
             for (v, out_p) in template.rest_vertices.iter().zip(pos_vec.iter_mut()) {
                 let bone_idx = v.bone_index as usize;
@@ -134,6 +137,9 @@ pub fn studio_animation_system(
                     let p = bm.transform_point3(Vec3::from(v.position));
                     if is_vm {
                         *out_p = [-p.y, p.z, -p.x];
+                    } else if is_fp_legs && p.z > 48.0 {
+                        // CS2 First-Person legs: collapse head/neck vertices to avoid camera view clipping
+                        *out_p = [0.0, 0.0, 0.0];
                     } else {
                         *out_p = [p.x, p.z, -p.y];
                     }
