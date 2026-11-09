@@ -565,11 +565,12 @@ fn update_player_character_model_system(
         *visibility = Visibility::Inherited;
     } else {
         // First Person: CS2-style first-person legs
-        // Only visible when tilting camera down (pitch < -12 degrees).
-        // Offset backward by 12 units along horizontal camera forward so legs and boots are cleanly visible.
-        if player.pitch < -12.0_f32.to_radians() {
+        // Only visible when tilting camera down towards feet (pitch < -35 degrees).
+        // Offset backward by 18 units along horizontal camera forward so shoulders/torso stay behind the camera plane
+        // and only thighs, knees, and boots are visible.
+        if player.pitch < -35.0_f32.to_radians() {
             let forward_h = Vec3::new(-player.yaw.sin(), 0.0, -player.yaw.cos());
-            transform.translation = base_origin - forward_h * 12.0;
+            transform.translation = base_origin - forward_h * 18.0;
             *visibility = Visibility::Inherited;
         } else {
             *visibility = Visibility::Hidden;

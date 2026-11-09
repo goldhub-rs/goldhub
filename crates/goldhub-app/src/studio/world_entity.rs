@@ -121,13 +121,16 @@ pub fn spawn_map_studio_entities(
                 continue;
             };
 
-            let is_solid = classname == "hostage_entity" || classname == "monster_scientist";
+            let is_hostage = classname == "hostage_entity" || classname == "monster_scientist";
+            let is_solid = is_hostage;
 
             // Authentic GoldSrc DROP_TO_FLOOR:
-            // Entity origins in Hammer/BSP are often centered or placed slightly below the floor brush (e.g. Z=32 for Z=36 floor).
-            // We search downward starting from a small upward offset (gz + 16.0, gz + 8.0, gz) to avoid starting inside the floor brush.
+            // In GoldSrc engine (ReGameDLL), DROP_TO_FLOOR is only executed by monsters/NPCs (CHostage, CBaseMonster).
+            // Static visual props (cycler_sprite, env_model) are placed at exact map author coordinates (e.g. on tables).
             let mut floor_z = gz;
-            if let Some(ref col_model) = collision_res.model {
+            if is_hostage
+                && let Some(ref col_model) = collision_res.model
+            {
                 use goldhub_physics::WorldTrace;
                 let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
                 for start_offset in [16.0f32, 8.0, 24.0, 0.0, 32.0] {
@@ -300,6 +303,7 @@ pub fn spawn_studio_entity(
                 Mesh3d(mesh_handle.clone()),
                 MeshMaterial3d(template.material.clone()),
                 Transform::IDENTITY,
+                bevy::render::view::NoFrustumCulling,
             ))
             .id();
 

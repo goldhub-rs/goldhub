@@ -292,9 +292,14 @@ pub fn spawn_bsp_interactive_entities(
                 if !message_str.is_empty() {
                     let spawnflags = spawnflags_str.parse::<u32>().unwrap_or(0);
                     let is_everywhere = (spawnflags & 1) != 0;
+                    let is_small_radius = (spawnflags & 2) != 0;
+                    let is_large_radius = (spawnflags & 8) != 0;
                     let is_start_off = (spawnflags & 16) != 0;
                     let is_not_looping = (spawnflags & 32) != 0;
                     let is_looping = !is_not_looping;
+
+                    // Initial volume (GoldSrc health 1..10 where 10 = 100%)
+                    let vol = (health_str.parse::<f32>().unwrap_or(10.0) / 10.0).clamp(0.05, 1.0);
 
                     // If entity is marked not-looping or start-off, it must only play when triggered
                     let starts_active = !is_start_off && !is_not_looping;
@@ -314,10 +319,20 @@ pub fn spawn_bsp_interactive_entities(
                         } else {
                             PlaybackSettings::DESPAWN
                         };
-                        if !is_everywhere {
+                        if is_everywhere {
+                            settings = settings.with_volume(bevy::audio::Volume::new(vol));
+                        } else {
+                            let scale = if is_small_radius {
+                                1.0 / 4.0 // Drops off rapidly within ~150u (e.g. sheep.wav)
+                            } else if is_large_radius {
+                                1.0 / 64.0 // Audible throughout building (e.g. Opera.wav)
+                            } else {
+                                1.0 / 16.0 // Medium / static default
+                            };
                             settings = settings
                                 .with_spatial(true)
-                                .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 64.0));
+                                .with_spatial_scale(bevy::audio::SpatialScale::new(scale))
+                                .with_volume(bevy::audio::Volume::new(vol));
                         }
 
                         let p = commands
@@ -490,6 +505,7 @@ pub fn handle_break_entity_events(
     mut commands: Commands,
     mut events: EventReader<BreakEntityEvent>,
     mut submodel_query: Query<(&BspSubmodelMesh, &mut Visibility)>,
+    mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
     mut model_store: ResMut<StudioModelStore>,
     search_paths: Res<GameSearchPaths>,
     mut images: ResMut<Assets<Image>>,
@@ -502,6 +518,20 @@ pub fn handle_break_entity_events(
                 if submodel.model == ev.model {
                     *vis = Visibility::Hidden;
                     tracing::info!(model = ev.model, "Hidden BSP submodel on break");
+                }
+            }
+
+            // Authentic GoldSrc pev->solid = SOLID_NOT: disable physical collision for broken brush entity
+            if let Some(ref mut col_res) = collision_res
+                && let Some(ref mut col_model) = col_res.model
+                && let Some(sub_num_str) = ev.model.strip_prefix('*')
+                && let Ok(sub_num) = sub_num_str.parse::<usize>()
+            {
+                for ent in &mut col_model.brush_entities {
+                    if ent.model_index == sub_num {
+                        ent.solid = goldhub_formats::ir::SOLID_NOT;
+                        tracing::info!(model = ev.model, "Disabled physical collision for broken BSP entity");
+                    }
                 }
             }
         }
