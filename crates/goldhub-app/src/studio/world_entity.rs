@@ -1,8 +1,9 @@
 //! World entity spawner (hostages, chickens, decorative props) from BSP entity lumps.
 
 use bevy::prelude::*;
+use goldhub_physics::WorldTrace;
 
-use crate::audio::GameSearchPaths;
+use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
 use crate::player::LevelCollisionResource;
 use super::animation::StudioAnimatedModel;
 use super::store::{StudioModelStore, create_initial_bevy_mesh};
@@ -27,13 +28,28 @@ pub struct EntityCollisionBounds {
     pub maxs: Vec3,
 }
 
-/// Interactive hostage entity component (`hostage_entity`).
+/// Hostage state matching GoldSrc enum state { FOLLOW, STAND, DUCK, SCARED, IDLE, RESCUED, DEAD }.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostageState {
+    #[default]
+    Stand,
+    Follow,
+    Rescued,
+    Dead,
+}
+
+/// Interactive hostage entity component (`hostage_entity` / `monster_scientist`).
 #[derive(Component, Debug, Clone)]
 pub struct HostageEntity {
     pub health: f32,
     pub max_health: f32,
     pub is_dead: bool,
     pub pain_cooldown: f32,
+    pub state: HostageState,
+    pub leader: Option<Entity>,
+    pub velocity: Vec3,
+    pub next_use_time: f32,
+    pub home_pos: Vec3,
 }
 
 /// Spawns interactive 3D studio entities parsed from the BSP map's entity lump.
@@ -330,6 +346,11 @@ pub fn spawn_studio_entity(
             max_health: 100.0,
             is_dead: false,
             pain_cooldown: 0.0,
+            state: HostageState::Stand,
+            leader: None,
+            velocity: Vec3::ZERO,
+            next_use_time: 0.0,
+            home_pos: position,
         });
     }
 
@@ -341,4 +362,166 @@ pub fn spawn_studio_entity(
         "Spawned World 3D StudioModel Entity"
     );
     true
+}
+
+/// Upkeep tick and follow movement for hostages.
+#[allow(clippy::too_many_arguments, clippy::type_complexity, clippy::too_many_lines)]
+pub fn hostage_interaction_and_ai_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    search_paths: Res<GameSearchPaths>,
+    mut audio_bank: ResMut<GoldSrcAudioBank>,
+    mut audio_sources: ResMut<Assets<AudioSource>>,
+    collision_res: Res<LevelCollisionResource>,
+    model_store: Res<StudioModelStore>,
+    player_query: Query<(Entity, &Transform, &crate::player::PlayerController)>,
+    rescue_query: Query<&crate::entity::HostageRescueZoneEntity>,
+    mut hostage_query: Query<(
+        Entity,
+        &mut HostageEntity,
+        &mut Transform,
+        &mut StudioAnimatedModel,
+        &mut EntityCollisionBounds,
+        &mut Visibility,
+    ), Without<crate::player::PlayerController>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+
+    let Ok((player_ent, player_t, _)) = player_query.get_single() else {
+        return;
+    };
+    let player_pos = player_t.translation;
+    let player_fwd = player_t.forward().as_vec3();
+    let use_pressed = keyboard.just_pressed(KeyCode::KeyE);
+
+    for (h_ent, mut hostage, mut h_t, mut h_anim, mut bounds, mut vis) in &mut hostage_query {
+        if hostage.is_dead || hostage.state == HostageState::Rescued {
+            continue;
+        }
+
+        let h_pos = h_t.translation;
+        let delta = player_pos - h_pos;
+        let dist = delta.length();
+
+        // 1. +use (E key) toggle between Stand and Follow
+        if use_pressed && dist <= 80.0 {
+            let dir_to_hostage = (h_pos - player_pos).normalize_or_zero();
+            let dot = player_fwd.dot(dir_to_hostage);
+            if dot >= 0.65 && hostage.next_use_time <= time.elapsed_secs() {
+                hostage.next_use_time = time.elapsed_secs() + 1.0;
+
+                if hostage.state == HostageState::Follow && hostage.leader == Some(player_ent) {
+                    hostage.state = HostageState::Stand;
+                    hostage.leader = None;
+                    hostage.velocity = Vec3::ZERO;
+                    tracing::info!(hostage = ?h_ent, "Hostage toggled to STAND");
+                } else {
+                    hostage.state = HostageState::Follow;
+                    hostage.leader = Some(player_ent);
+                    tracing::info!(hostage = ?h_ent, "Hostage toggled to FOLLOW player");
+                }
+
+                // Play follow sound hostage/hos1..5.wav
+                let snd_idx = ((time.elapsed_secs() * 100.0) as usize % 5) + 1;
+                let snd_name = format!("hostage/hos{snd_idx}.wav");
+                if let Some(h) = audio_bank.get_or_load_sound(&snd_name, &search_paths.dirs, &mut audio_sources) {
+                    commands.spawn((
+                        AudioPlayer::new(h),
+                        PlaybackSettings::DESPAWN.with_spatial(true),
+                        Transform::from_translation(h_pos),
+                    ));
+                }
+            }
+        }
+
+        // 2. Follow movement logic
+        if hostage.state == HostageState::Follow && hostage.leader == Some(player_ent) {
+            let h_flat = Vec3::new(h_pos.x, 0.0, h_pos.z);
+            let p_flat = Vec3::new(player_pos.x, 0.0, player_pos.z);
+            let flat_delta = p_flat - h_flat;
+            let flat_dist = flat_delta.length();
+
+            // ReGameDLL STOPPING DISTANCE: 80.0 units
+            if flat_dist < 80.0 {
+                hostage.velocity = Vec3::ZERO;
+                // Switch to idle sequence
+                if let Some(model_data) = model_store.models.get(&h_anim.model_id) {
+                    let seqs = &model_data.model.rig.sequences;
+                    if let Some(idle_idx) = seqs.iter().position(|s| s.name == "idle1")
+                        && h_anim.sequence_index != idle_idx
+                    {
+                        h_anim.set_sequence(idle_idx, seqs[idle_idx].fps, true);
+                    }
+                }
+            } else {
+                let move_dir = flat_delta.normalize_or_zero();
+
+                // ReGameDLL Piecewise Speed Equation:
+                // >= 250 -> 400 u/s, >= 110 -> 300 u/s, < 110 -> dist u/s
+                let speed = if flat_dist >= 250.0 {
+                    400.0
+                } else if flat_dist >= 110.0 {
+                    300.0
+                } else {
+                    flat_dist.max(80.0)
+                };
+
+                hostage.velocity = move_dir * speed;
+                h_t.translation += move_dir * speed * dt;
+
+                // Face moving direction (GoldSrc model forward is -Z in Bevy coords, facing along yaw)
+                let target_yaw = move_dir.x.atan2(-move_dir.z);
+                h_t.rotation = Quat::from_rotation_y(target_yaw);
+
+                // Snap feet to ground using BSP collision trace
+                if let Some(ref col_model) = collision_res.model {
+                    let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
+                    let gs_start = [h_t.translation.x, -h_t.translation.z, h_t.translation.y + 16.0];
+                    let gs_end = [h_t.translation.x, -h_t.translation.z, h_t.translation.y - 128.0];
+                    let tr = bsp_world.trace_player_hull(gs_start, gs_end, 0);
+                    if tr.fraction < 1.0 {
+                        h_t.translation.y = tr.endpos[2];
+                    }
+                }
+
+                // Animation sequence selection
+                if let Some(model_data) = model_store.models.get(&h_anim.model_id) {
+                    let seqs = &model_data.model.rig.sequences;
+                    let target_seq_name = if speed > 160.0 { "run" } else { "walk" };
+                    if let Some(seq_idx) = seqs.iter().position(|s| s.name == target_seq_name)
+                        && h_anim.sequence_index != seq_idx
+                    {
+                        h_anim.set_sequence(seq_idx, seqs[seq_idx].fps, true);
+                    }
+                }
+            }
+
+            // 3. Rescue Zone Detection (func_hostage_rescue or info_hostage_rescue)
+            for rescue_zone in &rescue_query {
+                let inside = h_t.translation.x >= rescue_zone.bmin.x
+                    && h_t.translation.x <= rescue_zone.bmax.x
+                    && h_t.translation.y >= rescue_zone.bmin.y
+                    && h_t.translation.y <= rescue_zone.bmax.y
+                    && h_t.translation.z >= rescue_zone.bmin.z
+                    && h_t.translation.z <= rescue_zone.bmax.z;
+
+                if inside {
+                    hostage.state = HostageState::Rescued;
+                    *vis = Visibility::Hidden;
+                    bounds.mins = Vec3::ZERO;
+                    bounds.maxs = Vec3::ZERO;
+
+                    if let Some(h) = audio_bank.get_or_load_sound("radio/rescued.wav", &search_paths.dirs, &mut audio_sources) {
+                        commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+                    }
+                    tracing::info!(hostage = ?h_ent, "Hostage successfully rescued in rescue zone!");
+                    break;
+                }
+            }
+        }
+    }
 }

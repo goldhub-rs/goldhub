@@ -203,6 +203,38 @@ pub struct BreakEntityEvent {
     pub explodemagnitude: u32,
 }
 
+/// Rescue zone entity (`func_hostage_rescue` or `info_hostage_rescue`).
+#[derive(Component, Debug, Clone)]
+pub struct HostageRescueZoneEntity {
+    pub bmin: Vec3,
+    pub bmax: Vec3,
+}
+
+/// Push trigger entity (`trigger_push`).
+#[derive(Component, Debug, Clone)]
+pub struct TriggerPushEntity {
+    pub speed: f32,
+    pub dir: Vec3,
+    pub bmin: Vec3,
+    pub bmax: Vec3,
+}
+
+/// Hurt trigger entity (`trigger_hurt`).
+#[derive(Component, Debug, Clone)]
+pub struct TriggerHurtEntity {
+    pub dmg: f32,
+    pub bmin: Vec3,
+    pub bmax: Vec3,
+    pub next_dmg_time: f32,
+}
+
+/// Buy zone entity (`func_buyzone`).
+#[derive(Component, Debug, Clone)]
+pub struct BuyZoneEntity {
+    pub bmin: Vec3,
+    pub bmax: Vec3,
+}
+
 pub struct EntityRuntimePlugin;
 
 impl Plugin for EntityRuntimePlugin {
@@ -219,6 +251,7 @@ impl Plugin for EntityRuntimePlugin {
                 interact_door_system,
                 update_explosion_flashes_system,
                 update_explosions_vfx_system,
+                update_triggers_system,
             ),
         );
     }
@@ -517,6 +550,43 @@ pub fn spawn_bsp_interactive_entities(
                     velocity,
                     origin: bevy_origin,
                 });
+            }
+            "func_hostage_rescue" | "info_hostage_rescue" => {
+                let (bmin, bmax) = if model_str.starts_with('*') {
+                    get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref())
+                } else {
+                    (bevy_origin - Vec3::splat(256.0), bevy_origin + Vec3::splat(256.0))
+                };
+                commands.spawn((
+                    HostageRescueZoneEntity { bmin, bmax },
+                    Transform::from_translation((bmin + bmax) * 0.5),
+                    Visibility::default(),
+                ));
+                tracing::info!(classname, "Spawned Hostage Rescue Zone");
+            }
+            "trigger_push" => {
+                let speed = speed_str.parse::<f32>().unwrap_or(100.0).max(10.0);
+                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                let yaw = angles_str
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(0.0);
+                let rad = yaw.to_radians();
+                let dir = Vec3::new(rad.cos(), 0.0, -rad.sin());
+                commands.spawn(TriggerPushEntity { speed, dir, bmin, bmax });
+                tracing::info!(speed = speed, "Spawned trigger_push entity");
+            }
+            "trigger_hurt" => {
+                let dmg = health_str.parse::<f32>().unwrap_or(10.0).max(1.0);
+                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                commands.spawn(TriggerHurtEntity { dmg, bmin, bmax, next_dmg_time: 0.0 });
+                tracing::info!(dmg = dmg, "Spawned trigger_hurt entity");
+            }
+            "func_buyzone" => {
+                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                commands.spawn(BuyZoneEntity { bmin, bmax });
+                tracing::info!("Spawned func_buyzone entity");
             }
             _ => {}
         }
@@ -1357,5 +1427,54 @@ pub fn ray_intersects_aabb(
         Some(tmin.max(0.0))
     } else {
         None
+    }
+}
+
+/// Updates player interaction with trigger_push and trigger_hurt zones.
+pub fn update_triggers_system(
+    time: Res<Time>,
+    mut player_query: Query<(&Transform, &mut crate::player::PlayerController)>,
+    push_query: Query<&TriggerPushEntity>,
+    mut hurt_query: Query<&mut TriggerHurtEntity>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+
+    let Ok((p_t, mut p_ctrl)) = player_query.get_single_mut() else {
+        return;
+    };
+    let p_pos = p_t.translation;
+
+    // 1. Trigger Push
+    for push in &push_query {
+        if p_pos.x >= push.bmin.x
+            && p_pos.x <= push.bmax.x
+            && p_pos.y >= push.bmin.y
+            && p_pos.y <= push.bmax.y
+            && p_pos.z >= push.bmin.z
+            && p_pos.z <= push.bmax.z
+        {
+            let gs_dir = [push.dir.x, -push.dir.z, push.dir.y];
+            p_ctrl.sim.current.velocity[0] += gs_dir[0] * push.speed * dt * 5.0;
+            p_ctrl.sim.current.velocity[1] += gs_dir[1] * push.speed * dt * 5.0;
+            p_ctrl.sim.current.velocity[2] += gs_dir[2] * push.speed * dt * 5.0;
+        }
+    }
+
+    // 2. Trigger Hurt
+    for mut hurt in &mut hurt_query {
+        if p_pos.x >= hurt.bmin.x
+            && p_pos.x <= hurt.bmax.x
+            && p_pos.y >= hurt.bmin.y
+            && p_pos.y <= hurt.bmax.y
+            && p_pos.z >= hurt.bmin.z
+            && p_pos.z <= hurt.bmax.z
+            && hurt.next_dmg_time <= time.elapsed_secs()
+        {
+            hurt.next_dmg_time = time.elapsed_secs() + 0.5;
+            tracing::info!(dmg = hurt.dmg, "Player touched trigger_hurt");
+        }
     }
 }
