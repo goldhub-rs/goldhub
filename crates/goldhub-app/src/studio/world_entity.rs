@@ -27,6 +27,15 @@ pub struct EntityCollisionBounds {
     pub maxs: Vec3,
 }
 
+/// Interactive hostage entity component (`hostage_entity`).
+#[derive(Component, Debug, Clone)]
+pub struct HostageEntity {
+    pub health: f32,
+    pub max_health: f32,
+    pub is_dead: bool,
+    pub pain_cooldown: f32,
+}
+
 /// Spawns interactive 3D studio entities parsed from the BSP map's entity lump.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
 pub fn spawn_map_studio_entities(
@@ -313,6 +322,16 @@ pub fn spawn_studio_entity(
 
     anim_component.mesh_entities = mesh_children;
     commands.entity(parent_entity).insert(anim_component);
+
+    let is_hostage = classname == "hostage_entity" || classname == "monster_scientist";
+    if is_hostage {
+        commands.entity(parent_entity).insert(HostageEntity {
+            health: 100.0,
+            max_health: 100.0,
+            is_dead: false,
+            pain_cooldown: 0.0,
+        });
+    }
 
     tracing::info!(
         model = model_path,

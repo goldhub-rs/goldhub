@@ -15,8 +15,8 @@ pub use viewmodel::{
     viewmodel_input_system, widescreen_horplus_fov_system,
 };
 pub use world_entity::{
-    BspEntitiesLump, EntityCollisionBounds, WorldStudioEntity, spawn_map_studio_entities,
-    spawn_studio_entity,
+    BspEntitiesLump, EntityCollisionBounds, HostageEntity, WorldStudioEntity,
+    spawn_map_studio_entities, spawn_studio_entity,
 };
 
 use bevy::prelude::*;

@@ -149,10 +149,19 @@ const KNIFE_REACH: f32 = 48.0;
 /// Bounding hull half-extents expansion for authentic GoldSrc knife swept hull (UTIL_TraceHull).
 const KNIFE_HULL_EXPAND: Vec3 = Vec3::splat(16.0);
 
+/// Authentic flesh impact sound effects for knife swings.
+const KNIFE_FLESH_HITS: [&str; 4] = [
+    "weapons/knife_hit1.wav",
+    "weapons/knife_hit2.wav",
+    "weapons/knife_hit3.wav",
+    "weapons/knife_hit4.wav",
+];
+
 /// Handles player attack inputs (LMB slash, RMB stab) and audio triggers with forward ray tracing.
 #[derive(Debug, Clone, Copy)]
 enum HitTarget {
     Breakable(Entity, crate::entity::BreakableMaterial),
+    Hostage(Entity),
     Flesh,
     Wall,
     Miss,
@@ -170,9 +179,15 @@ pub fn viewmodel_input_system(
     collision_res: Res<LevelCollisionResource>,
     camera_query: Query<&GlobalTransform, (With<Camera3d>, With<PlayerController>)>,
     entity_query: Query<
-        (&GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity),
+        (Entity, &GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity),
     >,
     mut breakable_query: Query<(Entity, &mut crate::entity::BreakableEntity)>,
+    mut hostage_query: Query<(
+        &mut crate::studio::world_entity::HostageEntity,
+        &mut StudioAnimatedModel,
+        &mut EntityCollisionBounds,
+        &GlobalTransform,
+    ), Without<ViewModelWeapon>>,
     mut fire_events: EventWriter<crate::entity::FireTargetEvent>,
     mut break_events: EventWriter<crate::entity::BreakEntityEvent>,
     mut vm_query: Query<(&mut ViewModelWeapon, &mut StudioAnimatedModel)>,
@@ -241,14 +256,17 @@ pub fn viewmodel_input_system(
 
         // 2. Trace against studio world entities (hostages, chickens, bottles)
         let mut closest_entity_dist: Option<f32> = None;
-        for (ent_t, bounds, studio_ent) in &entity_query {
+        let mut closest_hostage_ent: Option<Entity> = None;
+        for (ent, ent_t, bounds, studio_ent) in &entity_query {
             let ep = ent_t.translation();
             let bmin = ep + bounds.mins - KNIFE_HULL_EXPAND;
             let bmax = ep + bounds.maxs + KNIFE_HULL_EXPAND;
             if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, bmin, bmax) {
                 if studio_ent.is_solid {
+                    let is_hostage = studio_ent.classname == "hostage_entity" || studio_ent.classname == "monster_scientist";
                     if closest_entity_dist.is_none_or(|cd| t < cd) {
                         closest_entity_dist = Some(t);
+                        closest_hostage_ent = if is_hostage { Some(ent) } else { None };
                     }
                 } else if !studio_ent.targetname.is_empty() {
                     // Route hit on visual studio entity (e.g. chicken, bottle) to any overlapping breakable
@@ -294,7 +312,11 @@ pub fn viewmodel_input_system(
             && e_t < min_t
         {
             min_t = e_t;
-            hit = HitTarget::Flesh;
+            if let Some(h_ent) = closest_hostage_ent {
+                hit = HitTarget::Hostage(h_ent);
+            } else {
+                hit = HitTarget::Flesh;
+            }
         }
         if let Some(w_t) = wall_hit_dist
             && w_t < min_t
@@ -322,6 +344,7 @@ pub fn viewmodel_input_system(
                                 origin: center,
                                 material: mat,
                                 model: breakable.model.clone(),
+                                explodemagnitude: breakable.explodemagnitude,
                             });
                             fire_events.send(crate::entity::FireTargetEvent {
                                 target: breakable.target.clone(),
@@ -344,15 +367,46 @@ pub fn viewmodel_input_system(
                         "weapons/knife_hitwall1.wav"
                     }
                 }
+                HitTarget::Hostage(h_ent) => {
+                    if let Ok((mut hostage, mut h_anim, mut bounds, h_t)) =
+                        hostage_query.get_mut(h_ent)
+                    {
+                        hostage.health -= damage;
+                        if hostage.health > 0.0 {
+                            h_anim.set_sequence(7, 30.0, false); // flinch
+                            let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
+                            let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
+                            if let Some(h) = audio_bank.get_or_load_sound(
+                                &pain_snd,
+                                &search_paths.dirs,
+                                &mut audio_sources,
+                            ) {
+                                commands.spawn((
+                                    AudioPlayer::new(h),
+                                    PlaybackSettings::DESPAWN.with_spatial(true),
+                                    Transform::from_translation(h_t.translation()),
+                                ));
+                            }
+                        } else if !hostage.is_dead {
+                            hostage.is_dead = true;
+                            h_anim.set_sequence(31, 24.0, false); // diesimple
+                            bounds.mins = Vec3::ZERO;
+                            bounds.maxs = Vec3::ZERO;
+                            if let Some(h) = audio_bank.get_or_load_sound(
+                                "radio/hosdown.wav",
+                                &search_paths.dirs,
+                                &mut audio_sources,
+                            ) {
+                                commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+                            }
+                        }
+                    }
+                    let pick = ((time.elapsed_secs() * 1000.0) as usize) % KNIFE_FLESH_HITS.len();
+                    KNIFE_FLESH_HITS[pick]
+                }
                 HitTarget::Flesh => {
-                    const HITS: [&str; 4] = [
-                        "weapons/knife_hit1.wav",
-                        "weapons/knife_hit2.wav",
-                        "weapons/knife_hit3.wav",
-                        "weapons/knife_hit4.wav",
-                    ];
-                    let pick = ((time.elapsed_secs() * 1000.0) as usize) % HITS.len();
-                    HITS[pick]
+                    let pick = ((time.elapsed_secs() * 1000.0) as usize) % KNIFE_FLESH_HITS.len();
+                    KNIFE_FLESH_HITS[pick]
                 }
                 HitTarget::Wall => "weapons/knife_hitwall1.wav",
                 HitTarget::Miss => {
@@ -385,6 +439,7 @@ pub fn viewmodel_input_system(
                                 origin: center,
                                 material: mat,
                                 model: breakable.model.clone(),
+                                explodemagnitude: breakable.explodemagnitude,
                             });
                             fire_events.send(crate::entity::FireTargetEvent {
                                 target: breakable.target.clone(),
@@ -407,6 +462,43 @@ pub fn viewmodel_input_system(
                         "weapons/knife_hitwall1.wav"
                     };
                     (4, fps, snd)
+                }
+                HitTarget::Hostage(h_ent) => {
+                    let fps = sequences.get(4).map_or(35.0, |s| s.fps);
+                    if let Ok((mut hostage, mut h_anim, mut bounds, h_t)) =
+                        hostage_query.get_mut(h_ent)
+                    {
+                        hostage.health -= damage;
+                        if hostage.health > 0.0 {
+                            h_anim.set_sequence(7, 30.0, false); // flinch
+                            let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
+                            let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
+                            if let Some(h) = audio_bank.get_or_load_sound(
+                                &pain_snd,
+                                &search_paths.dirs,
+                                &mut audio_sources,
+                            ) {
+                                commands.spawn((
+                                    AudioPlayer::new(h),
+                                    PlaybackSettings::DESPAWN.with_spatial(true),
+                                    Transform::from_translation(h_t.translation()),
+                                ));
+                            }
+                        } else if !hostage.is_dead {
+                            hostage.is_dead = true;
+                            h_anim.set_sequence(31, 24.0, false); // diesimple
+                            bounds.mins = Vec3::ZERO;
+                            bounds.maxs = Vec3::ZERO;
+                            if let Some(h) = audio_bank.get_or_load_sound(
+                                "radio/hosdown.wav",
+                                &search_paths.dirs,
+                                &mut audio_sources,
+                            ) {
+                                commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+                            }
+                        }
+                    }
+                    (4, fps, "weapons/knife_stab.wav")
                 }
                 HitTarget::Flesh => {
                     let fps = sequences.get(4).map_or(35.0, |s| s.fps);

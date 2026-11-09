@@ -30,6 +30,7 @@ impl Plugin for LevelPlugin {
             (
                 setup_level,
                 apply_deferred,
+                crate::entity::spawn_bsp_interactive_entities,
                 crate::studio::spawn_map_studio_entities,
             )
                 .chain(),

@@ -73,6 +73,7 @@ pub struct BreakableEntity {
     pub health: f32,
     pub max_health: f32,
     pub material: BreakableMaterial,
+    pub explodemagnitude: u32,
     pub model: String,
     pub target: String,
     pub targetname: String,
@@ -85,6 +86,47 @@ pub struct BreakableEntity {
 #[derive(Component, Debug, Clone)]
 pub struct BspSubmodelMesh {
     pub model: String,
+}
+
+/// Door state machine according to GoldSrc toggle states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DoorState {
+    #[default]
+    Closed,
+    Opening,
+    Open,
+    Closing,
+}
+
+/// Interactive door entity (`func_door` or `func_door_rotating`).
+#[derive(Component, Debug, Clone)]
+pub struct DoorEntity {
+    pub model: String,
+    pub targetname: String,
+    pub target: String,
+    pub speed: f32,
+    pub wait: f32,
+    pub wait_timer: f32,
+    pub state: DoorState,
+    pub is_rotating: bool,
+    pub start_pos: Vec3,
+    pub target_pos: Vec3,
+    pub start_rot: Quat,
+    pub target_rot: Quat,
+    pub distance: f32,
+    pub current_progress: f32,
+    pub move_sound: Option<String>,
+    pub stop_sound: Option<String>,
+    pub bmin: Vec3,
+    pub bmax: Vec3,
+}
+
+/// Short-lived point light representing an explosion flash.
+#[derive(Component, Debug)]
+pub struct ExplosionFlash {
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub initial_intensity: f32,
 }
 
 /// Entity modifying rendering properties of targets (`env_render`).
@@ -139,6 +181,7 @@ pub struct BreakEntityEvent {
     pub origin: Vec3,
     pub material: BreakableMaterial,
     pub model: String,
+    pub explodemagnitude: u32,
 }
 
 pub struct EntityRuntimePlugin;
@@ -148,17 +191,14 @@ impl Plugin for EntityRuntimePlugin {
         app.add_event::<FireTargetEvent>();
         app.add_event::<BreakEntityEvent>();
         app.add_systems(
-            Startup,
-            spawn_bsp_interactive_entities
-                .after(crate::level::setup_level)
-                .before(crate::studio::spawn_map_studio_entities),
-        );
-        app.add_systems(
             Update,
             (
                 handle_fire_target_events,
                 handle_break_entity_events,
                 update_gib_particles_system,
+                update_doors_system,
+                interact_door_system,
+                update_explosion_flashes_system,
             ),
         );
     }
@@ -169,6 +209,7 @@ impl Plugin for EntityRuntimePlugin {
 pub fn spawn_bsp_interactive_entities(
     mut commands: Commands,
     entities_res: Option<Res<BspEntitiesLump>>,
+    collision_res: Option<Res<crate::player::LevelCollisionResource>>,
     search_paths: Res<GameSearchPaths>,
     mut audio_bank: ResMut<GoldSrcAudioBank>,
     mut audio_sources: ResMut<Assets<AudioSource>>,
@@ -196,6 +237,13 @@ pub fn spawn_bsp_interactive_entities(
         let mut variance_str = "";
         let mut velocity_str = "";
         let mut spawnflags_str = "";
+        let mut explodemagnitude_str = "";
+        let mut speed_str = "";
+        let mut wait_str = "";
+        let mut movesnd_str = "";
+        let mut stopsnd_str = "";
+        let mut distance_str = "";
+        let mut angles_str = "";
 
         for line in block.lines() {
             let trimmed = line.trim();
@@ -218,6 +266,13 @@ pub fn spawn_bsp_interactive_entities(
                         "m_flVariance" => variance_str = parts[3],
                         "m_flVelocity" => velocity_str = parts[3],
                         "spawnflags" => spawnflags_str = parts[3],
+                        "explodemagnitude" => explodemagnitude_str = parts[3],
+                        "speed" => speed_str = parts[3],
+                        "wait" => wait_str = parts[3],
+                        "movesnd" => movesnd_str = parts[3],
+                        "stopsnd" => stopsnd_str = parts[3],
+                        "distance" => distance_str = parts[3],
+                        "angles" => angles_str = parts[3],
                         _ => {}
                     }
                 }
@@ -247,10 +302,11 @@ pub fn spawn_bsp_interactive_entities(
                 let health = health_str.parse::<f32>().unwrap_or(1.0).max(1.0);
                 let mat_id = material_str.parse::<u32>().unwrap_or(0);
                 let material = BreakableMaterial::from_u32(mat_id);
+                let explodemagnitude = explodemagnitude_str.parse::<u32>().unwrap_or(0);
 
-                // Submodel bounds estimation (will be matched via model "*N")
+                // Submodel bounds derived directly from BSP CollisionModel brush_entities
                 let (bmin, bmax) = if model_str.starts_with('*') {
-                    get_submodel_bounds_or_fallback(model_str, bevy_origin)
+                    get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref())
                 } else {
                     (bevy_origin - Vec3::splat(16.0), bevy_origin + Vec3::splat(16.0))
                 };
@@ -260,6 +316,7 @@ pub fn spawn_bsp_interactive_entities(
                         health,
                         max_health: health,
                         material,
+                        explodemagnitude,
                         model: model_str.to_string(),
                         target: target.to_string(),
                         targetname: targetname.to_string(),
@@ -275,7 +332,74 @@ pub fn spawn_bsp_interactive_entities(
                     model = model_str,
                     target = target,
                     health = health,
+                    explodemagnitude = explodemagnitude,
                     "Spawned func_breakable entity"
+                );
+            }
+            "func_door" | "func_door_rotating" => {
+                let is_rotating = classname == "func_door_rotating";
+                let speed = speed_str.parse::<f32>().unwrap_or(100.0).max(10.0);
+                let wait = wait_str.parse::<f32>().unwrap_or(4.0);
+                let movesnd = movesnd_str.parse::<u32>().unwrap_or(1);
+                let stopsnd = stopsnd_str.parse::<u32>().unwrap_or(1);
+                let move_sound = Some(format!("doors/doormove{}.wav", movesnd.clamp(1, 10)));
+                let stop_sound = Some(format!("doors/doorstop{}.wav", stopsnd.clamp(1, 8)));
+                let distance = distance_str.parse::<f32>().unwrap_or(90.0);
+
+                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                let center = (bmin + bmax) * 0.5;
+
+                let (start_pos, target_pos, start_rot, target_rot) = if is_rotating {
+                    let angle_rad = distance.to_radians();
+                    (center, center, Quat::IDENTITY, Quat::from_rotation_y(angle_rad))
+                } else {
+                    let move_dir = if angles_str == "-1 0 0" {
+                        Vec3::Y
+                    } else if angles_str == "-2 0 0" {
+                        Vec3::NEG_Y
+                    } else {
+                        let yaw = angles_str
+                            .split_whitespace()
+                            .next()
+                            .and_then(|s| s.parse::<f32>().ok())
+                            .unwrap_or(0.0);
+                        let rad = yaw.to_radians();
+                        Vec3::new(rad.cos(), 0.0, -rad.sin())
+                    };
+                    let dist = (bmax.y - bmin.y).max(64.0);
+                    (center, center + move_dir * dist, Quat::IDENTITY, Quat::IDENTITY)
+                };
+
+                commands.spawn((
+                    DoorEntity {
+                        model: model_str.to_string(),
+                        targetname: targetname.to_string(),
+                        target: target.to_string(),
+                        speed,
+                        wait,
+                        wait_timer: 0.0,
+                        state: DoorState::Closed,
+                        is_rotating,
+                        start_pos,
+                        target_pos,
+                        start_rot,
+                        target_rot,
+                        distance,
+                        current_progress: 0.0,
+                        move_sound,
+                        stop_sound,
+                        bmin,
+                        bmax,
+                    },
+                    Transform::from_translation(center),
+                    Visibility::default(),
+                ));
+
+                tracing::info!(
+                    model = model_str,
+                    classname = classname,
+                    speed = speed,
+                    "Spawned interactive door entity"
                 );
             }
             "env_render" => {
@@ -377,6 +501,28 @@ pub fn spawn_bsp_interactive_entities(
             _ => {}
         }
     }
+}
+
+/// Helper extracting exact world bounds for any BSP submodel brush entity from `CollisionModel`.
+fn get_submodel_bounds(
+    model_str: &str,
+    fallback_origin: Vec3,
+    collision_res: Option<&Res<crate::player::LevelCollisionResource>>,
+) -> (Vec3, Vec3) {
+    if let Some(sub_num_str) = model_str.strip_prefix('*')
+        && let Ok(sub_num) = sub_num_str.parse::<usize>()
+        && let Some(col_res) = collision_res
+        && let Some(ref col_model) = col_res.model
+        && let Some(ent) = col_model.brush_entities.iter().find(|e| e.model_index == sub_num)
+    {
+        // Exact GoldSrc bounds from BSP submodel:
+        // Bevy X = GS X, Bevy Y = GS Z, Bevy Z = -GS Y
+        let bmin = Vec3::new(ent.mins[0], ent.mins[2], -ent.maxs[1]);
+        let bmax = Vec3::new(ent.maxs[0], ent.maxs[2], -ent.mins[1]);
+        return (bmin, bmax);
+    }
+
+    get_submodel_bounds_or_fallback(model_str, fallback_origin)
 }
 
 /// Helper mapping known cs_italy breakable brush submodels to exact Bevy world bounds.
@@ -499,8 +645,8 @@ pub fn handle_fire_target_events(
     }
 }
 
-/// Handles material-based gib bursts and brush despawning when a breakable entity is shattered.
-#[allow(clippy::too_many_arguments)]
+/// Handles material-based gib bursts, explosions, and brush despawning when a breakable entity is shattered.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn handle_break_entity_events(
     mut commands: Commands,
     mut events: EventReader<BreakEntityEvent>,
@@ -508,6 +654,8 @@ pub fn handle_break_entity_events(
     mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
     mut model_store: ResMut<StudioModelStore>,
     search_paths: Res<GameSearchPaths>,
+    mut audio_bank: ResMut<GoldSrcAudioBank>,
+    mut audio_sources: ResMut<Assets<AudioSource>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -547,24 +695,95 @@ pub fn handle_break_entity_events(
             BreakableMaterial::Rocks => "models/rockgibs.mdl",
         };
 
-        let shooter = EnvShooterEntity {
-            targetname: String::new(),
-            shootmodel: gib_model.to_string(),
-            gibs: 12,
-            variance: 6.0,
-            velocity: 120.0,
-            origin: ev.origin,
-        };
+        if ev.explodemagnitude > 0 {
+            // Authentic GoldSrc Explosion (ExplosionCreate):
+            // 1. Loud explosion sound
+            let exp_snd = if let Some(h) = audio_bank.get_or_load_sound(
+                "weapons/explode3.wav",
+                &search_paths.dirs,
+                &mut audio_sources,
+            ) {
+                Some(h)
+            } else if let Some(h) = audio_bank.get_or_load_sound(
+                "weapons/explode4.wav",
+                &search_paths.dirs,
+                &mut audio_sources,
+            ) {
+                Some(h)
+            } else {
+                audio_bank.get_or_load_sound(
+                    "weapons/c4_explode1.wav",
+                    &search_paths.dirs,
+                    &mut audio_sources,
+                )
+            };
+            if let Some(snd) = exp_snd {
+                commands.spawn((
+                    AudioPlayer::new(snd),
+                    PlaybackSettings::DESPAWN
+                        .with_spatial(true)
+                        .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 64.0))
+                        .with_volume(bevy::audio::Volume::new(1.0)),
+                    Transform::from_translation(ev.origin),
+                ));
+            }
 
-        spawn_gibs(
-            &mut commands,
-            &shooter,
-            &mut model_store,
-            &search_paths,
-            &mut images,
-            &mut materials,
-            &mut meshes,
-        );
+            // 2. High-energy explosion flash PointLight
+            commands.spawn((
+                PointLight {
+                    color: Color::srgb(1.0, 0.65, 0.2),
+                    intensity: 12_000.0,
+                    range: 300.0,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(ev.origin),
+                ExplosionFlash {
+                    lifetime: 0.0,
+                    max_lifetime: 0.25,
+                    initial_intensity: 12_000.0,
+                },
+            ));
+
+            // 3. High-velocity bursting gibs (blast impulse 320 u/s)
+            let shooter = EnvShooterEntity {
+                targetname: String::new(),
+                shootmodel: gib_model.to_string(),
+                gibs: 24,
+                variance: 14.0,
+                velocity: 320.0,
+                origin: ev.origin,
+            };
+
+            spawn_gibs(
+                &mut commands,
+                &shooter,
+                &mut model_store,
+                &search_paths,
+                &mut images,
+                &mut materials,
+                &mut meshes,
+            );
+        } else {
+            let shooter = EnvShooterEntity {
+                targetname: String::new(),
+                shootmodel: gib_model.to_string(),
+                gibs: 12,
+                variance: 6.0,
+                velocity: 120.0,
+                origin: ev.origin,
+            };
+
+            spawn_gibs(
+                &mut commands,
+                &shooter,
+                &mut model_store,
+                &search_paths,
+                &mut images,
+                &mut materials,
+                &mut meshes,
+            );
+        }
     }
 }
 
@@ -664,5 +883,294 @@ pub fn update_gib_particles_system(
         transform.rotate_local_x(gib.angular_velocity.x * dt);
         transform.rotate_local_y(gib.angular_velocity.y * dt);
         transform.rotate_local_z(gib.angular_velocity.z * dt);
+    }
+}
+
+/// Advances active door state, interpolates movement, and manages door audio and collision.
+#[allow(clippy::too_many_arguments, clippy::type_complexity, clippy::too_many_lines)]
+pub fn update_doors_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    search_paths: Res<GameSearchPaths>,
+    mut audio_bank: ResMut<GoldSrcAudioBank>,
+    mut audio_sources: ResMut<Assets<AudioSource>>,
+    mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
+    mut door_query: Query<(Entity, &mut DoorEntity)>,
+    mut submodel_query: Query<(&BspSubmodelMesh, &mut Transform), Without<DoorEntity>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+
+    for (_door_ent, mut door) in &mut door_query {
+        match door.state {
+            DoorState::Closed => {}
+            DoorState::Opening => {
+                let travel_time = if door.is_rotating {
+                    door.distance.to_radians() / door.speed.to_radians().max(0.1)
+                } else {
+                    door.start_pos.distance(door.target_pos) / door.speed.max(1.0)
+                };
+                let step = if travel_time > 0.0 { dt / travel_time } else { 1.0 };
+                door.current_progress = (door.current_progress + step).min(1.0);
+
+                // Update submodel mesh transform
+                for (submesh, mut mesh_t) in &mut submodel_query {
+                    if submesh.model == door.model {
+                        if door.is_rotating {
+                            mesh_t.rotation = door.start_rot.slerp(door.target_rot, door.current_progress);
+                        } else {
+                            mesh_t.translation = door.start_pos.lerp(door.target_pos, door.current_progress);
+                        }
+                    }
+                }
+
+                // If door reaches open position
+                if door.current_progress >= 1.0 {
+                    door.state = DoorState::Open;
+                    door.wait_timer = door.wait;
+                    if let Some(ref stop_snd) = door.stop_sound
+                        && let Some(h) = audio_bank.get_or_load_sound(
+                            stop_snd,
+                            &search_paths.dirs,
+                            &mut audio_sources,
+                        )
+                    {
+                        commands.spawn((
+                            AudioPlayer::new(h),
+                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            Transform::from_translation((door.bmin + door.bmax) * 0.5),
+                        ));
+                    }
+                    // Disable physical collision while open
+                    if let Some(ref mut col_res) = collision_res
+                        && let Some(ref mut col_model) = col_res.model
+                        && let Some(sub_num_str) = door.model.strip_prefix('*')
+                        && let Ok(sub_num) = sub_num_str.parse::<usize>()
+                    {
+                        for ent in &mut col_model.brush_entities {
+                            if ent.model_index == sub_num {
+                                ent.solid = goldhub_formats::ir::SOLID_NOT;
+                            }
+                        }
+                    }
+                }
+            }
+            DoorState::Open => {
+                if door.wait >= 0.0 {
+                    door.wait_timer -= dt;
+                    if door.wait_timer <= 0.0 {
+                        door.state = DoorState::Closing;
+                        if let Some(ref move_snd) = door.move_sound
+                            && let Some(h) = audio_bank.get_or_load_sound(
+                                move_snd,
+                                &search_paths.dirs,
+                                &mut audio_sources,
+                            )
+                        {
+                            commands.spawn((
+                                AudioPlayer::new(h),
+                                PlaybackSettings::DESPAWN.with_spatial(true),
+                                Transform::from_translation((door.bmin + door.bmax) * 0.5),
+                            ));
+                        }
+                    }
+                }
+            }
+            DoorState::Closing => {
+                let travel_time = if door.is_rotating {
+                    door.distance.to_radians() / door.speed.to_radians().max(0.1)
+                } else {
+                    door.start_pos.distance(door.target_pos) / door.speed.max(1.0)
+                };
+                let step = if travel_time > 0.0 { dt / travel_time } else { 1.0 };
+                door.current_progress = (door.current_progress - step).max(0.0);
+
+                // Update submodel mesh transform
+                for (submesh, mut mesh_t) in &mut submodel_query {
+                    if submesh.model == door.model {
+                        if door.is_rotating {
+                            mesh_t.rotation = door.start_rot.slerp(door.target_rot, door.current_progress);
+                        } else {
+                            mesh_t.translation = door.start_pos.lerp(door.target_pos, door.current_progress);
+                        }
+                    }
+                }
+
+                // If door reaches closed position
+                if door.current_progress <= 0.0 {
+                    door.state = DoorState::Closed;
+                    if let Some(ref stop_snd) = door.stop_sound
+                        && let Some(h) = audio_bank.get_or_load_sound(
+                            stop_snd,
+                            &search_paths.dirs,
+                            &mut audio_sources,
+                        )
+                    {
+                        commands.spawn((
+                            AudioPlayer::new(h),
+                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            Transform::from_translation((door.bmin + door.bmax) * 0.5),
+                        ));
+                    }
+                    // Re-enable solid collision
+                    if let Some(ref mut col_res) = collision_res
+                        && let Some(ref mut col_model) = col_res.model
+                        && let Some(sub_num_str) = door.model.strip_prefix('*')
+                        && let Ok(sub_num) = sub_num_str.parse::<usize>()
+                    {
+                        for ent in &mut col_model.brush_entities {
+                            if ent.model_index == sub_num {
+                                ent.solid = goldhub_formats::ir::SOLID_BSP;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Allows the player to open/close doors using the +use (E) key.
+pub fn interact_door_system(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    camera_query: Query<&GlobalTransform, (With<Camera3d>, With<crate::player::PlayerController>)>,
+    mut door_query: Query<&mut DoorEntity>,
+    search_paths: Res<GameSearchPaths>,
+    mut audio_bank: ResMut<GoldSrcAudioBank>,
+    mut audio_sources: ResMut<Assets<AudioSource>>,
+) {
+    const USE_REACH: f32 = 80.0;
+
+    if !keyboard.just_pressed(KeyCode::KeyE) {
+        return;
+    }
+
+    let Ok(cam_t) = camera_query.get_single() else {
+        return;
+    };
+    let cam_pos = cam_t.translation();
+    let cam_forward = cam_t.forward().as_vec3();
+
+    for mut door in &mut door_query {
+        let center = (door.bmin + door.bmax) * 0.5;
+        if cam_pos.distance(center) > USE_REACH + 64.0 {
+            continue;
+        }
+
+        if ray_intersects_aabb(
+            cam_pos,
+            cam_forward,
+            USE_REACH,
+            door.bmin - Vec3::splat(16.0),
+            door.bmax + Vec3::splat(16.0),
+        )
+        .is_some()
+        {
+            match door.state {
+                DoorState::Closed => {
+                    door.state = DoorState::Opening;
+                    if let Some(ref snd) = door.move_sound
+                        && let Some(h) = audio_bank.get_or_load_sound(
+                            snd,
+                            &search_paths.dirs,
+                            &mut audio_sources,
+                        )
+                    {
+                        commands.spawn((
+                            AudioPlayer::new(h),
+                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            Transform::from_translation(center),
+                        ));
+                    }
+                }
+                DoorState::Open => {
+                    door.state = DoorState::Closing;
+                    if let Some(ref snd) = door.move_sound
+                        && let Some(h) = audio_bank.get_or_load_sound(
+                            snd,
+                            &search_paths.dirs,
+                            &mut audio_sources,
+                        )
+                    {
+                        commands.spawn((
+                            AudioPlayer::new(h),
+                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            Transform::from_translation(center),
+                        ));
+                    }
+                }
+                DoorState::Closing => {
+                    door.state = DoorState::Opening;
+                }
+                DoorState::Opening => {}
+            }
+            break;
+        }
+    }
+}
+
+/// Advances explosion flash light decay and despawns when expired.
+pub fn update_explosion_flashes_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut ExplosionFlash, &mut PointLight)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut flash, mut light) in &mut query {
+        flash.lifetime += dt;
+        if flash.lifetime >= flash.max_lifetime {
+            commands.entity(entity).despawn();
+        } else {
+            let frac = 1.0 - (flash.lifetime / flash.max_lifetime);
+            light.intensity = flash.initial_intensity * frac;
+        }
+    }
+}
+
+/// Ray vs AABB intersection test.
+#[must_use]
+pub fn ray_intersects_aabb(
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    bmin: Vec3,
+    bmax: Vec3,
+) -> Option<f32> {
+    let mut tmin = 0.0f32;
+    let mut tmax = max_dist;
+
+    for axis in 0..3 {
+        let (o, d, min_v, max_v) = match axis {
+            0 => (origin.x, dir.x, bmin.x, bmax.x),
+            1 => (origin.y, dir.y, bmin.y, bmax.y),
+            _ => (origin.z, dir.z, bmin.z, bmax.z),
+        };
+
+        if d.abs() < 1e-6 {
+            if o < min_v || o > max_v {
+                return None;
+            }
+        } else {
+            let inv_d = 1.0 / d;
+            let mut t1 = (min_v - o) * inv_d;
+            let mut t2 = (max_v - o) * inv_d;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+            }
+            tmin = tmin.max(t1);
+            tmax = tmax.min(t2);
+            if tmin > tmax {
+                return None;
+            }
+        }
+    }
+
+    if tmin <= max_dist && tmax >= 0.0 {
+        Some(tmin.max(0.0))
+    } else {
+        None
     }
 }
