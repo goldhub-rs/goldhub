@@ -366,12 +366,13 @@ pub fn weapon_fire_and_reload_system(
     mut player_query: Query<(&mut ActiveWeaponState, &mut PlayerRecoil)>,
     mut breakable_query: Query<(Entity, &mut BreakableEntity)>,
     mut hostage_query: Query<(
+        Entity,
         &mut HostageEntity,
         &mut StudioAnimatedModel,
         &mut EntityCollisionBounds,
         &GlobalTransform,
     ), (Without<ViewModelWeapon>, Without<crate::player::PlayerController>)>,
-    entity_query: Query<(Entity, &GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity)>,
+    entity_query: Query<(Entity, &GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity), Without<HostageEntity>>,
     mut events: CombatEvents,
     mut vm_query: Query<(&mut ViewModelWeapon, &mut StudioAnimatedModel)>,
 ) {
@@ -493,18 +494,36 @@ pub fn weapon_fire_and_reload_system(
             }
         }
 
+        // Trace visual studio props (chickens, bottles) to companion breakables
+        for (_ent, ent_t, bounds, studio_ent) in &entity_query {
+            let ep = ent_t.translation();
+            let bmin = ep + bounds.mins;
+            let bmax = ep + bounds.maxs;
+            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, BULLET_REACH, bmin, bmax)
+                && !studio_ent.targetname.is_empty()
+            {
+                for (b_ent, b) in &breakable_query {
+                    if !b.is_broken
+                        && ((b.bmin + b.bmax) * 0.5).distance(ep) < 64.0
+                        && hit_breakable.as_ref().is_none_or(|(_, d, _, _)| t < *d)
+                    {
+                        hit_breakable = Some((b_ent, t, b.material, b.explodemagnitude));
+                        break;
+                    }
+                }
+            }
+        }
+
         // Trace hostages
         let mut hit_hostage: Option<(Entity, f32)> = None;
-        for (h_ent, _, bounds, studio_ent) in &entity_query {
-            if studio_ent.is_solid && (studio_ent.classname == "hostage_entity" || studio_ent.classname == "monster_scientist") {
-                let ep = bounds.mins; // bounds relative
-                let bmin = ep;
-                let bmax = bounds.maxs;
-                if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, BULLET_REACH, bmin, bmax)
-                    && hit_hostage.as_ref().is_none_or(|(_, d)| t < *d)
-                {
-                    hit_hostage = Some((h_ent, t));
-                }
+        for (h_ent, _, _, bounds, ht) in &hostage_query {
+            let ep = ht.translation();
+            let bmin = ep + bounds.mins;
+            let bmax = ep + bounds.maxs;
+            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, BULLET_REACH, bmin, bmax)
+                && hit_hostage.as_ref().is_none_or(|(_, d)| t < *d)
+            {
+                hit_hostage = Some((h_ent, t));
             }
         }
 
@@ -546,7 +565,7 @@ pub fn weapon_fire_and_reload_system(
         } else if let Some((h_ent, h_t)) = hit_hostage
             && h_t < hit_wall_dist
         {
-            if let Ok((mut hostage, mut h_anim, mut bounds, ht)) = hostage_query.get_mut(h_ent) {
+            if let Ok((_, mut hostage, mut h_anim, mut bounds, ht)) = hostage_query.get_mut(h_ent) {
                 hostage.health -= def.damage;
                 if hostage.health > 0.0 {
                     h_anim.set_sequence(7, 30.0, false);

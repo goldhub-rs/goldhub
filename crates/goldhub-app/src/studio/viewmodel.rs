@@ -180,9 +180,11 @@ pub fn viewmodel_input_system(
     camera_query: Query<&GlobalTransform, (With<Camera3d>, With<PlayerController>)>,
     entity_query: Query<
         (Entity, &GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity),
+        Without<crate::studio::world_entity::HostageEntity>,
     >,
     mut breakable_query: Query<(Entity, &mut crate::entity::BreakableEntity)>,
     mut hostage_query: Query<(
+        Entity,
         &mut crate::studio::world_entity::HostageEntity,
         &mut StudioAnimatedModel,
         &mut EntityCollisionBounds,
@@ -264,16 +266,27 @@ pub fn viewmodel_input_system(
         // 2. Trace against studio world entities (hostages, chickens, bottles)
         let mut closest_entity_dist: Option<f32> = None;
         let mut closest_hostage_ent: Option<Entity> = None;
-        for (ent, ent_t, bounds, studio_ent) in &entity_query {
+
+        for (h_ent, _, _, bounds, h_t) in &hostage_query {
+            let ep = h_t.translation();
+            let bmin = ep + bounds.mins - KNIFE_HULL_EXPAND;
+            let bmax = ep + bounds.maxs + KNIFE_HULL_EXPAND;
+            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, bmin, bmax)
+                && closest_entity_dist.is_none_or(|cd| t < cd)
+            {
+                closest_entity_dist = Some(t);
+                closest_hostage_ent = Some(h_ent);
+            }
+        }
+
+        for (_ent, ent_t, bounds, studio_ent) in &entity_query {
             let ep = ent_t.translation();
             let bmin = ep + bounds.mins - KNIFE_HULL_EXPAND;
             let bmax = ep + bounds.maxs + KNIFE_HULL_EXPAND;
             if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, bmin, bmax) {
                 if studio_ent.is_solid {
-                    let is_hostage = studio_ent.classname == "hostage_entity" || studio_ent.classname == "monster_scientist";
                     if closest_entity_dist.is_none_or(|cd| t < cd) {
                         closest_entity_dist = Some(t);
-                        closest_hostage_ent = if is_hostage { Some(ent) } else { None };
                     }
                 } else if !studio_ent.targetname.is_empty() {
                     // Route hit on visual studio entity (e.g. chicken, bottle) to any overlapping breakable
@@ -375,7 +388,7 @@ pub fn viewmodel_input_system(
                     }
                 }
                 HitTarget::Hostage(h_ent) => {
-                    if let Ok((mut hostage, mut h_anim, mut bounds, h_t)) =
+                    if let Ok((_, mut hostage, mut h_anim, mut bounds, h_t)) =
                         hostage_query.get_mut(h_ent)
                     {
                         hostage.health -= damage;
@@ -472,7 +485,7 @@ pub fn viewmodel_input_system(
                 }
                 HitTarget::Hostage(h_ent) => {
                     let fps = sequences.get(4).map_or(35.0, |s| s.fps);
-                    if let Ok((mut hostage, mut h_anim, mut bounds, h_t)) =
+                    if let Ok((_, mut hostage, mut h_anim, mut bounds, h_t)) =
                         hostage_query.get_mut(h_ent)
                     {
                         hostage.health -= damage;

@@ -250,7 +250,8 @@ impl Plugin for EntityRuntimePlugin {
                 update_doors_system,
                 interact_door_system,
                 update_explosion_flashes_system,
-                update_explosions_vfx_system,
+                update_explosion_fireballs_system,
+                update_explosion_smokes_system,
                 update_triggers_system,
             ),
         );
@@ -1328,19 +1329,13 @@ pub fn update_explosion_flashes_system(
     }
 }
 
-/// Advances explosion fireball expansion, smoke particle drift, and alpha fades.
-pub fn update_explosions_vfx_system(
+/// Advances explosion fireball expansion and emissive color fade.
+pub fn update_explosion_fireballs_system(
     mut commands: Commands,
     time: Res<Time>,
     mut fireballs: Query<(
         Entity,
         &mut ExplosionFireball,
-        &mut Transform,
-        &MeshMaterial3d<StandardMaterial>,
-    )>,
-    mut smokes: Query<(
-        Entity,
-        &mut ExplosionSmokeParticle,
         &mut Transform,
         &MeshMaterial3d<StandardMaterial>,
     )>,
@@ -1365,6 +1360,24 @@ pub fn update_explosions_vfx_system(
                 mat.base_color = Color::srgba(1.0, 0.45, 0.1, (1.0 - t).max(0.0));
             }
         }
+    }
+}
+
+/// Advances explosion smoke particle drift, expansion, and alpha fade.
+pub fn update_explosion_smokes_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut smokes: Query<(
+        Entity,
+        &mut ExplosionSmokeParticle,
+        &mut Transform,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
     }
 
     for (entity, mut smoke, mut transform, mat_handle) in &mut smokes {
