@@ -70,6 +70,13 @@ impl Default for PlayerController {
 #[derive(Component)]
 pub struct SpeedometerText;
 
+/// Tracks the player's flashlight state and spotlight child entity.
+#[derive(Component, Debug, Default)]
+pub struct PlayerFlashlight {
+    pub is_on: bool,
+    pub light_entity: Option<Entity>,
+}
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
@@ -84,10 +91,63 @@ impl Plugin for PlayerPlugin {
                 player_movement_system,
                 controller_toggle_system,
                 update_speedometer_system,
+                player_flashlight_system,
                 spawn_player_character_model_system,
                 update_player_character_model_system.before(crate::studio::studio_animation_system),
+                update_third_person_weapon_system.after(crate::studio::studio_animation_system),
             ),
         );
+    }
+}
+
+fn player_flashlight_system(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut camera_query: Query<(Entity, &mut PlayerFlashlight), (With<Camera3d>, With<PlayerController>)>,
+    search_paths: Option<Res<crate::audio::GameSearchPaths>>,
+    mut audio_bank: Option<ResMut<crate::audio::GoldSrcAudioBank>>,
+    mut audio_sources: Option<ResMut<Assets<AudioSource>>>,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyF) {
+        return;
+    }
+
+    let Ok((camera_entity, mut flashlight)) = camera_query.get_single_mut() else {
+        return;
+    };
+
+    flashlight.is_on = !flashlight.is_on;
+
+    if flashlight.is_on {
+        let light = commands
+            .spawn((
+                SpotLight {
+                    color: Color::srgb(0.95, 0.98, 1.0),
+                    intensity: 15_000.0,
+                    range: 60.0,
+                    inner_angle: 18.0f32.to_radians(),
+                    outer_angle: 28.0f32.to_radians(),
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 0.0, -0.2),
+            ))
+            .id();
+        commands.entity(camera_entity).add_child(light);
+        flashlight.light_entity = Some(light);
+    } else if let Some(light) = flashlight.light_entity.take() {
+        commands.entity(light).despawn();
+    }
+
+    // Play flashlight click: items/flashlight1.wav
+    if let (Some(paths), Some(ref mut bank), Some(ref mut sources)) =
+        (search_paths, audio_bank.as_mut(), audio_sources.as_mut())
+        && let Some(handle) = bank.get_or_load_sound("items/flashlight1.wav", &paths.dirs, sources)
+    {
+        commands.spawn((
+            AudioPlayer::new(handle),
+            PlaybackSettings::DESPAWN,
+        ));
     }
 }
 
@@ -507,10 +567,18 @@ fn spawn_player_character_model_system(
     tracing::info!("Spawned PlayerCharacterModel for third-person view");
 }
 
+/// Marker and state component for the weapon held by the player character in 3rd person.
+#[derive(Component, Debug, Default)]
+pub struct PlayerThirdPersonWeapon {
+    pub current_weapon_id: Option<crate::combat::WeaponId>,
+    pub model_id: String,
+    pub mesh_entities: Vec<(Entity, Handle<Mesh>, usize)>,
+}
+
 fn update_player_character_model_system(
     mode: Res<CameraControlMode>,
     perspective: Res<CameraPerspective>,
-    player_query: Query<&PlayerController>,
+    player_query: Query<(&PlayerController, Option<&crate::combat::ActiveWeaponState>)>,
     mut model_query: Query<
         (
             &mut Transform,
@@ -520,7 +588,7 @@ fn update_player_character_model_system(
         With<PlayerCharacterModel>,
     >,
 ) {
-    let Ok(player) = player_query.get_single() else {
+    let Ok((player, active_weapon)) = player_query.get_single() else {
         return;
     };
     let Ok((mut transform, mut anim, mut visibility)) = model_query.get_single_mut() else {
@@ -538,27 +606,28 @@ fn update_player_character_model_system(
     // Align StudioModel rest pose (+X) to Bevy camera forward (-Z)
     transform.rotation = Quat::from_rotation_y(player.yaw + std::f32::consts::FRAC_PI_2);
 
-    // Animation state machine based on movement
-    let speed = player.sim.current.horizontal_speed();
     let on_ground = player.sim.current.on_ground;
     let is_crouching = player.sim.current.is_ducking;
+
+    let anim_ext = active_weapon
+        .map_or("knife", |w| crate::combat::get_weapon_def(w.id).anim_extension);
+
+    // Match ReGameDLL GetAnimDesired for upper body
+    #[allow(clippy::match_same_arms)]
+    let (aim_seq, aim_fps, crouch_seq, crouch_fps) = match anim_ext {
+        "knife" => (75, 12.0, 73, 12.0),     // ref_aim_knife, crouch_aim_knife
+        "onehanded" => (19, 30.0, 16, 30.0), // ref_aim_onehanded, crouch_aim_onehanded
+        "ak47" => (80, 30.0, 77, 30.0),      // ref_aim_ak47, crouch_aim_ak47
+        "rifle" => (33, 30.0, 30, 30.0),     // ref_aim_rifle, crouch_aim_rifle
+        _ => (80, 30.0, 77, 30.0),
+    };
 
     let (seq, fps) = if !on_ground {
         (6, 30.0) // jump
     } else if is_crouching {
-        if speed > 10.0 {
-            (5, 30.0) // crouchrun
-        } else {
-            (2, 20.0) // crouch_idle
-        }
-    } else if speed > 10.0 {
-        if speed > 150.0 {
-            (4, 30.0) // run
-        } else {
-            (3, 30.0) // walk
-        }
+        (crouch_seq, crouch_fps)
     } else {
-        (1, 15.0) // idle1
+        (aim_seq, aim_fps)
     };
 
     anim.set_sequence(seq, fps, true);
@@ -568,5 +637,155 @@ fn update_player_character_model_system(
         *visibility = Visibility::Inherited;
     } else {
         *visibility = Visibility::Hidden;
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity, clippy::too_many_lines)]
+fn update_third_person_weapon_system(
+    mut commands: Commands,
+    perspective: Res<CameraPerspective>,
+    player_query: Query<Option<&crate::combat::ActiveWeaponState>, With<PlayerController>>,
+    model_parent_query: Query<(Entity, &crate::studio::StudioAnimatedModel), With<PlayerCharacterModel>>,
+    mut weapon_query: Query<(Entity, &mut PlayerThirdPersonWeapon)>,
+    mut visibility_query: Query<&mut Visibility, Without<PlayerCharacterModel>>,
+    mut model_store: ResMut<crate::studio::StudioModelStore>,
+    search_paths: Option<Res<crate::audio::GameSearchPaths>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Ok(active_weapon) = player_query.get_single() else {
+        return;
+    };
+    let Ok((parent_entity, player_anim)) = model_parent_query.get_single() else {
+        return;
+    };
+    let Some(ref paths) = search_paths else {
+        return;
+    };
+
+    let current_id = active_weapon.map_or(crate::combat::WeaponId::Knife, |w| w.id);
+    let def = crate::combat::get_weapon_def(current_id);
+
+    // 1. Ensure weapon tracker component exists
+    let Ok((_, mut weapon_data)) = weapon_query.get_single_mut() else {
+        let wid = commands
+            .spawn((
+                PlayerThirdPersonWeapon::default(),
+                Transform::IDENTITY,
+                Visibility::Inherited,
+            ))
+            .id();
+        commands.entity(parent_entity).add_child(wid);
+        return;
+    };
+
+    // 2. Check if weapon model needs switching
+    if weapon_data.current_weapon_id != Some(current_id) {
+        for &(child, _, _) in &weapon_data.mesh_entities {
+            commands.entity(child).despawn();
+        }
+        weapon_data.mesh_entities.clear();
+        weapon_data.current_weapon_id = Some(current_id);
+        weapon_data.model_id = def.p_model.to_string();
+
+        if let Some(model_data) =
+            model_store.get_or_load(def.p_model, paths, &mut images, &mut materials)
+        {
+            for (sub_idx, template) in model_data.submeshes.iter().enumerate() {
+                let bevy_mesh = crate::studio::store::create_initial_bevy_mesh(template, false);
+                let mesh_handle = meshes.add(bevy_mesh);
+                let child = commands
+                    .spawn((
+                        Mesh3d(mesh_handle.clone()),
+                        MeshMaterial3d(template.material.clone()),
+                        Transform::IDENTITY,
+                        Visibility::Inherited,
+                    ))
+                    .id();
+                commands.entity(parent_entity).add_child(child);
+                weapon_data.mesh_entities.push((child, mesh_handle, sub_idx));
+            }
+        }
+    }
+
+    // 3. Update visibility and bone deformation
+    let is_tp = *perspective == CameraPerspective::ThirdPerson;
+    for &(child, ref mesh_handle, submesh_idx) in &weapon_data.mesh_entities {
+        if let Ok(mut vis) = visibility_query.get_mut(child) {
+            let target_vis = if is_tp {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *vis != target_vis {
+                *vis = target_vis;
+            }
+        }
+
+        if !is_tp {
+            continue;
+        }
+
+        let normalized_id = def.p_model.replace('\\', "/").to_lowercase();
+        let Some(p_model_data) = model_store.models.get(&normalized_id) else {
+            continue;
+        };
+
+        let urban_bones = &player_anim.current_bone_transforms;
+        if urban_bones.is_empty() {
+            continue;
+        }
+
+        // Match bones between p_*.mdl and urban.mdl
+        let p_bones = &p_model_data.model.rig.bones;
+        let mut merged_matrices = Vec::with_capacity(p_bones.len());
+        for b in p_bones {
+            let lower_name = b.name.to_lowercase();
+            let matched_mat = if lower_name == "bip01 r hand" && urban_bones.len() > 15 {
+                Some(urban_bones[15])
+            } else if lower_name == "bip01 r forearm" && urban_bones.len() > 14 {
+                Some(urban_bones[14])
+            } else if lower_name == "bip01 r upperarm" && urban_bones.len() > 13 {
+                Some(urban_bones[13])
+            } else if lower_name == "bip01 r clavicle" && urban_bones.len() > 12 {
+                Some(urban_bones[12])
+            } else if lower_name == "bip01" && !urban_bones.is_empty() {
+                Some(urban_bones[0])
+            } else {
+                None
+            };
+
+            if let Some(m) = matched_mat {
+                merged_matrices.push(m);
+            } else if b.parent_index >= 0 && (b.parent_index as usize) < merged_matrices.len() {
+                let parent_m = merged_matrices[b.parent_index as usize];
+                let local_m = Mat4::from_cols_array(&b.local_matrix);
+                merged_matrices.push(parent_m * local_m);
+            } else {
+                merged_matrices.push(Mat4::from_cols_array(&b.local_matrix));
+            }
+        }
+
+        let Some(template) = p_model_data.submeshes.get(submesh_idx) else {
+            continue;
+        };
+        let Some(mesh) = meshes.get_mut(mesh_handle) else {
+            continue;
+        };
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(pos_vec)) =
+            mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        else {
+            continue;
+        };
+
+        for (v, out_p) in template.rest_vertices.iter().zip(pos_vec.iter_mut()) {
+            let bone_idx = v.bone_index as usize;
+            if bone_idx < merged_matrices.len() {
+                let bm = &merged_matrices[bone_idx];
+                let p = bm.transform_point3(Vec3::from(v.position));
+                *out_p = [p.x, p.z, -p.y];
+            }
+        }
     }
 }

@@ -16,6 +16,8 @@ pub struct StudioAnimatedModel {
     pub is_viewmodel: bool,
     /// List of (child_entity, mesh_asset_handle, submesh_index)
     pub mesh_entities: Vec<(Entity, Handle<Mesh>, usize)>,
+    /// Interpolated bone transforms evaluated during the current frame.
+    pub current_bone_transforms: Vec<Mat4>,
 }
 
 impl StudioAnimatedModel {
@@ -30,6 +32,7 @@ impl StudioAnimatedModel {
             is_looping: true,
             is_viewmodel,
             mesh_entities: Vec::new(),
+            current_bone_transforms: Vec::new(),
         }
     }
 
@@ -109,6 +112,8 @@ pub fn studio_animation_system(
             let trans = t0.lerp(t1, alpha);
             interp_bones.push(Mat4::from_rotation_translation(rot, trans));
         }
+
+        anim.current_bone_transforms.clone_from(&interp_bones);
 
         // 3. Deform each submesh's vertices and normals in-place
         let is_vm = anim.is_viewmodel;

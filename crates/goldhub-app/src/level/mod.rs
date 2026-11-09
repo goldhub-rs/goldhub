@@ -439,6 +439,7 @@ pub fn setup_level(
         crate::combat::PlayerWeaponInventory::default(),
         crate::combat::ActiveWeaponState::default(),
         crate::combat::PlayerRecoil::default(),
+        crate::player::PlayerFlashlight::default(),
         crate::player::PlayerController {
             sim: goldhub_physics::FixedSubtickSimulator::new(spawn_pos, spawn_yaw),
             pitch: 0.0,

@@ -109,6 +109,8 @@ pub struct DoorEntity {
     pub wait_timer: f32,
     pub state: DoorState,
     pub is_rotating: bool,
+    pub use_only: bool,
+    pub hinge_origin: Vec3,
     pub start_pos: Vec3,
     pub target_pos: Vec3,
     pub start_rot: Quat,
@@ -402,9 +404,18 @@ pub fn spawn_bsp_interactive_entities(
 
                 let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
                 let center = (bmin + bmax) * 0.5;
+                let spawnflags = spawnflags_str.parse::<u32>().unwrap_or(0);
+                let use_only = (spawnflags & 256) != 0;
+                let reverse = (spawnflags & 2) != 0;
+                let hinge_origin = if origin_str.is_empty() {
+                    Vec3::new(bmin.x, center.y, bmin.z)
+                } else {
+                    bevy_origin
+                };
 
                 let (start_pos, target_pos, start_rot, target_rot) = if is_rotating {
-                    let angle_rad = distance.to_radians();
+                    let angle_deg = if reverse { -distance } else { distance };
+                    let angle_rad = angle_deg.to_radians();
                     (center, center, Quat::IDENTITY, Quat::from_rotation_y(angle_rad))
                 } else {
                     let move_dir = if angles_str == "-1 0 0" {
@@ -420,7 +431,7 @@ pub fn spawn_bsp_interactive_entities(
                         let rad = yaw.to_radians();
                         Vec3::new(rad.cos(), 0.0, -rad.sin())
                     };
-                    let dist = (bmax.y - bmin.y).max(64.0);
+                    let dist = (bmax - bmin).dot(move_dir.abs()).max(32.0);
                     (center, center + move_dir * dist, Quat::IDENTITY, Quat::IDENTITY)
                 };
 
@@ -434,6 +445,8 @@ pub fn spawn_bsp_interactive_entities(
                         wait_timer: 0.0,
                         state: DoorState::Closed,
                         is_rotating,
+                        use_only,
+                        hinge_origin,
                         start_pos,
                         target_pos,
                         start_rot,
@@ -1095,11 +1108,42 @@ pub fn update_doors_system(
     mut audio_sources: ResMut<Assets<AudioSource>>,
     mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
     mut door_query: Query<(Entity, &mut DoorEntity)>,
-    mut submodel_query: Query<(&BspSubmodelMesh, &mut Transform), Without<DoorEntity>>,
+    mut submodel_query: Query<(&BspSubmodelMesh, &mut Transform), (Without<DoorEntity>, Without<crate::player::PlayerController>)>,
+    player_query: Query<&Transform, With<crate::player::PlayerController>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
+    }
+
+    // Touch to open: if player approaches within touch proximity of door bounding box, open unless use_only
+    if let Ok(player_t) = player_query.get_single() {
+        let player_pos = player_t.translation;
+        for (_door_ent, mut door) in &mut door_query {
+            if door.state == DoorState::Closed && !door.use_only {
+                let center = (door.bmin + door.bmax) * 0.5;
+                if player_pos.distance(center) < 72.0
+                    && (player_pos.x >= door.bmin.x - 32.0 && player_pos.x <= door.bmax.x + 32.0)
+                    && (player_pos.y >= door.bmin.y - 36.0 && player_pos.y <= door.bmax.y + 72.0)
+                    && (player_pos.z >= door.bmin.z - 32.0 && player_pos.z <= door.bmax.z + 32.0)
+                {
+                    door.state = DoorState::Opening;
+                    if let Some(ref move_snd) = door.move_sound
+                        && let Some(h) = audio_bank.get_or_load_sound(
+                            move_snd,
+                            &search_paths.dirs,
+                            &mut audio_sources,
+                        )
+                    {
+                        commands.spawn((
+                            AudioPlayer::new(h),
+                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            Transform::from_translation(center),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     for (_door_ent, mut door) in &mut door_query {
@@ -1118,9 +1162,13 @@ pub fn update_doors_system(
                 for (submesh, mut mesh_t) in &mut submodel_query {
                     if submesh.model == door.model {
                         if door.is_rotating {
-                            mesh_t.rotation = door.start_rot.slerp(door.target_rot, door.current_progress);
+                            let rot = door.start_rot.slerp(door.target_rot, door.current_progress);
+                            let p = door.hinge_origin;
+                            mesh_t.translation = p - rot.mul_vec3(p);
+                            mesh_t.rotation = rot;
                         } else {
-                            mesh_t.translation = door.start_pos.lerp(door.target_pos, door.current_progress);
+                            mesh_t.translation = (door.target_pos - door.start_pos) * door.current_progress;
+                            mesh_t.rotation = Quat::IDENTITY;
                         }
                     }
                 }
@@ -1190,9 +1238,13 @@ pub fn update_doors_system(
                 for (submesh, mut mesh_t) in &mut submodel_query {
                     if submesh.model == door.model {
                         if door.is_rotating {
-                            mesh_t.rotation = door.start_rot.slerp(door.target_rot, door.current_progress);
+                            let rot = door.start_rot.slerp(door.target_rot, door.current_progress);
+                            let p = door.hinge_origin;
+                            mesh_t.translation = p - rot.mul_vec3(p);
+                            mesh_t.rotation = rot;
                         } else {
-                            mesh_t.translation = door.start_pos.lerp(door.target_pos, door.current_progress);
+                            mesh_t.translation = (door.target_pos - door.start_pos) * door.current_progress;
+                            mesh_t.rotation = Quat::IDENTITY;
                         }
                     }
                 }

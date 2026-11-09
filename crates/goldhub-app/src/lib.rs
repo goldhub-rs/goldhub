@@ -7,6 +7,7 @@ pub mod audio;
 pub mod camera;
 pub mod combat;
 pub mod entity;
+pub mod hud;
 pub mod level;
 pub mod mesh_bridge;
 pub mod player;
@@ -70,6 +71,7 @@ pub fn build_goldhub_app() -> App {
         StudioModelPlugin,
         EntityRuntimePlugin,
         combat::CombatPlugin,
+        hud::HudPlugin,
     ));
 
     app

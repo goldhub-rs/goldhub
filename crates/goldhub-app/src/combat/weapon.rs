@@ -34,6 +34,8 @@ pub struct WeaponDef {
     pub max_reserve: i32,
     pub reload_time: f32,
     pub v_model: &'static str,
+    pub p_model: &'static str,
+    pub anim_extension: &'static str,
     pub shoot_sound: &'static str,
     pub reload_sound: &'static str,
     pub deploy_anim: usize,
@@ -57,6 +59,8 @@ pub fn get_weapon_def(id: WeaponId) -> WeaponDef {
             max_reserve: 0,
             reload_time: 0.0,
             v_model: "models/v_knife.mdl",
+            p_model: "models/p_knife.mdl",
+            anim_extension: "knife",
             shoot_sound: "weapons/knife_slash1.wav",
             reload_sound: "",
             deploy_anim: 3,
@@ -74,6 +78,8 @@ pub fn get_weapon_def(id: WeaponId) -> WeaponDef {
             max_reserve: 120,
             reload_time: 2.2,
             v_model: "models/v_glock18.mdl",
+            p_model: "models/p_glock18.mdl",
+            anim_extension: "onehanded",
             shoot_sound: "weapons/glock18-1.wav",
             reload_sound: "weapons/glock_clipout.wav",
             deploy_anim: 6,
@@ -91,6 +97,8 @@ pub fn get_weapon_def(id: WeaponId) -> WeaponDef {
             max_reserve: 100,
             reload_time: 2.7,
             v_model: "models/v_usp.mdl",
+            p_model: "models/p_usp.mdl",
+            anim_extension: "onehanded",
             shoot_sound: "weapons/usp_unsil-1.wav",
             reload_sound: "weapons/usp_clipout.wav",
             deploy_anim: 6,
@@ -108,6 +116,8 @@ pub fn get_weapon_def(id: WeaponId) -> WeaponDef {
             max_reserve: 35,
             reload_time: 2.2,
             v_model: "models/v_deagle.mdl",
+            p_model: "models/p_deagle.mdl",
+            anim_extension: "onehanded",
             shoot_sound: "weapons/deagle-1.wav",
             reload_sound: "weapons/de_clipout.wav",
             deploy_anim: 5,
@@ -125,6 +135,8 @@ pub fn get_weapon_def(id: WeaponId) -> WeaponDef {
             max_reserve: 90,
             reload_time: 2.45,
             v_model: "models/v_ak47.mdl",
+            p_model: "models/p_ak47.mdl",
+            anim_extension: "ak47",
             shoot_sound: "weapons/ak47-1.wav",
             reload_sound: "weapons/ak47_clipout.wav",
             deploy_anim: 2,
@@ -142,6 +154,8 @@ pub fn get_weapon_def(id: WeaponId) -> WeaponDef {
             max_reserve: 90,
             reload_time: 3.05,
             v_model: "models/v_m4a1.mdl",
+            p_model: "models/p_m4a1.mdl",
+            anim_extension: "rifle",
             shoot_sound: "weapons/m4a1_unsil-1.wav",
             reload_sound: "weapons/m4a1_clipout.wav",
             deploy_anim: 2,
@@ -159,6 +173,8 @@ pub fn get_weapon_def(id: WeaponId) -> WeaponDef {
             max_reserve: 30,
             reload_time: 2.5,
             v_model: "models/v_awp.mdl",
+            p_model: "models/p_awp.mdl",
+            anim_extension: "rifle",
             shoot_sound: "weapons/awp1.wav",
             reload_sound: "weapons/boltpull1.wav",
             deploy_anim: 3,
@@ -233,6 +249,7 @@ impl Plugin for CombatPlugin {
             (
                 weapon_switch_system,
                 weapon_fire_and_reload_system,
+                update_bullet_particles_system,
                 super::recoil::decay_punchangle_system,
             ),
         );
@@ -297,8 +314,14 @@ pub fn weapon_switch_system(
         state.shots_fired = 0;
         state.zoom_level = 0;
 
-        // Deploy sound
-        if let Some(h) = audio_bank.get_or_load_sound("weapons/knife_deploy1.wav", &search_paths.dirs, &mut audio_sources) {
+        // Deploy sound (only knife or weapons with dedicated deploy sound)
+        let deploy_snd = match weapon_id {
+            WeaponId::Knife => "weapons/knife_deploy1.wav",
+            _ => "",
+        };
+        if !deploy_snd.is_empty()
+            && let Some(h) = audio_bank.get_or_load_sound(deploy_snd, &search_paths.dirs, &mut audio_sources)
+        {
             commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
         }
 
@@ -310,6 +333,7 @@ pub fn weapon_switch_system(
             }
 
             if let Some(model_data) = model_store.get_or_load(def.v_model, &search_paths, &mut images, &mut materials) {
+                anim.model_id = def.v_model.to_string();
                 let mut new_children = Vec::with_capacity(model_data.submeshes.len());
                 for (sub_idx, template) in model_data.submeshes.iter().enumerate() {
                     let bevy_mesh = crate::studio::store::create_initial_bevy_mesh(template, false);
@@ -335,6 +359,107 @@ pub fn weapon_switch_system(
     }
 }
 
+#[derive(Component, Debug)]
+pub struct WeaponAudioChannel;
+
+#[derive(Component, Debug)]
+pub struct BulletParticle {
+    pub velocity: Vec3,
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub gravity: f32,
+}
+
+pub fn update_bullet_particles_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut BulletParticle, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (entity, mut p, mut transform) in &mut query {
+        p.lifetime += dt;
+        if p.lifetime >= p.max_lifetime {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        p.velocity.y -= p.gravity * dt;
+        transform.translation += p.velocity * dt;
+        let frac = (1.0 - (p.lifetime / p.max_lifetime)).max(0.01);
+        transform.scale = Vec3::splat(frac);
+    }
+}
+
+pub fn spawn_blood_splatter(
+    commands: &mut Commands,
+    origin: Vec3,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let mesh_handle = meshes.add(Sphere::new(1.8).mesh().ico(1).unwrap());
+    let mat_handle = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.72, 0.02, 0.02),
+        unlit: true,
+        ..default()
+    });
+
+    for i in 0..12 {
+        let angle = (i as f32) * std::f32::consts::TAU / 12.0;
+        let speed = 40.0 + ((i * 17) % 70) as f32;
+        let vel = Vec3::new(
+            angle.cos() * speed,
+            20.0 + ((i * 13) % 40) as f32,
+            angle.sin() * speed,
+        );
+        commands.spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(mat_handle.clone()),
+            Transform::from_translation(origin),
+            BulletParticle {
+                velocity: vel,
+                lifetime: 0.0,
+                max_lifetime: 0.35,
+                gravity: 500.0,
+            },
+        ));
+    }
+}
+
+pub fn spawn_bullet_dust_puff(
+    commands: &mut Commands,
+    origin: Vec3,
+    normal: Vec3,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let mesh_handle = meshes.add(Sphere::new(1.4).mesh().ico(1).unwrap());
+    let mat_handle = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.72, 0.68, 0.64),
+        unlit: true,
+        ..default()
+    });
+
+    for i in 0..8 {
+        let angle = (i as f32) * std::f32::consts::TAU / 8.0;
+        let speed = 30.0 + ((i * 19) % 50) as f32;
+        let spread_dir = (normal + Vec3::new(angle.cos() * 0.5, angle.sin() * 0.5, 0.0)).normalize();
+        let vel = spread_dir * speed;
+        commands.spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(mat_handle.clone()),
+            Transform::from_translation(origin),
+            BulletParticle {
+                velocity: vel,
+                lifetime: 0.0,
+                max_lifetime: 0.25,
+                gravity: 60.0,
+            },
+        ));
+    }
+}
+
 /// SystemParam bundling audio resources for weapon sounds.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct CombatAudio<'w> {
@@ -350,6 +475,13 @@ pub struct CombatEvents<'w> {
     pub break_ent: EventWriter<'w, BreakEntityEvent>,
 }
 
+/// SystemParam bundling mesh and material assets for combat VFX.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct CombatVfxAssets<'w> {
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub materials: ResMut<'w, Assets<StandardMaterial>>,
+}
+
 /// Core weapon fire, reload, kickback recoil, and hitscan raytrace damage dispatch.
 const BULLET_REACH: f32 = 8192.0;
 
@@ -362,6 +494,8 @@ pub fn weapon_fire_and_reload_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     collision_res: Res<LevelCollisionResource>,
     model_store: Res<StudioModelStore>,
+    mut vfx: CombatVfxAssets,
+    audio_channel_query: Query<Entity, With<WeaponAudioChannel>>,
     camera_query: Query<&GlobalTransform, (With<Camera3d>, With<crate::player::PlayerController>)>,
     mut player_query: Query<(&mut ActiveWeaponState, &mut PlayerRecoil)>,
     mut breakable_query: Query<(Entity, &mut BreakableEntity)>,
@@ -370,6 +504,7 @@ pub fn weapon_fire_and_reload_system(
         &mut HostageEntity,
         &mut StudioAnimatedModel,
         &mut EntityCollisionBounds,
+        &mut WorldStudioEntity,
         &GlobalTransform,
     ), (Without<ViewModelWeapon>, Without<crate::player::PlayerController>)>,
     entity_query: Query<(Entity, &GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity), Without<HostageEntity>>,
@@ -412,8 +547,10 @@ pub fn weapon_fire_and_reload_system(
         return;
     }
 
-    // Manual reload on R key
-    if keyboard.just_pressed(KeyCode::KeyR) && state.clip < def.clip_size && state.reserve > 0 {
+    // Manual reload on R key OR auto-reload when clip is empty and weapon can fire
+    let wants_manual_reload = keyboard.just_pressed(KeyCode::KeyR) && state.clip < def.clip_size && state.reserve > 0;
+    let wants_auto_reload = state.clip == 0 && state.reserve > 0 && state.next_primary_attack <= 0.0;
+    if (wants_manual_reload || wants_auto_reload) && !state.in_reload {
         state.in_reload = true;
         state.reload_timer = def.reload_time;
         state.shots_fired = 0;
@@ -458,9 +595,15 @@ pub fn weapon_fire_and_reload_system(
         let seed = (time.elapsed_secs() * 100.0).fract();
         recoil.apply_kickback(def.recoil_up, def.recoil_lateral, 0.15, 0.03, state.shots_fired, seed);
 
+        // Despawn previous shot sound on WeaponAudioChannel to prevent audio stacking / cacophony
+        for old_audio in &audio_channel_query {
+            commands.entity(old_audio).despawn();
+        }
+
         // Firing sound
         if let Some(h) = audio.audio_bank.get_or_load_sound(def.shoot_sound, &audio.search_paths.dirs, &mut audio.audio_sources) {
             commands.spawn((
+                WeaponAudioChannel,
                 AudioPlayer::new(h),
                 PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::new(1.0)),
             ));
@@ -480,6 +623,23 @@ pub fn weapon_fire_and_reload_system(
         };
         let cam_pos = cam_t.translation();
         let cam_forward = cam_t.forward().as_vec3();
+
+        // Brief dynamic muzzle flash light (0.05s)
+        commands.spawn((
+            PointLight {
+                color: Color::srgb(1.0, 0.85, 0.6),
+                intensity: 6_000.0,
+                range: 240.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::from_translation(cam_pos + cam_forward * 24.0),
+            crate::entity::ExplosionFlash {
+                lifetime: 0.0,
+                max_lifetime: 0.05,
+                initial_intensity: 6_000.0,
+            },
+        ));
 
         // Trace breakables
         let mut hit_breakable: Option<(Entity, f32, crate::entity::BreakableMaterial, u32)> = None;
@@ -516,7 +676,7 @@ pub fn weapon_fire_and_reload_system(
 
         // Trace hostages
         let mut hit_hostage: Option<(Entity, f32)> = None;
-        for (h_ent, _, _, bounds, ht) in &hostage_query {
+        for (h_ent, _, _, bounds, _, ht) in &hostage_query {
             let ep = ht.translation();
             let bmin = ep + bounds.mins;
             let bmax = ep + bounds.maxs;
@@ -541,9 +701,9 @@ pub fn weapon_fire_and_reload_system(
             }
         }
 
-        // Resolve hit
+        // Resolve hit (with 4.0u epsilon so breakable's own brush model in BSP collision does not reject the hit)
         if let Some((b_ent, b_t, mat, exp_mag)) = hit_breakable
-            && b_t < hit_wall_dist
+            && b_t <= hit_wall_dist + 4.0
             && hit_hostage.as_ref().is_none_or(|(_, h_t)| b_t < *h_t)
         {
             if let Ok((_, mut breakable)) = breakable_query.get_mut(b_ent) {
@@ -563,10 +723,25 @@ pub fn weapon_fire_and_reload_system(
                 }
             }
         } else if let Some((h_ent, h_t)) = hit_hostage
-            && h_t < hit_wall_dist
+            && h_t <= hit_wall_dist + 4.0
         {
-            if let Ok((_, mut hostage, mut h_anim, mut bounds, ht)) = hostage_query.get_mut(h_ent) {
+            if let Ok((_, mut hostage, mut h_anim, mut bounds, mut studio_ent, ht)) = hostage_query.get_mut(h_ent) {
                 hostage.health -= def.damage;
+                let hit_pos = cam_pos + cam_forward * h_t;
+                let flesh_snd = if ((time.elapsed_secs() * 100.0) as usize).is_multiple_of(2) {
+                    "weapons/bullet_hit1.wav"
+                } else {
+                    "weapons/bullet_hit2.wav"
+                };
+                if let Some(h) = audio.audio_bank.get_or_load_sound(flesh_snd, &audio.search_paths.dirs, &mut audio.audio_sources) {
+                    commands.spawn((
+                        AudioPlayer::new(h),
+                        PlaybackSettings::DESPAWN.with_spatial(true),
+                        Transform::from_translation(hit_pos),
+                    ));
+                }
+                spawn_blood_splatter(&mut commands, hit_pos, &mut vfx.meshes, &mut vfx.materials);
+
                 if hostage.health > 0.0 {
                     h_anim.set_sequence(7, 30.0, false);
                     let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
@@ -581,6 +756,7 @@ pub fn weapon_fire_and_reload_system(
                 } else if !hostage.is_dead {
                     hostage.is_dead = true;
                     h_anim.set_sequence(31, 24.0, false);
+                    studio_ent.is_solid = false; // Dead hostages lose collision so player does not get stuck
                     bounds.mins = Vec3::ZERO;
                     bounds.maxs = Vec3::ZERO;
                     if let Some(h) = audio.audio_bank.get_or_load_sound("radio/hosdown.wav", &audio.search_paths.dirs, &mut audio.audio_sources) {
@@ -589,17 +765,18 @@ pub fn weapon_fire_and_reload_system(
                 }
             }
         } else if hit_wall_dist < BULLET_REACH {
+            let hit_pos = cam_pos + cam_forward * hit_wall_dist;
             // Wall ricochet sound
             let ric_idx = ((time.elapsed_secs() * 100.0) as usize % 5) + 1;
             let ric_snd = format!("weapons/ric{ric_idx}.wav");
             if let Some(h) = audio.audio_bank.get_or_load_sound(&ric_snd, &audio.search_paths.dirs, &mut audio.audio_sources) {
-                let hit_pos = cam_pos + cam_forward * hit_wall_dist;
                 commands.spawn((
                     AudioPlayer::new(h),
                     PlaybackSettings::DESPAWN.with_spatial(true),
                     Transform::from_translation(hit_pos),
                 ));
             }
+            spawn_bullet_dust_puff(&mut commands, hit_pos, -cam_forward, &mut vfx.meshes, &mut vfx.materials);
         }
     }
 }
