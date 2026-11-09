@@ -190,10 +190,17 @@ pub fn viewmodel_input_system(
     ), Without<ViewModelWeapon>>,
     mut fire_events: EventWriter<crate::entity::FireTargetEvent>,
     mut break_events: EventWriter<crate::entity::BreakEntityEvent>,
+    active_weapon_query: Query<&crate::combat::ActiveWeaponState>,
     mut vm_query: Query<(&mut ViewModelWeapon, &mut StudioAnimatedModel)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
+        return;
+    }
+
+    if let Ok(state) = active_weapon_query.get_single()
+        && state.id != crate::combat::WeaponId::Knife
+    {
         return;
     }
 

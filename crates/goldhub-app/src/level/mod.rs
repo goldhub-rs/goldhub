@@ -436,6 +436,9 @@ pub fn setup_level(
         bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
         initial_grading,
         Transform::from_translation(bevy_spawn_pos).with_rotation(Quat::from_rotation_y(bevy_yaw)),
+        crate::combat::PlayerWeaponInventory::default(),
+        crate::combat::ActiveWeaponState::default(),
+        crate::combat::PlayerRecoil::default(),
         crate::player::PlayerController {
             sim: goldhub_physics::FixedSubtickSimulator::new(spawn_pos, spawn_yaw),
             pitch: 0.0,

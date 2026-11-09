@@ -177,7 +177,7 @@ pub fn player_movement_system(
     collision_res: Res<LevelCollisionResource>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
-    mut query: Query<(&mut Transform, &mut PlayerController)>,
+    mut query: Query<(&mut Transform, &mut PlayerController, Option<&crate::combat::PlayerRecoil>)>,
     solid_query: Query<
         (
             &Transform,
@@ -216,7 +216,7 @@ pub fn player_movement_system(
         solid_entities.push((gs_mins, gs_maxs));
     }
 
-    for (mut transform, mut player) in &mut query {
+    for (mut transform, mut player, recoil) in &mut query {
         if !player.is_active {
             continue;
         }
@@ -302,8 +302,11 @@ pub fn player_movement_system(
 
         // 5. Coordinate system transformation from GoldSrc (Z-up) to Bevy (Y-up)
         let eye_pos = Vec3::new(gs_pos[0], gs_pos[2] + view_h, -gs_pos[1]);
-        let cam_rot =
-            Quat::from_rotation_y(player.yaw) * Quat::from_rotation_x(player.pitch);
+        let (punch_pitch, punch_yaw) = recoil.map_or((0.0, 0.0), |r| {
+            (r.punch_pitch.to_radians(), r.punch_yaw.to_radians())
+        });
+        let cam_rot = Quat::from_rotation_y(player.yaw + punch_yaw)
+            * Quat::from_rotation_x(player.pitch + punch_pitch);
 
         // Support GoldSrc Third-Person View (cam_idealdist = 64) with wall-clip protection
         let final_pos = if *perspective == CameraPerspective::ThirdPerson {
@@ -564,16 +567,6 @@ fn update_player_character_model_system(
         transform.translation = base_origin;
         *visibility = Visibility::Inherited;
     } else {
-        // First Person: CS2-style first-person legs
-        // Only visible when tilting camera down towards feet (pitch < -35 degrees).
-        // Offset backward by 18 units along horizontal camera forward so shoulders/torso stay behind the camera plane
-        // and only thighs, knees, and boots are visible.
-        if player.pitch < -35.0_f32.to_radians() {
-            let forward_h = Vec3::new(-player.yaw.sin(), 0.0, -player.yaw.cos());
-            transform.translation = base_origin - forward_h * 18.0;
-            *visibility = Visibility::Inherited;
-        } else {
-            *visibility = Visibility::Hidden;
-        }
+        *visibility = Visibility::Hidden;
     }
 }

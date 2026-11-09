@@ -129,6 +129,25 @@ pub struct ExplosionFlash {
     pub initial_intensity: f32,
 }
 
+/// Expanding fiery explosion fireball sphere.
+#[derive(Component, Debug)]
+pub struct ExplosionFireball {
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub start_scale: f32,
+    pub end_scale: f32,
+}
+
+/// Expanding and rising dark smoke particle from an explosion.
+#[derive(Component, Debug)]
+pub struct ExplosionSmokeParticle {
+    pub velocity: Vec3,
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub start_scale: f32,
+    pub end_scale: f32,
+}
+
 /// Entity modifying rendering properties of targets (`env_render`).
 #[derive(Component, Debug, Clone)]
 pub struct EnvRenderEntity {
@@ -199,6 +218,7 @@ impl Plugin for EntityRuntimePlugin {
                 update_doors_system,
                 interact_door_system,
                 update_explosion_flashes_system,
+                update_explosions_vfx_system,
             ),
         );
     }
@@ -646,7 +666,7 @@ pub fn handle_fire_target_events(
 }
 
 /// Handles material-based gib bursts, explosions, and brush despawning when a breakable entity is shattered.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::type_complexity)]
 pub fn handle_break_entity_events(
     mut commands: Commands,
     mut events: EventReader<BreakEntityEvent>,
@@ -659,6 +679,20 @@ pub fn handle_break_entity_events(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut player_query: Query<(
+        &Transform,
+        &mut crate::player::PlayerController,
+        Option<&mut crate::combat::PlayerRecoil>,
+    )>,
+    mut hostage_query: Query<(
+        &mut crate::studio::world_entity::HostageEntity,
+        &mut crate::studio::animation::StudioAnimatedModel,
+        &mut crate::studio::world_entity::EntityCollisionBounds,
+        &GlobalTransform,
+    ), (
+        Without<crate::studio::viewmodel::ViewModelWeapon>,
+        Without<crate::player::PlayerController>,
+    )>,
 ) {
     for ev in events.read() {
         if !ev.model.is_empty() {
@@ -732,8 +766,8 @@ pub fn handle_break_entity_events(
             commands.spawn((
                 PointLight {
                     color: Color::srgb(1.0, 0.65, 0.2),
-                    intensity: 12_000.0,
-                    range: 300.0,
+                    intensity: 15_000.0,
+                    range: 350.0,
                     shadows_enabled: false,
                     ..default()
                 },
@@ -741,11 +775,105 @@ pub fn handle_break_entity_events(
                 ExplosionFlash {
                     lifetime: 0.0,
                     max_lifetime: 0.25,
-                    initial_intensity: 12_000.0,
+                    initial_intensity: 15_000.0,
                 },
             ));
 
-            // 3. High-velocity bursting gibs (blast impulse 320 u/s)
+            // 3. Expanding fiery fireball visual mesh
+            let sphere_mesh = meshes.add(Sphere::new(1.0).mesh().uv(16, 16));
+            let fireball_mat = materials.add(StandardMaterial {
+                base_color: Color::srgba(1.0, 0.45, 0.1, 0.95),
+                emissive: LinearRgba::new(6.0, 2.5, 0.3, 1.0),
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            });
+            commands.spawn((
+                Mesh3d(sphere_mesh.clone()),
+                MeshMaterial3d(fireball_mat),
+                Transform::from_translation(ev.origin).with_scale(Vec3::splat(4.0)),
+                ExplosionFireball {
+                    lifetime: 0.0,
+                    max_lifetime: 0.35,
+                    start_scale: 4.0,
+                    end_scale: 48.0,
+                },
+            ));
+
+            // 4. Rising smoke particles
+            for i in 0..12 {
+                let seed = u64::from(ev.origin.x.to_bits()) ^ ((i as u64) * 47);
+                let mut rng = SimpleRng::new(seed);
+                let vx = rng.range_f32(-35.0, 35.0);
+                let vy = rng.range_f32(50.0, 100.0);
+                let vz = rng.range_f32(-35.0, 35.0);
+                let smoke_mat = materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.2, 0.18, 0.17, 0.6),
+                    alpha_mode: AlphaMode::Blend,
+                    ..default()
+                });
+                commands.spawn((
+                    Mesh3d(sphere_mesh.clone()),
+                    MeshMaterial3d(smoke_mat),
+                    Transform::from_translation(ev.origin + Vec3::new(vx * 0.1, 6.0, vz * 0.1))
+                        .with_scale(Vec3::splat(rng.range_f32(4.0, 7.0))),
+                    ExplosionSmokeParticle {
+                        velocity: Vec3::new(vx, vy, vz),
+                        lifetime: 0.0,
+                        max_lifetime: rng.range_f32(0.9, 1.3),
+                        start_scale: rng.range_f32(4.0, 7.0),
+                        end_scale: rng.range_f32(22.0, 32.0),
+                    },
+                ));
+            }
+
+            // 5. Blast impulse and recoil camera kick on player
+            for (p_trans, mut p_ctrl, recoil_opt) in &mut player_query {
+                let p_pos = p_trans.translation;
+                let dist = ev.origin.distance(p_pos);
+                let blast_radius = 320.0_f32;
+                if dist < blast_radius {
+                    let frac = (1.0 - (dist / blast_radius)).clamp(0.0, 1.0);
+                    let blast_dir = (p_pos - ev.origin).normalize_or_zero();
+                    p_ctrl.sim.current.velocity[0] += blast_dir.x * 450.0 * frac;
+                    p_ctrl.sim.current.velocity[1] += -blast_dir.z * 450.0 * frac;
+                    p_ctrl.sim.current.velocity[2] += (blast_dir.y * 300.0 + 200.0) * frac;
+
+                    if let Some(mut recoil) = recoil_opt {
+                        recoil.punch_pitch -= 16.0 * frac;
+                        let yaw_kick = if ((dist * 10.0) as usize).is_multiple_of(2) { 9.0 } else { -9.0 };
+                        recoil.punch_yaw += yaw_kick * frac;
+                    }
+                }
+            }
+
+            // 6. Blast damage on hostages
+            for (mut hostage, mut h_anim, mut bounds, h_trans) in &mut hostage_query {
+                let h_pos = h_trans.translation();
+                let dist = ev.origin.distance(h_pos);
+                let blast_radius = 320.0_f32;
+                if dist < blast_radius && !hostage.is_dead {
+                    let frac = (1.0 - (dist / blast_radius)).clamp(0.0, 1.0);
+                    hostage.health -= 120.0 * frac;
+                    if hostage.health > 0.0 {
+                        h_anim.set_sequence(7, 30.0, false);
+                    } else {
+                        hostage.is_dead = true;
+                        h_anim.set_sequence(31, 24.0, false);
+                        bounds.mins = Vec3::ZERO;
+                        bounds.maxs = Vec3::ZERO;
+                        if let Some(h) = audio_bank.get_or_load_sound(
+                            "radio/hosdown.wav",
+                            &search_paths.dirs,
+                            &mut audio_sources,
+                        ) {
+                            commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+                        }
+                    }
+                }
+            }
+
+            // 7. High-velocity bursting gibs (blast impulse 320 u/s)
             let shooter = EnvShooterEntity {
                 targetname: String::new(),
                 shootmodel: gib_model.to_string(),
@@ -1126,6 +1254,63 @@ pub fn update_explosion_flashes_system(
         } else {
             let frac = 1.0 - (flash.lifetime / flash.max_lifetime);
             light.intensity = flash.initial_intensity * frac;
+        }
+    }
+}
+
+/// Advances explosion fireball expansion, smoke particle drift, and alpha fades.
+pub fn update_explosions_vfx_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut fireballs: Query<(
+        Entity,
+        &mut ExplosionFireball,
+        &mut Transform,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut smokes: Query<(
+        Entity,
+        &mut ExplosionSmokeParticle,
+        &mut Transform,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+
+    for (entity, mut fb, mut transform, mat_handle) in &mut fireballs {
+        fb.lifetime += dt;
+        if fb.lifetime >= fb.max_lifetime {
+            commands.entity(entity).despawn();
+        } else {
+            let t = fb.lifetime / fb.max_lifetime;
+            let current_scale = fb.start_scale + (fb.end_scale - fb.start_scale) * t.sqrt();
+            transform.scale = Vec3::splat(current_scale);
+            if let Some(mat) = materials.get_mut(mat_handle.0.id()) {
+                let intensity = ((1.0 - t) * 6.0).max(0.0);
+                mat.emissive = LinearRgba::new(intensity, intensity * 0.4, intensity * 0.05, 1.0);
+                mat.base_color = Color::srgba(1.0, 0.45, 0.1, (1.0 - t).max(0.0));
+            }
+        }
+    }
+
+    for (entity, mut smoke, mut transform, mat_handle) in &mut smokes {
+        smoke.lifetime += dt;
+        if smoke.lifetime >= smoke.max_lifetime {
+            commands.entity(entity).despawn();
+        } else {
+            let t = smoke.lifetime / smoke.max_lifetime;
+            transform.translation += smoke.velocity * dt;
+            smoke.velocity.y += 18.0 * dt;
+            let current_scale = smoke.start_scale + (smoke.end_scale - smoke.start_scale) * t;
+            transform.scale = Vec3::splat(current_scale);
+            if let Some(mat) = materials.get_mut(mat_handle.0.id()) {
+                let alpha = ((1.0 - t) * 0.6).max(0.0);
+                mat.base_color = Color::srgba(0.2, 0.18, 0.17, alpha);
+            }
         }
     }
 }
