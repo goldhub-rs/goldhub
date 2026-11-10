@@ -12,6 +12,7 @@ use crate::studio::animation::StudioAnimatedModel;
 use crate::studio::store::StudioModelStore;
 use crate::studio::viewmodel::ViewModelWeapon;
 use crate::studio::world_entity::{EntityCollisionBounds, HostageEntity, WorldStudioEntity};
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
 pub use goldhub_game_cstrike::{WeaponDef, WeaponId, WeaponSlot, get_weapon_def};
@@ -59,13 +60,16 @@ pub struct WeaponSlotData {
     pub next_primary_attack: f32,
 }
 
-/// Player weapon slots inventory.
+/// Player weapon slots inventory supporting canonical slots 1..5 and quick switch (lastinv).
 #[derive(Component, Debug, Clone)]
 pub struct PlayerWeaponInventory {
     pub slot1: WeaponSlotData, // Primary
     pub slot2: WeaponSlotData, // Secondary
-    pub slot3: WeaponSlotData, // Knife
+    pub slot3: WeaponSlotData, // Knife / Melee
+    pub slot4: WeaponSlotData, // Grenades
+    pub slot5: WeaponSlotData, // C4
     pub active_slot: u8,
+    pub previous_slot: u8,
 }
 
 impl Default for PlayerWeaponInventory {
@@ -73,6 +77,7 @@ impl Default for PlayerWeaponInventory {
         let ak = get_weapon_def(WeaponId::AK47);
         let usp = get_weapon_def(WeaponId::USP45);
         let knife = get_weapon_def(WeaponId::Knife);
+        let he = get_weapon_def(WeaponId::HeGrenade);
         Self {
             slot1: WeaponSlotData {
                 id: Some(WeaponId::AK47),
@@ -95,8 +100,71 @@ impl Default for PlayerWeaponInventory {
                 silenced: false,
                 next_primary_attack: 0.0,
             },
+            slot4: WeaponSlotData {
+                id: Some(WeaponId::HeGrenade),
+                clip: he.clip_size,
+                reserve: he.max_reserve,
+                silenced: false,
+                next_primary_attack: 0.0,
+            },
+            slot5: WeaponSlotData {
+                id: None,
+                clip: 0,
+                reserve: 0,
+                silenced: false,
+                next_primary_attack: 0.0,
+            },
             active_slot: 3,
+            previous_slot: 1,
         }
+    }
+}
+
+impl PlayerWeaponInventory {
+    /// Returns slot data reference for a 1-based index (1..=5).
+    #[must_use]
+    pub fn get_slot(&self, slot: u8) -> Option<&WeaponSlotData> {
+        match slot {
+            1 => Some(&self.slot1),
+            2 => Some(&self.slot2),
+            3 => Some(&self.slot3),
+            4 => Some(&self.slot4),
+            5 => Some(&self.slot5),
+            _ => None,
+        }
+    }
+
+    /// Returns mutable slot data reference for a 1-based index (1..=5).
+    #[must_use]
+    pub fn get_slot_mut(&mut self, slot: u8) -> Option<&mut WeaponSlotData> {
+        match slot {
+            1 => Some(&mut self.slot1),
+            2 => Some(&mut self.slot2),
+            3 => Some(&mut self.slot3),
+            4 => Some(&mut self.slot4),
+            5 => Some(&mut self.slot5),
+            _ => None,
+        }
+    }
+
+    /// Finds the next non-empty slot in cycling order.
+    #[must_use]
+    pub fn next_occupied_slot(&self, forward: bool) -> Option<u8> {
+        let total_slots = 5u8;
+        let start = self.active_slot;
+        for step in 1..total_slots {
+            let candidate = if forward {
+                (start + step - 1) % total_slots + 1
+            } else {
+                (start + total_slots - step - 1) % total_slots + 1
+            };
+            if let Some(slot_data) = self.get_slot(candidate)
+                && slot_data.id.is_some()
+            {
+                return Some(candidate);
+            }
+        }
+        None
     }
 }
 
@@ -116,7 +184,7 @@ impl Plugin for CombatPlugin {
     }
 }
 
-/// Switches active weapon on Digit1 (Primary), Digit2 (Secondary), Digit3 (Knife).
+/// Switches active weapon on Digit1..Digit5, KeyQ (lastinv), and mouse wheel up/down.
 #[allow(
     clippy::too_many_arguments,
     clippy::type_complexity,
@@ -125,6 +193,7 @@ impl Plugin for CombatPlugin {
 pub fn weapon_switch_system(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
+    mut mouse_wheel: EventReader<MouseWheel>,
     search_paths: Res<GameSearchPaths>,
     mut audio_bank: ResMut<GoldSrcAudioBank>,
     mut audio_sources: ResMut<Assets<AudioSource>>,
@@ -140,52 +209,72 @@ pub fn weapon_switch_system(
         &mut Transform,
     )>,
 ) {
-    let mut new_slot = None;
-    if keyboard.just_pressed(KeyCode::Digit1) {
-        new_slot = Some(1);
-    } else if keyboard.just_pressed(KeyCode::Digit2) {
-        new_slot = Some(2);
-    } else if keyboard.just_pressed(KeyCode::Digit3) {
-        new_slot = Some(3);
+    let mut wheel_delta = 0.0f32;
+    for ev in mouse_wheel.read() {
+        wheel_delta += ev.y;
     }
 
-    let Some(slot) = new_slot else {
-        return;
-    };
+    let mut direct_slot = None;
+    if keyboard.just_pressed(KeyCode::Digit1) {
+        direct_slot = Some(1);
+    } else if keyboard.just_pressed(KeyCode::Digit2) {
+        direct_slot = Some(2);
+    } else if keyboard.just_pressed(KeyCode::Digit3) {
+        direct_slot = Some(3);
+    } else if keyboard.just_pressed(KeyCode::Digit4) {
+        direct_slot = Some(4);
+    } else if keyboard.just_pressed(KeyCode::Digit5) {
+        direct_slot = Some(5);
+    }
+
+    let quick_switch = keyboard.just_pressed(KeyCode::KeyQ);
 
     for (mut inv, mut state) in &mut player_query {
+        let target_slot = if let Some(slot) = direct_slot {
+            if inv.get_slot(slot).and_then(|s| s.id).is_some() {
+                Some(slot)
+            } else {
+                None
+            }
+        } else if quick_switch {
+            let prev = inv.previous_slot;
+            if prev != inv.active_slot && inv.get_slot(prev).and_then(|s| s.id).is_some() {
+                Some(prev)
+            } else {
+                inv.next_occupied_slot(true)
+            }
+        } else if wheel_delta > 0.05 {
+            // Mouse wheel up -> previous weapon (counter-clockwise cycle)
+            inv.next_occupied_slot(false)
+        } else if wheel_delta < -0.05 {
+            // Mouse wheel down -> next weapon (clockwise cycle)
+            inv.next_occupied_slot(true)
+        } else {
+            None
+        };
+
+        let Some(slot) = target_slot else {
+            continue;
+        };
+
         if inv.active_slot == slot {
             continue;
         }
 
         // Save active weapon state into outgoing slot
         let old_slot = inv.active_slot;
-        match old_slot {
-            1 => {
-                inv.slot1.clip = state.clip;
-                inv.slot1.reserve = state.reserve;
-                inv.slot1.silenced = state.silenced;
-                inv.slot1.next_primary_attack = state.next_primary_attack;
-            }
-            2 => {
-                inv.slot2.clip = state.clip;
-                inv.slot2.reserve = state.reserve;
-                inv.slot2.silenced = state.silenced;
-                inv.slot2.next_primary_attack = state.next_primary_attack;
-            }
-            _ => {
-                inv.slot3.clip = state.clip;
-                inv.slot3.reserve = state.reserve;
-                inv.slot3.silenced = state.silenced;
-                inv.slot3.next_primary_attack = state.next_primary_attack;
-            }
+        if let Some(out_slot) = inv.get_slot_mut(old_slot) {
+            out_slot.clip = state.clip;
+            out_slot.reserve = state.reserve;
+            out_slot.silenced = state.silenced;
+            out_slot.next_primary_attack = state.next_primary_attack;
         }
 
+        inv.previous_slot = old_slot;
         inv.active_slot = slot;
-        let incoming_slot = match slot {
-            1 => inv.slot1,
-            2 => inv.slot2,
-            _ => inv.slot3,
+
+        let Some(incoming_slot) = inv.get_slot(slot).copied() else {
+            continue;
         };
 
         let Some(weapon_id) = incoming_slot.id else {
