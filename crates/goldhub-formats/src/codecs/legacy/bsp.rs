@@ -296,7 +296,10 @@ impl<'a> BspLevel<'a> {
 
             let tw = mip_header.width;
             let th = mip_header.height;
-            let pixel_count = (tw * th) as usize;
+            let pixel_count_opt = tw
+                .checked_mul(th)
+                .filter(|&cnt| cnt <= 4096 * 4096 && tw <= 4096 && th <= 4096)
+                .map(|cnt| cnt as usize);
 
             if mip_header.offsets[0] == 0 || tw == 0 || th == 0 {
                 // External WAD texture stub (to be resolved by WAD resolver)
@@ -310,10 +313,30 @@ impl<'a> BspLevel<'a> {
                 continue;
             }
 
+            let Some(pixel_count) = pixel_count_opt else {
+                descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                    format!("corrupt_tex_{i}"),
+                    crate::ir::TextureFormat::Rgba8Unorm,
+                    16,
+                    16,
+                    vec![220; 16 * 16 * 4],
+                ));
+                continue;
+            };
+
             let offset0 = mip_header.offsets[0] as usize;
             let offset3 = mip_header.offsets[3] as usize;
-            let mip3_len = (tw / 8) * (th / 8);
-            let palette_offset = offset3 + (mip3_len as usize) + 2;
+            let Some(mip3_len) = (tw / 8).checked_mul(th / 8).map(|len| len as usize) else {
+                descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                    format!("corrupt_tex_{i}"),
+                    crate::ir::TextureFormat::Rgba8Unorm,
+                    16,
+                    16,
+                    vec![220; 16 * 16 * 4],
+                ));
+                continue;
+            };
+            let palette_offset = offset3 + mip3_len + 2;
 
             if offset0 + pixel_count > miptex_bytes.len()
                 || palette_offset + 768 > miptex_bytes.len()

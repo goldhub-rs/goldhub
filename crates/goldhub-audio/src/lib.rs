@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_materials_parsing_and_lookup() {
-        let sample_materials = r#"
+        let sample_materials = r"
 // GoldSrc sound materials map
 C OUT_CONC1
 M VENT_METAL1
@@ -92,7 +92,7 @@ G GRATE_STEEL
 T TILE_FLOOR
 S WATER_PUDDLE
 W WOOD_CRATE
-"#;
+";
         let table = MaterialTable::parse_materials_txt(sample_materials).expect("parse materials");
         assert_eq!(table.len(), 8);
 
@@ -270,7 +270,7 @@ W WOOD_CRATE
 
         // Sound on the right should have higher right volume than left volume
         assert!(vol.right_255 > vol.left_255);
-        assert!(vol.left_255 == 0); // (1 - 0.4)*(1 - 1.0) = 0
+        assert_eq!(vol.left_255, 0); // (1 - 0.4)*(1 - 1.0) = 0
 
         // Sound straight in front: dot = 0
         let sound_front = [0.0, 500.0, 0.0];

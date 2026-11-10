@@ -12,6 +12,6 @@ pub mod weapon;
 
 pub use recoil::{PlayerRecoil, decay_punchangle_system};
 pub use weapon::{
-    ActiveWeaponState, CombatPlugin, PlayerWeaponInventory, WeaponDef, WeaponId,
-    get_weapon_def, weapon_fire_and_reload_system, weapon_switch_system,
+    ActiveWeaponState, CombatPlugin, PlayerWeaponInventory, WeaponDef, WeaponId, get_weapon_def,
+    weapon_fire_and_reload_system, weapon_switch_system,
 };

@@ -4,11 +4,11 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use goldhub_physics::WorldTrace;
 
-use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
-use crate::player::{LevelCollisionResource, PlayerController};
 use super::animation::StudioAnimatedModel;
 use super::store::{StudioModelStore, create_initial_bevy_mesh};
 use super::world_entity::{EntityCollisionBounds, WorldStudioEntity};
+use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
+use crate::player::{LevelCollisionResource, PlayerController};
 
 /// Component marking the first-person ViewModel weapon entity.
 #[derive(Component, Debug, Clone)]
@@ -39,7 +39,14 @@ pub fn spawn_viewmodel_system(
     mut commands: Commands,
     mut model_store: ResMut<StudioModelStore>,
     search_paths: Res<GameSearchPaths>,
-    camera_query: Query<Entity, (With<Camera3d>, With<PlayerController>, Without<HasViewModel>)>,
+    camera_query: Query<
+        Entity,
+        (
+            With<Camera3d>,
+            With<PlayerController>,
+            Without<HasViewModel>,
+        ),
+    >,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -54,15 +61,20 @@ pub fn spawn_viewmodel_system(
         };
 
         // Find idle sequence (sequence 0 in CS 1.6 v_knife)
-        let idle_fps = model_data.model.rig.sequences.first().map_or(16.0, |s| s.fps);
+        let idle_fps = model_data
+            .model
+            .rig
+            .sequences
+            .first()
+            .map_or(16.0, |s| s.fps);
         let mut anim_component = StudioAnimatedModel::new(KNIFE_PATH, true);
         anim_component.set_sequence(0, idle_fps, true);
 
-        // Spawn ViewModel root entity as a child of the camera
+        // Spawn ViewModel root entity as a child of the camera (mirrored X for authentic CS 1.6 cl_righthand 1)
         let vm_root = commands
             .spawn((
                 ViewModelWeapon::default(),
-                Transform::IDENTITY,
+                Transform::from_scale(Vec3::new(-1.0, 1.0, 1.0)),
                 Visibility::default(),
             ))
             .id();
@@ -96,8 +108,6 @@ pub fn spawn_viewmodel_system(
         );
     }
 }
-
-
 
 /// Ray-AABB slab intersection test returning distance `t` along `dir` if hit.
 fn ray_intersects_aabb(
@@ -136,11 +146,7 @@ fn ray_intersects_aabb(
         }
     }
 
-    if tmin <= max_dist {
-        Some(tmin)
-    } else {
-        None
-    }
+    if tmin <= max_dist { Some(tmin) } else { None }
 }
 
 /// Maximum forward trace reach for knife slash and stab attacks (GoldSrc KnifeSwingDistance).
@@ -167,29 +173,51 @@ enum HitTarget {
     Miss,
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct KnifeVfxParams<'w> {
+    pub sprite_store: ResMut<'w, crate::sprite::SpriteStore>,
+    pub images: ResMut<'w, Assets<Image>>,
+    pub materials: ResMut<'w, Assets<StandardMaterial>>,
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct KnifeAudioParams<'w> {
+    pub search_paths: Res<'w, GameSearchPaths>,
+    pub bank: ResMut<'w, GoldSrcAudioBank>,
+    pub sources: ResMut<'w, Assets<AudioSource>>,
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn viewmodel_input_system(
     mut commands: Commands,
     time: Res<Time>,
-    search_paths: Res<GameSearchPaths>,
-    mut audio_bank: ResMut<GoldSrcAudioBank>,
-    mut audio_sources: ResMut<Assets<AudioSource>>,
+    mut audio: KnifeAudioParams,
+    mut vfx: KnifeVfxParams,
     mouse_button: Res<ButtonInput<MouseButton>>,
     model_store: Res<StudioModelStore>,
     collision_res: Res<LevelCollisionResource>,
     camera_query: Query<&GlobalTransform, (With<Camera3d>, With<PlayerController>)>,
     entity_query: Query<
-        (Entity, &GlobalTransform, &EntityCollisionBounds, &WorldStudioEntity),
+        (
+            Entity,
+            &GlobalTransform,
+            &EntityCollisionBounds,
+            &WorldStudioEntity,
+        ),
         Without<crate::studio::world_entity::HostageEntity>,
     >,
     mut breakable_query: Query<(Entity, &mut crate::entity::BreakableEntity)>,
-    mut hostage_query: Query<(
-        Entity,
-        &mut crate::studio::world_entity::HostageEntity,
-        &mut StudioAnimatedModel,
-        &mut EntityCollisionBounds,
-        &GlobalTransform,
-    ), Without<ViewModelWeapon>>,
+    mut hostage_query: Query<
+        (
+            Entity,
+            &mut crate::studio::world_entity::HostageEntity,
+            &mut StudioAnimatedModel,
+            &mut EntityCollisionBounds,
+            &GlobalTransform,
+        ),
+        Without<ViewModelWeapon>,
+    >,
     mut fire_events: EventWriter<crate::entity::FireTargetEvent>,
     mut break_events: EventWriter<crate::entity::BreakEntityEvent>,
     active_weapon_query: Query<&crate::combat::ActiveWeaponState>,
@@ -240,10 +268,11 @@ pub fn viewmodel_input_system(
         }
 
         // Raytrace 48 units from camera forward vector (CS 1.6 KnifeSwingDistance / KnifeStabDistance)
-        let (cam_pos, cam_forward) = camera_query.get_single().map_or(
-            (Vec3::ZERO, Vec3::NEG_Z),
-            |cam_t| (cam_t.translation(), cam_t.forward().as_vec3()),
-        );
+        let (cam_pos, cam_forward) = camera_query
+            .get_single()
+            .map_or((Vec3::ZERO, Vec3::NEG_Z), |cam_t| {
+                (cam_t.translation(), cam_t.forward().as_vec3())
+            });
 
         // 1. Trace against func_breakable entities (bottles, chickens, radio) with ±16u hull
         let mut closest_breakable: Option<(Entity, f32, crate::entity::BreakableMaterial)> = None;
@@ -391,15 +420,24 @@ pub fn viewmodel_input_system(
                     if let Ok((_, mut hostage, mut h_anim, mut bounds, h_t)) =
                         hostage_query.get_mut(h_ent)
                     {
+                        crate::sprite::spawn_blood_sprite(
+                            &mut commands,
+                            h_t.translation() + Vec3::Y * 36.0,
+                            &mut vfx.sprite_store,
+                            &audio.search_paths,
+                            &mut vfx.images,
+                            &mut vfx.materials,
+                            &mut vfx.meshes,
+                        );
                         hostage.health -= damage;
                         if hostage.health > 0.0 {
                             h_anim.set_sequence(7, 30.0, false); // flinch
                             let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
                             let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
-                            if let Some(h) = audio_bank.get_or_load_sound(
+                            if let Some(h) = audio.bank.get_or_load_sound(
                                 &pain_snd,
-                                &search_paths.dirs,
-                                &mut audio_sources,
+                                &audio.search_paths.dirs,
+                                &mut audio.sources,
                             ) {
                                 commands.spawn((
                                     AudioPlayer::new(h),
@@ -412,10 +450,10 @@ pub fn viewmodel_input_system(
                             h_anim.set_sequence(31, 24.0, false); // diesimple
                             bounds.mins = Vec3::ZERO;
                             bounds.maxs = Vec3::ZERO;
-                            if let Some(h) = audio_bank.get_or_load_sound(
+                            if let Some(h) = audio.bank.get_or_load_sound(
                                 "radio/hosdown.wav",
-                                &search_paths.dirs,
-                                &mut audio_sources,
+                                &audio.search_paths.dirs,
+                                &mut audio.sources,
                             ) {
                                 commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
                             }
@@ -438,10 +476,10 @@ pub fn viewmodel_input_system(
                 }
             };
 
-            if let Some(handle) = audio_bank.get_or_load_sound(
+            if let Some(handle) = audio.bank.get_or_load_sound(
                 sound_name,
-                &search_paths.dirs,
-                &mut audio_sources,
+                &audio.search_paths.dirs,
+                &mut audio.sources,
             ) {
                 commands.spawn((AudioPlayer::new(handle), PlaybackSettings::DESPAWN));
             }
@@ -488,15 +526,24 @@ pub fn viewmodel_input_system(
                     if let Ok((_, mut hostage, mut h_anim, mut bounds, h_t)) =
                         hostage_query.get_mut(h_ent)
                     {
+                        crate::sprite::spawn_blood_sprite(
+                            &mut commands,
+                            h_t.translation() + Vec3::Y * 36.0,
+                            &mut vfx.sprite_store,
+                            &audio.search_paths,
+                            &mut vfx.images,
+                            &mut vfx.materials,
+                            &mut vfx.meshes,
+                        );
                         hostage.health -= damage;
                         if hostage.health > 0.0 {
                             h_anim.set_sequence(7, 30.0, false); // flinch
                             let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
                             let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
-                            if let Some(h) = audio_bank.get_or_load_sound(
+                            if let Some(h) = audio.bank.get_or_load_sound(
                                 &pain_snd,
-                                &search_paths.dirs,
-                                &mut audio_sources,
+                                &audio.search_paths.dirs,
+                                &mut audio.sources,
                             ) {
                                 commands.spawn((
                                     AudioPlayer::new(h),
@@ -509,10 +556,10 @@ pub fn viewmodel_input_system(
                             h_anim.set_sequence(31, 24.0, false); // diesimple
                             bounds.mins = Vec3::ZERO;
                             bounds.maxs = Vec3::ZERO;
-                            if let Some(h) = audio_bank.get_or_load_sound(
+                            if let Some(h) = audio.bank.get_or_load_sound(
                                 "radio/hosdown.wav",
-                                &search_paths.dirs,
-                                &mut audio_sources,
+                                &audio.search_paths.dirs,
+                                &mut audio.sources,
                             ) {
                                 commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
                             }
@@ -537,10 +584,10 @@ pub fn viewmodel_input_system(
             anim.set_sequence(target_seq, stab_fps, false);
             vm.attack_cooldown = 1.0;
 
-            if let Some(handle) = audio_bank.get_or_load_sound(
+            if let Some(handle) = audio.bank.get_or_load_sound(
                 sound_name,
-                &search_paths.dirs,
-                &mut audio_sources,
+                &audio.search_paths.dirs,
+                &mut audio.sources,
             ) {
                 commands.spawn((AudioPlayer::new(handle), PlaybackSettings::DESPAWN));
             }
@@ -598,15 +645,14 @@ pub fn viewmodel_bob_and_sway_system(
         vm.current_sway.x = vm.current_sway.x.lerp(target_sway_x, dt * 12.0);
         vm.current_sway.y = vm.current_sway.y.lerp(target_sway_y, dt * 12.0);
 
-        transform.rotation = Quat::from_rotation_y(vm.current_sway.x)
-            * Quat::from_rotation_x(vm.current_sway.y);
+        transform.rotation =
+            Quat::from_rotation_y(vm.current_sway.x) * Quat::from_rotation_x(vm.current_sway.y);
+        transform.scale = Vec3::new(-1.0, 1.0, 1.0);
     }
 }
 
 /// True Hor+ Widescreen FOV system for the player camera.
-pub fn widescreen_horplus_fov_system(
-    mut query: Query<&mut Projection, With<Camera3d>>,
-) {
+pub fn widescreen_horplus_fov_system(mut query: Query<&mut Projection, With<Camera3d>>) {
     // Hor+ vertical FOV keeping 4:3 90-degree framing invariant:
     // tan(90 deg / 2) * 0.75 = 0.75 -> VFOV = 2 * atan(0.75) ≈ 1.2870022 rad (73.74 degrees)
     const HORPLUS_VFOV_RAD: f32 = 1.287_002_2;

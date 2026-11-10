@@ -9,6 +9,7 @@
 ## 1. Executive Summary & Philosophy
 
 In 1998, GoldSrc shipped as an evolution of the Quake engine, customized C game DLLs, and 8-bit audio/rendering routines. Over the subsequent 25+ years, millions of players and competitive tournaments uncovered thousands of engine limitations, exploits, and quirks:
+
 - Floating-point inaccuracy on ladders and steep ramps causing abrupt drops.
 - Jittery skeletal animation updates locked to 20–30 FPS tick frames on 144–360 Hz displays.
 - 4:3 FOV stretching on 16:9 / 21:9 ultrawide monitors distorting viewmodels and clipping meshes.
@@ -39,7 +40,7 @@ Our local workspace (`D:/Repo/GoldSrc.rs/references/`) and community canon inclu
 
 ## 3. The 6-Layer Architecture Matrix
 
-```
+```text
        +-----------------------------------------------------------+
        | Layer 6: Security, Sandbox & FastDL (NextClient / ReHLDS) |
        +-----------------------------------------------------------+
@@ -140,7 +141,7 @@ Our local workspace (`D:/Repo/GoldSrc.rs/references/`) and community canon inclu
 
 As demonstrated in GoldClient and NextClient, the modern tactical radar is a multi-tier HUD subsystem:
 
-```
+```text
 +--------------------------------------------------------------+
 | 1. Dynamic Map Overview Layer                                |
 |    - Vector geometry extracted from BSP floor leaves         |

@@ -11,6 +11,7 @@ pub mod hud;
 pub mod level;
 pub mod mesh_bridge;
 pub mod player;
+pub mod sprite;
 pub mod studio;
 pub mod video_settings;
 pub mod window;
@@ -27,6 +28,7 @@ pub use camera::{SpectatorCamera, SpectatorCameraPlugin};
 pub use level::LevelPlugin;
 pub use mesh_bridge::{PartitionedMesh, to_bevy_mesh, to_bevy_submeshes};
 pub use player::{CameraControlMode, LevelCollisionResource, PlayerController, PlayerPlugin};
+pub use sprite::{SpritePlugin, SpriteStore};
 pub use studio::{
     BspEntitiesLump, StudioAnimatedModel, StudioModelData, StudioModelPlugin, StudioModelStore,
     ViewModelWeapon, WorldStudioEntity,
@@ -70,6 +72,7 @@ pub fn build_goldhub_app() -> App {
         GoldSrcAudioPlugin,
         StudioModelPlugin,
         EntityRuntimePlugin,
+        SpritePlugin,
         combat::CombatPlugin,
         hud::HudPlugin,
     ));

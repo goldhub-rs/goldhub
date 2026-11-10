@@ -509,7 +509,12 @@ fn test_decode_real_studio_models() {
         assert!(!model.rig.sequences.is_empty(), "chick has sequences");
         println!(
             "Chick sequences: {:?}",
-            model.rig.sequences.iter().map(|s| &s.name).collect::<Vec<_>>()
+            model
+                .rig
+                .sequences
+                .iter()
+                .map(|s| &s.name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -523,7 +528,177 @@ fn test_decode_real_studio_models() {
         println!("Hostage textures: {}", model.textures.len());
         println!(
             "Hostage sequences: {:?}",
-            model.rig.sequences.iter().map(|s| &s.name).collect::<Vec<_>>()
+            model
+                .rig
+                .sequences
+                .iter()
+                .map(|s| &s.name)
+                .collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+fn test_decode_real_sprites() {
+    use goldhub_formats::codecs::legacy::SpriteDecoder;
+
+    let decoder = SpriteDecoder;
+
+    let blood_path = Path::new("C:/Games/CS 1.6 GoldClient/valve/sprites/blood.spr");
+    if blood_path.exists() {
+        let bytes = fs::read(blood_path).unwrap();
+        let sprite = decoder.decode(&bytes).expect("decode blood.spr");
+        assert_eq!(sprite.frames.len(), 9);
+        assert_eq!(sprite.max_width, 16);
+        assert_eq!(sprite.max_height, 16);
+        assert_eq!(sprite.frames[0].rgba_pixels.len(), 16 * 16 * 4);
+        println!("Decoded blood.spr: 9 frames, 16x16");
+    }
+
+    let muzzle_path = Path::new("C:/Games/CS 1.6 GoldClient/valve/sprites/muzzleflash1.spr");
+    if muzzle_path.exists() {
+        let bytes = fs::read(muzzle_path).unwrap();
+        let sprite = decoder.decode(&bytes).expect("decode muzzleflash1.spr");
+        assert_eq!(sprite.frames.len(), 2);
+        assert_eq!(sprite.max_width, 64);
+        assert_eq!(sprite.max_height, 64);
+        assert_eq!(sprite.frames[0].rgba_pixels.len(), 64 * 64 * 4);
+        println!("Decoded muzzleflash1.spr: 2 frames, 64x64");
+    }
+
+    let explode_path = Path::new("C:/Games/CS 1.6 GoldClient/valve/sprites/zerogxplode.spr");
+    if explode_path.exists() {
+        let bytes = fs::read(explode_path).unwrap();
+        let sprite = decoder.decode(&bytes).expect("decode zerogxplode.spr");
+        assert_eq!(sprite.frames.len(), 15);
+        assert_eq!(sprite.max_width, 64);
+        assert_eq!(sprite.max_height, 64);
+        assert_eq!(sprite.frames[0].rgba_pixels.len(), 64 * 64 * 4);
+        println!("Decoded zerogxplode.spr: 15 frames, 64x64");
+    }
+}
+
+#[test]
+fn test_inspect_wine_and_chick() {
+    let chick_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/chick.mdl");
+    if chick_path.exists() {
+        let bytes = fs::read(chick_path).unwrap();
+        let mdl: StudioModel = StudioMdlDecoder.decode(&bytes).expect("decode chick.mdl");
+        let mut min_z = f32::INFINITY;
+        let mut max_z = f32::NEG_INFINITY;
+        for bp in &mdl.body_parts {
+            for m in &bp.models {
+                for mesh in &m.meshes {
+                    for v in &mesh.vertices {
+                        min_z = min_z.min(v.position[2]);
+                        max_z = max_z.max(v.position[2]);
+                    }
+                }
+            }
+        }
+        println!(
+            "chick.mdl body_parts: {}, Z: {} .. {}",
+            mdl.body_parts.len(),
+            min_z,
+            max_z
+        );
+    }
+
+    let wine_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/winebottle.mdl");
+    if wine_path.exists() {
+        let bytes = fs::read(wine_path).unwrap();
+        let mdl: StudioModel = StudioMdlDecoder
+            .decode(&bytes)
+            .expect("decode winebottle.mdl");
+        let mut min_z = f32::INFINITY;
+        let mut max_z = f32::NEG_INFINITY;
+        for bp in &mdl.body_parts {
+            for m in &bp.models {
+                for mesh in &m.meshes {
+                    for v in &mesh.vertices {
+                        min_z = min_z.min(v.position[2]);
+                        max_z = max_z.max(v.position[2]);
+                    }
+                }
+            }
+        }
+        println!(
+            "winebottle.mdl body_parts: {}, Z: {} .. {}",
+            mdl.body_parts.len(),
+            min_z,
+            max_z
+        );
+    }
+}
+
+#[test]
+fn test_inspect_shot_decal() {
+    let wad_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/decals.wad");
+    if !wad_path.exists() {
+        return;
+    }
+    let bytes = fs::read(wad_path).unwrap();
+    let wad = Wad3Decoder.decode(&bytes).unwrap();
+    let entry = wad.find_entry("{shot1").expect("find {shot1");
+    let desc = wad.unpack_miptex(entry).expect("unpack {shot1");
+    assert_eq!(desc.width, 16);
+    assert_eq!(desc.height, 16);
+    // Background pixel (index 0) must be 100% transparent (alpha == 0)
+    assert_eq!(desc.mips[0].data[3], 0);
+    // Bullet center must have non-zero alpha
+    let has_visible_pixels = desc.mips[0]
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|p| p[3] > 0);
+    assert!(
+        has_visible_pixels,
+        "{{shot1 decal must contain visible pixels"
+    );
+}
+
+#[test]
+fn test_inspect_weapon_model_events() {
+    let ak_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/v_ak47.mdl");
+    if !ak_path.exists() {
+        return;
+    }
+    let bytes = fs::read(ak_path).unwrap();
+    let decoder = StudioMdlDecoder;
+    let model: StudioModel = decoder.decode(&bytes).unwrap();
+    for (i, seq) in model.rig.sequences.iter().enumerate() {
+        println!("AK seq [{i}] '{}' events: {}", seq.name, seq.events.len());
+        for ev in &seq.events {
+            println!(
+                "  ev frame: {}, event: {}, type: {}, options: '{}'",
+                ev.frame, ev.event, ev.event_type, ev.options
+            );
+        }
+    }
+}
+
+#[test]
+fn test_inspect_urban_player_model() {
+    let path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/player/urban/urban.mdl");
+    if !path.exists() {
+        return;
+    }
+    let bytes = fs::read(path).unwrap();
+    let decoder = StudioMdlDecoder;
+    let model: StudioModel = decoder.decode(&bytes).unwrap();
+    assert_eq!(model.rig.bones.len(), 23, "urban.mdl should have 23 bones");
+    assert!(
+        model.rig.sequences.len() >= 100,
+        "urban.mdl has >100 sequences"
+    );
+    // Verify ref_aim_ak47 sequence has valid bone matrices sampled from center blend (blend 4)
+    let ak_aim = model
+        .rig
+        .sequences
+        .iter()
+        .find(|s| s.name == "ref_aim_ak47")
+        .expect("find ref_aim_ak47");
+    assert_eq!(ak_aim.bone_matrices.len(), 2);
+    assert_eq!(ak_aim.bone_matrices[0].len(), 23);
 }

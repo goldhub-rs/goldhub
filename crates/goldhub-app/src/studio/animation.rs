@@ -14,6 +14,7 @@ pub struct StudioAnimatedModel {
     pub fps: f32,
     pub is_looping: bool,
     pub is_viewmodel: bool,
+    pub last_event_frame: i32,
     /// List of (child_entity, mesh_asset_handle, submesh_index)
     pub mesh_entities: Vec<(Entity, Handle<Mesh>, usize)>,
     /// Interpolated bone transforms evaluated during the current frame.
@@ -31,6 +32,7 @@ impl StudioAnimatedModel {
             fps: 30.0,
             is_looping: true,
             is_viewmodel,
+            last_event_frame: -1,
             mesh_entities: Vec::new(),
             current_bone_transforms: Vec::new(),
         }
@@ -43,14 +45,20 @@ impl StudioAnimatedModel {
             self.frame_progress = 0.0;
             self.fps = fps;
             self.is_looping = looping;
+            self.last_event_frame = -1;
         }
     }
 }
 
 /// Evaluates skeletal bone poses at sub-frame precision and skins vertex attributes in-place.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn studio_animation_system(
+    mut commands: Commands,
     time: Res<Time>,
     model_store: Res<StudioModelStore>,
+    search_paths: Option<Res<crate::audio::GameSearchPaths>>,
+    mut audio_bank: Option<ResMut<crate::audio::GoldSrcAudioBank>>,
+    mut audio_sources: Option<ResMut<Assets<AudioSource>>>,
     mut query: Query<&mut StudioAnimatedModel>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
@@ -81,9 +89,36 @@ pub fn studio_animation_system(
 
         let total_f = num_frames as f32;
         if anim.is_looping {
+            if anim.frame_progress >= total_f {
+                anim.last_event_frame = -1;
+            }
             anim.frame_progress = anim.frame_progress.rem_euclid(total_f);
         } else if anim.frame_progress >= (total_f - 1.0).max(0.0) {
             anim.frame_progress = (total_f - 1.0).max(0.0);
+        }
+
+        // 2. Dispatch sequence audio events (mstudioevent_t 5004 sound playback)
+        let cur_frame_i32 = anim.frame_progress.floor() as i32;
+        if cur_frame_i32 != anim.last_event_frame {
+            for ev in &seq.events {
+                if ev.frame > anim.last_event_frame
+                    && ev.frame <= cur_frame_i32
+                    && !ev.options.is_empty()
+                    && (std::path::Path::new(&ev.options)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+                        || ev.options.contains('/'))
+                    && let (Some(paths), Some(ref mut bank), Some(ref mut sources)) = (
+                        search_paths.as_ref(),
+                        audio_bank.as_mut(),
+                        audio_sources.as_mut(),
+                    )
+                    && let Some(h) = bank.get_or_load_sound(&ev.options, &paths.dirs, sources)
+                {
+                    commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+                }
+            }
+            anim.last_event_frame = cur_frame_i32;
         }
 
         // 2. Compute SLERP interpolated bone matrices for the current fractional frame

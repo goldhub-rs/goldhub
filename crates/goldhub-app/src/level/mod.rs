@@ -98,7 +98,10 @@ pub fn setup_level(
             dirs: search_dirs.clone(),
         });
 
-        let search_dirs_refs: Vec<&Path> = search_dirs.iter().map(std::path::PathBuf::as_path).collect();
+        let search_dirs_refs: Vec<&Path> = search_dirs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
         if let Ok((mesh_buffer, textures, lightmap_atlas, sky_name)) =
             pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs_refs)

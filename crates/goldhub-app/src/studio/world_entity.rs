@@ -3,10 +3,10 @@
 use bevy::prelude::*;
 use goldhub_physics::WorldTrace;
 
-use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
-use crate::player::LevelCollisionResource;
 use super::animation::StudioAnimatedModel;
 use super::store::{StudioModelStore, create_initial_bevy_mesh};
+use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
+use crate::player::LevelCollisionResource;
 
 /// Resource holding the raw text entity lump from the active BSP level.
 #[derive(Resource, Default, Clone)]
@@ -53,7 +53,11 @@ pub struct HostageEntity {
 }
 
 /// Spawns interactive 3D studio entities parsed from the BSP map's entity lump.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity
+)]
 pub fn spawn_map_studio_entities(
     mut commands: Commands,
     mut model_store: ResMut<StudioModelStore>,
@@ -150,12 +154,10 @@ pub fn spawn_map_studio_entities(
             let is_solid = is_hostage;
 
             // Authentic GoldSrc DROP_TO_FLOOR:
-            // In GoldSrc engine (ReGameDLL), DROP_TO_FLOOR is only executed by monsters/NPCs (CHostage, CBaseMonster).
-            // Static visual props (cycler_sprite, env_model) are placed at exact map author coordinates (e.g. on tables).
+            // In GoldSrc engine (ReGameDLL), DROP_TO_FLOOR is executed by monsters/NPCs (CHostage, CBaseMonster).
+            // Static cycler_sprite props (chickens, bottles) use the mapper's exact origin so they don't trace into breakable boxes.
             let mut floor_z = gz;
-            if is_hostage
-                && let Some(ref col_model) = collision_res.model
-            {
+            if is_hostage && let Some(ref col_model) = collision_res.model {
                 use goldhub_physics::WorldTrace;
                 let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
                 for start_offset in [16.0f32, 8.0, 24.0, 0.0, 32.0] {
@@ -365,7 +367,11 @@ pub fn spawn_studio_entity(
 }
 
 /// Upkeep tick and follow movement for hostages.
-#[allow(clippy::too_many_arguments, clippy::type_complexity, clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
 pub fn hostage_interaction_and_ai_system(
     mut commands: Commands,
     time: Res<Time>,
@@ -377,14 +383,17 @@ pub fn hostage_interaction_and_ai_system(
     model_store: Res<StudioModelStore>,
     player_query: Query<(Entity, &Transform, &crate::player::PlayerController)>,
     rescue_query: Query<&crate::entity::HostageRescueZoneEntity>,
-    mut hostage_query: Query<(
-        Entity,
-        &mut HostageEntity,
-        &mut Transform,
-        &mut StudioAnimatedModel,
-        &mut EntityCollisionBounds,
-        &mut Visibility,
-    ), Without<crate::player::PlayerController>>,
+    mut hostage_query: Query<
+        (
+            Entity,
+            &mut HostageEntity,
+            &mut Transform,
+            &mut StudioAnimatedModel,
+            &mut EntityCollisionBounds,
+            &mut Visibility,
+        ),
+        Without<crate::player::PlayerController>,
+    >,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -428,7 +437,9 @@ pub fn hostage_interaction_and_ai_system(
                 // Play follow sound hostage/hos1..5.wav
                 let snd_idx = ((time.elapsed_secs() * 100.0) as usize % 5) + 1;
                 let snd_name = format!("hostage/hos{snd_idx}.wav");
-                if let Some(h) = audio_bank.get_or_load_sound(&snd_name, &search_paths.dirs, &mut audio_sources) {
+                if let Some(h) =
+                    audio_bank.get_or_load_sound(&snd_name, &search_paths.dirs, &mut audio_sources)
+                {
                     commands.spawn((
                         AudioPlayer::new(h),
                         PlaybackSettings::DESPAWN.with_spatial(true),
@@ -480,8 +491,16 @@ pub fn hostage_interaction_and_ai_system(
                 // Snap feet to ground using BSP collision trace
                 if let Some(ref col_model) = collision_res.model {
                     let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
-                    let gs_start = [h_t.translation.x, -h_t.translation.z, h_t.translation.y + 16.0];
-                    let gs_end = [h_t.translation.x, -h_t.translation.z, h_t.translation.y - 128.0];
+                    let gs_start = [
+                        h_t.translation.x,
+                        -h_t.translation.z,
+                        h_t.translation.y + 16.0,
+                    ];
+                    let gs_end = [
+                        h_t.translation.x,
+                        -h_t.translation.z,
+                        h_t.translation.y - 128.0,
+                    ];
                     let tr = bsp_world.trace_player_hull(gs_start, gs_end, 0);
                     if tr.fraction < 1.0 {
                         h_t.translation.y = tr.endpos[2];
@@ -515,7 +534,11 @@ pub fn hostage_interaction_and_ai_system(
                     bounds.mins = Vec3::ZERO;
                     bounds.maxs = Vec3::ZERO;
 
-                    if let Some(h) = audio_bank.get_or_load_sound("radio/rescued.wav", &search_paths.dirs, &mut audio_sources) {
+                    if let Some(h) = audio_bank.get_or_load_sound(
+                        "radio/rescued.wav",
+                        &search_paths.dirs,
+                        &mut audio_sources,
+                    ) {
                         commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
                     }
                     tracing::info!(hostage = ?h_ent, "Hostage successfully rescued in rescue zone!");

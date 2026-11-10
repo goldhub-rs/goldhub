@@ -46,6 +46,7 @@ pub struct PlayerController {
     pub is_active: bool,
     pub step_controller: goldhub_audio::StepSoundController,
     pub was_on_ground: bool,
+    pub health: f32,
     pub seed_step: u8,
     pub seed_vol: u8,
 }
@@ -60,6 +61,7 @@ impl Default for PlayerController {
             is_active: true,
             step_controller: goldhub_audio::StepSoundController::default(),
             was_on_ground: false,
+            health: 100.0,
             seed_step: 0,
             seed_vol: 0,
         }
@@ -103,7 +105,10 @@ impl Plugin for PlayerPlugin {
 fn player_flashlight_system(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut camera_query: Query<(Entity, &mut PlayerFlashlight), (With<Camera3d>, With<PlayerController>)>,
+    mut camera_query: Query<
+        (Entity, &mut PlayerFlashlight),
+        (With<Camera3d>, With<PlayerController>),
+    >,
     search_paths: Option<Res<crate::audio::GameSearchPaths>>,
     mut audio_bank: Option<ResMut<crate::audio::GoldSrcAudioBank>>,
     mut audio_sources: Option<ResMut<Assets<AudioSource>>>,
@@ -122,11 +127,11 @@ fn player_flashlight_system(
         let light = commands
             .spawn((
                 SpotLight {
-                    color: Color::srgb(0.95, 0.98, 1.0),
-                    intensity: 15_000.0,
-                    range: 60.0,
+                    color: Color::srgb(0.96, 0.98, 1.0),
+                    intensity: 25_000_000.0,
+                    range: 2000.0,
                     inner_angle: 18.0f32.to_radians(),
-                    outer_angle: 28.0f32.to_radians(),
+                    outer_angle: 32.0f32.to_radians(),
                     shadows_enabled: false,
                     ..default()
                 },
@@ -144,10 +149,7 @@ fn player_flashlight_system(
         (search_paths, audio_bank.as_mut(), audio_sources.as_mut())
         && let Some(handle) = bank.get_or_load_sound("items/flashlight1.wav", &paths.dirs, sources)
     {
-        commands.spawn((
-            AudioPlayer::new(handle),
-            PlaybackSettings::DESPAWN,
-        ));
+        commands.spawn((AudioPlayer::new(handle), PlaybackSettings::DESPAWN));
     }
 }
 
@@ -237,7 +239,11 @@ pub fn player_movement_system(
     collision_res: Res<LevelCollisionResource>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
-    mut query: Query<(&mut Transform, &mut PlayerController, Option<&crate::combat::PlayerRecoil>)>,
+    mut query: Query<(
+        &mut Transform,
+        &mut PlayerController,
+        Option<&crate::combat::PlayerRecoil>,
+    )>,
     solid_query: Query<
         (
             &Transform,
@@ -357,10 +363,36 @@ pub fn player_movement_system(
             player.sim.advance(dt, &cmd, &composite);
         }
 
-        // 4. Interpolate origin & view height for smooth sub-frame rendering
+        // 4. Fall damage and impact landing punch
+        let just_landed = !player.was_on_ground && player.sim.current.on_ground;
+        player.was_on_ground = player.sim.current.on_ground;
+        if just_landed {
+            let fvel = player.sim.current.fall_velocity;
+            if fvel > 580.0 {
+                player.pitch -= (fvel - 580.0) * 0.0004;
+                if fvel > 700.0 {
+                    let dmg = (((fvel - 700.0) / 324.0) * 100.0).clamp(5.0, 100.0);
+                    player.health = (player.health - dmg).max(0.0);
+                    let pain_snd = if fvel > 880.0 {
+                        "player/pl_fallpain1.wav"
+                    } else {
+                        "player/pl_pain2.wav"
+                    };
+                    if let Some(h) = audio_bank.get_or_load_sound(
+                        pain_snd,
+                        &search_paths.dirs,
+                        &mut audio_sources,
+                    ) {
+                        commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+                    }
+                }
+            }
+        }
+
+        // 5. Interpolate origin & view height for smooth sub-frame rendering
         let (gs_pos, view_h) = player.sim.interpolate_for_render();
 
-        // 5. Coordinate system transformation from GoldSrc (Z-up) to Bevy (Y-up)
+        // 6. Coordinate system transformation from GoldSrc (Z-up) to Bevy (Y-up)
         let eye_pos = Vec3::new(gs_pos[0], gs_pos[2] + view_h, -gs_pos[1]);
         let (punch_pitch, punch_yaw) = recoil.map_or((0.0, 0.0), |r| {
             (r.punch_pitch.to_radians(), r.punch_yaw.to_radians())
@@ -374,19 +406,22 @@ pub fn player_movement_system(
             let back_dir = cam_rot * Vec3::Z;
             let target_pos = eye_pos + back_dir * THIRD_PERSON_DIST;
 
-            collision_res.model.as_ref().map_or(target_pos, |col_model| {
-                use goldhub_physics::WorldTrace;
-                let bsp_world = BspWorldCollision::new(col_model);
-                let gs_eye = [eye_pos.x, -eye_pos.z, eye_pos.y];
-                let gs_target = [target_pos.x, -target_pos.z, target_pos.y];
-                let tr = bsp_world.trace_player_hull(gs_eye, gs_target, 0);
-                if tr.fraction < 1.0 {
-                    let clipped_dist = (tr.fraction * THIRD_PERSON_DIST - 4.0).max(8.0);
-                    eye_pos + back_dir * clipped_dist
-                } else {
-                    target_pos
-                }
-            })
+            collision_res
+                .model
+                .as_ref()
+                .map_or(target_pos, |col_model| {
+                    use goldhub_physics::WorldTrace;
+                    let bsp_world = BspWorldCollision::new(col_model);
+                    let gs_eye = [eye_pos.x, -eye_pos.z, eye_pos.y];
+                    let gs_target = [target_pos.x, -target_pos.z, target_pos.y];
+                    let tr = bsp_world.trace_player_hull(gs_eye, gs_target, 0);
+                    if tr.fraction < 1.0 {
+                        let clipped_dist = (tr.fraction * THIRD_PERSON_DIST - 4.0).max(8.0);
+                        eye_pos + back_dir * clipped_dist
+                    } else {
+                        target_pos
+                    }
+                })
         } else {
             eye_pos
         };
@@ -540,8 +575,9 @@ fn spawn_player_character_model_system(
     let parent = commands
         .spawn((
             PlayerCharacterModel,
-            Transform::from_translation(player_transform.translation)
-                .with_rotation(Quat::from_rotation_y(player.yaw + std::f32::consts::FRAC_PI_2)),
+            Transform::from_translation(player_transform.translation).with_rotation(
+                Quat::from_rotation_y(player.yaw + std::f32::consts::FRAC_PI_2),
+            ),
             Visibility::Hidden, // Hidden in 1st person by default
         ))
         .id();
@@ -579,6 +615,7 @@ fn update_player_character_model_system(
     mode: Res<CameraControlMode>,
     perspective: Res<CameraPerspective>,
     player_query: Query<(&PlayerController, Option<&crate::combat::ActiveWeaponState>)>,
+    model_store: Res<crate::studio::StudioModelStore>,
     mut model_query: Query<
         (
             &mut Transform,
@@ -608,29 +645,55 @@ fn update_player_character_model_system(
 
     let on_ground = player.sim.current.on_ground;
     let is_crouching = player.sim.current.is_ducking;
+    let speed = player.sim.current.horizontal_speed();
 
-    let anim_ext = active_weapon
-        .map_or("knife", |w| crate::combat::get_weapon_def(w.id).anim_extension);
+    let anim_ext = active_weapon.map_or("knife", |w| {
+        crate::combat::get_weapon_def(w.id).anim_extension
+    });
 
-    // Match ReGameDLL GetAnimDesired for upper body
-    #[allow(clippy::match_same_arms)]
-    let (aim_seq, aim_fps, crouch_seq, crouch_fps) = match anim_ext {
-        "knife" => (75, 12.0, 73, 12.0),     // ref_aim_knife, crouch_aim_knife
-        "onehanded" => (19, 30.0, 16, 30.0), // ref_aim_onehanded, crouch_aim_onehanded
-        "ak47" => (80, 30.0, 77, 30.0),      // ref_aim_ak47, crouch_aim_ak47
-        "rifle" => (33, 30.0, 30, 30.0),     // ref_aim_rifle, crouch_aim_rifle
-        _ => (80, 30.0, 77, 30.0),
-    };
-
-    let (seq, fps) = if !on_ground {
-        (6, 30.0) // jump
-    } else if is_crouching {
-        (crouch_seq, crouch_fps)
+    if !on_ground {
+        anim.set_sequence(6, 30.0, true); // jump
+    } else if speed > 10.0 {
+        if is_crouching {
+            anim.set_sequence(5, 30.0, true); // crouchrun
+        } else if speed > 150.0 {
+            anim.set_sequence(4, 30.0, true); // run
+        } else {
+            anim.set_sequence(3, 30.0, true); // walk
+        }
     } else {
-        (aim_seq, aim_fps)
-    };
+        // Authentic CS 1.6 standing/crouching weapon-specific aim poses (ReGameDLL GetAnimDesired)
+        let normalized_id = anim.model_id.replace('\\', "/").to_lowercase();
+        let target_seq_name = format!(
+            "{}_{}",
+            if is_crouching {
+                "crouch_aim"
+            } else {
+                "ref_aim"
+            },
+            anim_ext
+        );
 
-    anim.set_sequence(seq, fps, true);
+        let seq_idx = model_store
+            .models
+            .get(&normalized_id)
+            .and_then(|m| {
+                m.model
+                    .rig
+                    .sequences
+                    .iter()
+                    .position(|s| s.name.eq_ignore_ascii_case(&target_seq_name))
+            })
+            .unwrap_or(if is_crouching { 2 } else { 1 });
+
+        let fps = model_store
+            .models
+            .get(&normalized_id)
+            .and_then(|m| m.model.rig.sequences.get(seq_idx))
+            .map_or(15.0, |s| s.fps);
+
+        anim.set_sequence(seq_idx, fps, true);
+    }
 
     if *perspective == CameraPerspective::ThirdPerson {
         transform.translation = base_origin;
@@ -640,12 +703,19 @@ fn update_player_character_model_system(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity, clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
 fn update_third_person_weapon_system(
     mut commands: Commands,
     perspective: Res<CameraPerspective>,
     player_query: Query<Option<&crate::combat::ActiveWeaponState>, With<PlayerController>>,
-    model_parent_query: Query<(Entity, &crate::studio::StudioAnimatedModel), With<PlayerCharacterModel>>,
+    model_parent_query: Query<
+        (Entity, &crate::studio::StudioAnimatedModel),
+        With<PlayerCharacterModel>,
+    >,
     mut weapon_query: Query<(Entity, &mut PlayerThirdPersonWeapon)>,
     mut visibility_query: Query<&mut Visibility, Without<PlayerCharacterModel>>,
     mut model_store: ResMut<crate::studio::StudioModelStore>,
@@ -704,7 +774,9 @@ fn update_third_person_weapon_system(
                     ))
                     .id();
                 commands.entity(parent_entity).add_child(child);
-                weapon_data.mesh_entities.push((child, mesh_handle, sub_idx));
+                weapon_data
+                    .mesh_entities
+                    .push((child, mesh_handle, sub_idx));
             }
         }
     }

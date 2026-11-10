@@ -854,7 +854,7 @@ mod tests {
                 unduck_transition_verified = true;
             }
 
-            prev_eye_z = eye_z;
+            let _ = eye_z;
         }
 
         assert!(

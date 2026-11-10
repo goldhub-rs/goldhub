@@ -13,11 +13,18 @@ struct SimpleRng(u64);
 
 impl SimpleRng {
     fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x5851_f42d_4c95_7f2d } else { seed })
+        Self(if seed == 0 {
+            0x5851_f42d_4c95_7f2d
+        } else {
+            seed
+        })
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         (self.0 >> 32) as u32
     }
 
@@ -109,6 +116,7 @@ pub struct DoorEntity {
     pub wait_timer: f32,
     pub state: DoorState,
     pub is_rotating: bool,
+    pub is_toggle: bool,
     pub use_only: bool,
     pub hinge_origin: Vec3,
     pub start_pos: Vec3,
@@ -299,6 +307,7 @@ pub fn spawn_bsp_interactive_entities(
         let mut movesnd_str = "";
         let mut stopsnd_str = "";
         let mut distance_str = "";
+        let mut lip_str = "";
         let mut angles_str = "";
 
         for line in block.lines() {
@@ -328,7 +337,10 @@ pub fn spawn_bsp_interactive_entities(
                         "movesnd" => movesnd_str = parts[3],
                         "stopsnd" => stopsnd_str = parts[3],
                         "distance" => distance_str = parts[3],
-                        "angles" => angles_str = parts[3],
+                        "lip" => lip_str = parts[3],
+                        "angle" | "angles" if angles_str.is_empty() => {
+                            angles_str = parts[3];
+                        }
                         _ => {}
                     }
                 }
@@ -364,7 +376,10 @@ pub fn spawn_bsp_interactive_entities(
                 let (bmin, bmax) = if model_str.starts_with('*') {
                     get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref())
                 } else {
-                    (bevy_origin - Vec3::splat(16.0), bevy_origin + Vec3::splat(16.0))
+                    (
+                        bevy_origin - Vec3::splat(16.0),
+                        bevy_origin + Vec3::splat(16.0),
+                    )
                 };
 
                 commands.spawn((
@@ -396,15 +411,26 @@ pub fn spawn_bsp_interactive_entities(
                 let is_rotating = classname == "func_door_rotating";
                 let speed = speed_str.parse::<f32>().unwrap_or(100.0).max(10.0);
                 let wait = wait_str.parse::<f32>().unwrap_or(4.0);
-                let movesnd = movesnd_str.parse::<u32>().unwrap_or(1);
-                let stopsnd = stopsnd_str.parse::<u32>().unwrap_or(1);
-                let move_sound = Some(format!("doors/doormove{}.wav", movesnd.clamp(1, 10)));
-                let stop_sound = Some(format!("doors/doorstop{}.wav", stopsnd.clamp(1, 8)));
+                let movesnd = movesnd_str.parse::<u32>().unwrap_or(0);
+                let stopsnd = stopsnd_str.parse::<u32>().unwrap_or(0);
+                let move_sound = if movesnd > 0 {
+                    Some(format!("doors/doormove{}.wav", movesnd.clamp(1, 10)))
+                } else {
+                    None
+                };
+                let stop_sound = if stopsnd > 0 {
+                    Some(format!("doors/doorstop{}.wav", stopsnd.clamp(1, 8)))
+                } else {
+                    None
+                };
                 let distance = distance_str.parse::<f32>().unwrap_or(90.0);
+                let lip = lip_str.parse::<f32>().unwrap_or(0.0);
 
-                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                let (bmin, bmax) =
+                    get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
                 let center = (bmin + bmax) * 0.5;
                 let spawnflags = spawnflags_str.parse::<u32>().unwrap_or(0);
+                let is_toggle = (spawnflags & 32) != 0 || wait < 0.0;
                 let use_only = (spawnflags & 256) != 0;
                 let reverse = (spawnflags & 2) != 0;
                 let hinge_origin = if origin_str.is_empty() {
@@ -416,11 +442,16 @@ pub fn spawn_bsp_interactive_entities(
                 let (start_pos, target_pos, start_rot, target_rot) = if is_rotating {
                     let angle_deg = if reverse { -distance } else { distance };
                     let angle_rad = angle_deg.to_radians();
-                    (center, center, Quat::IDENTITY, Quat::from_rotation_y(angle_rad))
+                    (
+                        center,
+                        center,
+                        Quat::IDENTITY,
+                        Quat::from_rotation_y(angle_rad),
+                    )
                 } else {
-                    let move_dir = if angles_str == "-1 0 0" {
+                    let move_dir = if angles_str == "-1" || angles_str == "-1 0 0" {
                         Vec3::Y
-                    } else if angles_str == "-2 0 0" {
+                    } else if angles_str == "-2" || angles_str == "-2 0 0" {
                         Vec3::NEG_Y
                     } else {
                         let yaw = angles_str
@@ -431,8 +462,15 @@ pub fn spawn_bsp_interactive_entities(
                         let rad = yaw.to_radians();
                         Vec3::new(rad.cos(), 0.0, -rad.sin())
                     };
-                    let dist = (bmax - bmin).dot(move_dir.abs()).max(32.0);
-                    (center, center + move_dir * dist, Quat::IDENTITY, Quat::IDENTITY)
+                    // GoldSrc CBaseDoor::Spawn: dist = (|movedir * (size - 2)|) - lip
+                    let size_along_dir = (bmax - bmin).dot(move_dir.abs());
+                    let dist = ((size_along_dir - 2.0) - lip).max(0.0);
+                    (
+                        center,
+                        center + move_dir * dist,
+                        Quat::IDENTITY,
+                        Quat::IDENTITY,
+                    )
                 };
 
                 commands.spawn((
@@ -445,6 +483,7 @@ pub fn spawn_bsp_interactive_entities(
                         wait_timer: 0.0,
                         state: DoorState::Closed,
                         is_rotating,
+                        is_toggle,
                         use_only,
                         hinge_origin,
                         start_pos,
@@ -569,7 +608,10 @@ pub fn spawn_bsp_interactive_entities(
                 let (bmin, bmax) = if model_str.starts_with('*') {
                     get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref())
                 } else {
-                    (bevy_origin - Vec3::splat(256.0), bevy_origin + Vec3::splat(256.0))
+                    (
+                        bevy_origin - Vec3::splat(256.0),
+                        bevy_origin + Vec3::splat(256.0),
+                    )
                 };
                 commands.spawn((
                     HostageRescueZoneEntity { bmin, bmax },
@@ -580,7 +622,8 @@ pub fn spawn_bsp_interactive_entities(
             }
             "trigger_push" => {
                 let speed = speed_str.parse::<f32>().unwrap_or(100.0).max(10.0);
-                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                let (bmin, bmax) =
+                    get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
                 let yaw = angles_str
                     .split_whitespace()
                     .next()
@@ -588,17 +631,29 @@ pub fn spawn_bsp_interactive_entities(
                     .unwrap_or(0.0);
                 let rad = yaw.to_radians();
                 let dir = Vec3::new(rad.cos(), 0.0, -rad.sin());
-                commands.spawn(TriggerPushEntity { speed, dir, bmin, bmax });
+                commands.spawn(TriggerPushEntity {
+                    speed,
+                    dir,
+                    bmin,
+                    bmax,
+                });
                 tracing::info!(speed = speed, "Spawned trigger_push entity");
             }
             "trigger_hurt" => {
                 let dmg = health_str.parse::<f32>().unwrap_or(10.0).max(1.0);
-                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
-                commands.spawn(TriggerHurtEntity { dmg, bmin, bmax, next_dmg_time: 0.0 });
+                let (bmin, bmax) =
+                    get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                commands.spawn(TriggerHurtEntity {
+                    dmg,
+                    bmin,
+                    bmax,
+                    next_dmg_time: 0.0,
+                });
                 tracing::info!(dmg = dmg, "Spawned trigger_hurt entity");
             }
             "func_buyzone" => {
-                let (bmin, bmax) = get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
+                let (bmin, bmax) =
+                    get_submodel_bounds(model_str, bevy_origin, collision_res.as_ref());
                 commands.spawn(BuyZoneEntity { bmin, bmax });
                 tracing::info!("Spawned func_buyzone entity");
             }
@@ -617,7 +672,10 @@ fn get_submodel_bounds(
         && let Ok(sub_num) = sub_num_str.parse::<usize>()
         && let Some(col_res) = collision_res
         && let Some(ref col_model) = col_res.model
-        && let Some(ent) = col_model.brush_entities.iter().find(|e| e.model_index == sub_num)
+        && let Some(ent) = col_model
+            .brush_entities
+            .iter()
+            .find(|e| e.model_index == sub_num)
     {
         // Exact GoldSrc bounds from BSP submodel:
         // Bevy X = GS X, Bevy Y = GS Z, Bevy Z = -GS Y
@@ -674,7 +732,11 @@ pub fn handle_fire_target_events(
     mut render_query: Query<&EnvRenderEntity>,
     mut audio_query: Query<&mut AmbientAudioEntity>,
     shooter_query: Query<&EnvShooterEntity>,
-    mut studio_query: Query<(&WorldStudioEntity, &mut Visibility)>,
+    mut studio_query: Query<(
+        &WorldStudioEntity,
+        &mut Visibility,
+        Option<&mut crate::studio::world_entity::EntityCollisionBounds>,
+    )>,
     mut model_store: ResMut<StudioModelStore>,
     search_paths: Res<GameSearchPaths>,
     mut audio_bank: ResMut<GoldSrcAudioBank>,
@@ -682,6 +744,7 @@ pub fn handle_fire_target_events(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut door_query: Query<&mut DoorEntity>,
 ) {
     for ev in events.read() {
         if ev.target.is_empty() {
@@ -693,10 +756,17 @@ pub fn handle_fire_target_events(
         // 1. EnvRender: Hide or modify target entities
         for render in &mut render_query {
             if render.targetname == ev.target {
-                for (studio_ent, mut vis) in &mut studio_query {
+                for (studio_ent, mut vis, bounds_opt) in &mut studio_query {
                     if studio_ent.targetname == render.target {
                         *vis = Visibility::Hidden;
-                        tracing::info!(target = render.target, "Hidden WorldStudioEntity via env_render");
+                        if let Some(mut bounds) = bounds_opt {
+                            bounds.mins = Vec3::ZERO;
+                            bounds.maxs = Vec3::ZERO;
+                        }
+                        tracing::info!(
+                            target = render.target,
+                            "Hidden WorldStudioEntity and cleared collision bounds via env_render"
+                        );
                     }
                 }
             }
@@ -711,7 +781,10 @@ pub fn handle_fire_target_events(
                         commands.entity(player_ent).despawn();
                     }
                     ambient.is_playing = false;
-                    tracing::info!(sound = ambient.message, "Stopped ambient_generic looping playback");
+                    tracing::info!(
+                        sound = ambient.message,
+                        "Stopped ambient_generic looping playback"
+                    );
                 } else {
                     // One-shot triggered playback (e.g. chicken death sound)
                     if let Some(handle) = audio_bank.get_or_load_sound(
@@ -746,11 +819,36 @@ pub fn handle_fire_target_events(
                 );
             }
         }
+
+        // 4. Trigger doors with matching targetname
+        for mut door in &mut door_query {
+            if door.targetname == ev.target && door.state == DoorState::Closed {
+                door.state = DoorState::Opening;
+                let center = (door.bmin + door.bmax) * 0.5;
+                if let Some(ref move_snd) = door.move_sound
+                    && let Some(h) = audio_bank.get_or_load_sound(
+                        move_snd,
+                        &search_paths.dirs,
+                        &mut audio_sources,
+                    )
+                {
+                    commands.spawn((
+                        AudioPlayer::new(h),
+                        PlaybackSettings::DESPAWN.with_spatial(true),
+                        Transform::from_translation(center),
+                    ));
+                }
+            }
+        }
     }
 }
 
 /// Handles material-based gib bursts, explosions, and brush despawning when a breakable entity is shattered.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::type_complexity)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::type_complexity
+)]
 pub fn handle_break_entity_events(
     mut commands: Commands,
     mut events: EventReader<BreakEntityEvent>,
@@ -768,15 +866,18 @@ pub fn handle_break_entity_events(
         &mut crate::player::PlayerController,
         Option<&mut crate::combat::PlayerRecoil>,
     )>,
-    mut hostage_query: Query<(
-        &mut crate::studio::world_entity::HostageEntity,
-        &mut crate::studio::animation::StudioAnimatedModel,
-        &mut crate::studio::world_entity::EntityCollisionBounds,
-        &GlobalTransform,
-    ), (
-        Without<crate::studio::viewmodel::ViewModelWeapon>,
-        Without<crate::player::PlayerController>,
-    )>,
+    mut hostage_query: Query<
+        (
+            &mut crate::studio::world_entity::HostageEntity,
+            &mut crate::studio::animation::StudioAnimatedModel,
+            &mut crate::studio::world_entity::EntityCollisionBounds,
+            &GlobalTransform,
+        ),
+        (
+            Without<crate::studio::viewmodel::ViewModelWeapon>,
+            Without<crate::player::PlayerController>,
+        ),
+    >,
 ) {
     for ev in events.read() {
         if !ev.model.is_empty() {
@@ -796,7 +897,10 @@ pub fn handle_break_entity_events(
                 for ent in &mut col_model.brush_entities {
                     if ent.model_index == sub_num {
                         ent.solid = goldhub_formats::ir::SOLID_NOT;
-                        tracing::info!(model = ev.model, "Disabled physical collision for broken BSP entity");
+                        tracing::info!(
+                            model = ev.model,
+                            "Disabled physical collision for broken BSP entity"
+                        );
                     }
                 }
             }
@@ -804,7 +908,9 @@ pub fn handle_break_entity_events(
 
         let gib_model = match ev.material {
             BreakableMaterial::Computer => "models/computergibs.mdl",
-            BreakableMaterial::Glass | BreakableMaterial::UnbreakableGlass => "models/glassgibs.mdl",
+            BreakableMaterial::Glass | BreakableMaterial::UnbreakableGlass => {
+                "models/glassgibs.mdl"
+            }
             BreakableMaterial::Wood => "models/woodgibs.mdl",
             BreakableMaterial::Metal => "models/metalplategibs.mdl",
             BreakableMaterial::Flesh => "models/fleshgibs.mdl",
@@ -863,69 +969,23 @@ pub fn handle_break_entity_events(
                 },
             ));
 
-            // 3. Expanding fiery fireball visual mesh
-            let sphere_mesh = meshes.add(Sphere::new(1.0).mesh().uv(16, 16));
-            let fireball_mat = materials.add(StandardMaterial {
-                base_color: Color::srgba(1.0, 0.45, 0.1, 0.95),
-                emissive: LinearRgba::new(6.0, 2.5, 0.3, 1.0),
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            });
-            commands.spawn((
-                Mesh3d(sphere_mesh.clone()),
-                MeshMaterial3d(fireball_mat),
-                Transform::from_translation(ev.origin).with_scale(Vec3::splat(4.0)),
-                ExplosionFireball {
-                    lifetime: 0.0,
-                    max_lifetime: 0.35,
-                    start_scale: 4.0,
-                    end_scale: 48.0,
-                },
-            ));
+            // Explosion flash point light and genuine zerogxplode.spr sprite provide authentic GoldSrc visual
+            let _ = &mut meshes;
 
-            // 4. Rising smoke particles
-            for i in 0..12 {
-                let seed = u64::from(ev.origin.x.to_bits()) ^ ((i as u64) * 47);
-                let mut rng = SimpleRng::new(seed);
-                let vx = rng.range_f32(-35.0, 35.0);
-                let vy = rng.range_f32(50.0, 100.0);
-                let vz = rng.range_f32(-35.0, 35.0);
-                let smoke_mat = materials.add(StandardMaterial {
-                    base_color: Color::srgba(0.2, 0.18, 0.17, 0.6),
-                    alpha_mode: AlphaMode::Blend,
-                    ..default()
-                });
-                commands.spawn((
-                    Mesh3d(sphere_mesh.clone()),
-                    MeshMaterial3d(smoke_mat),
-                    Transform::from_translation(ev.origin + Vec3::new(vx * 0.1, 6.0, vz * 0.1))
-                        .with_scale(Vec3::splat(rng.range_f32(4.0, 7.0))),
-                    ExplosionSmokeParticle {
-                        velocity: Vec3::new(vx, vy, vz),
-                        lifetime: 0.0,
-                        max_lifetime: rng.range_f32(0.9, 1.3),
-                        start_scale: rng.range_f32(4.0, 7.0),
-                        end_scale: rng.range_f32(22.0, 32.0),
-                    },
-                ));
-            }
-
-            // 5. Blast impulse and recoil camera kick on player
-            for (p_trans, mut p_ctrl, recoil_opt) in &mut player_query {
+            // 5. Blast camera kick on player (no physical knockback on breakables matching CS 1.6)
+            for (p_trans, _p_ctrl, recoil_opt) in &mut player_query {
                 let p_pos = p_trans.translation;
                 let dist = ev.origin.distance(p_pos);
-                let blast_radius = 320.0_f32;
+                let blast_radius = 240.0_f32;
                 if dist < blast_radius {
                     let frac = (1.0 - (dist / blast_radius)).clamp(0.0, 1.0);
-                    let blast_dir = (p_pos - ev.origin).normalize_or_zero();
-                    p_ctrl.sim.current.velocity[0] += blast_dir.x * 450.0 * frac;
-                    p_ctrl.sim.current.velocity[1] += -blast_dir.z * 450.0 * frac;
-                    p_ctrl.sim.current.velocity[2] += (blast_dir.y * 300.0 + 200.0) * frac;
-
                     if let Some(mut recoil) = recoil_opt {
-                        recoil.punch_pitch -= 16.0 * frac;
-                        let yaw_kick = if ((dist * 10.0) as usize).is_multiple_of(2) { 9.0 } else { -9.0 };
+                        recoil.punch_pitch -= 3.0 * frac;
+                        let yaw_kick = if ((dist * 10.0) as usize).is_multiple_of(2) {
+                            1.5
+                        } else {
+                            -1.5
+                        };
                         recoil.punch_yaw += yaw_kick * frac;
                     }
                 }
@@ -977,6 +1037,45 @@ pub fn handle_break_entity_events(
                 &mut meshes,
             );
         } else {
+            // Authentic GoldSrc breakable shatter sound (debris/bust*)
+            let break_sound = match ev.material {
+                BreakableMaterial::Glass | BreakableMaterial::UnbreakableGlass => {
+                    let snd_idx = ((((ev.origin.x + ev.origin.y) * 10.0).abs() as usize) % 3) + 1;
+                    format!("debris/bustglass{snd_idx}.wav")
+                }
+                BreakableMaterial::Wood => {
+                    let snd_idx = ((((ev.origin.x + ev.origin.y) * 10.0).abs() as usize) % 3) + 1;
+                    format!("debris/bustcrate{snd_idx}.wav")
+                }
+                BreakableMaterial::Metal => {
+                    let snd_idx = ((((ev.origin.x + ev.origin.y) * 10.0).abs() as usize) % 2) + 1;
+                    format!("debris/bustmetal{snd_idx}.wav")
+                }
+                BreakableMaterial::Flesh => {
+                    let snd_idx = ((((ev.origin.x + ev.origin.y) * 10.0).abs() as usize) % 2) + 1;
+                    format!("debris/bustflesh{snd_idx}.wav")
+                }
+                BreakableMaterial::CinderBlock | BreakableMaterial::Rocks => {
+                    let snd_idx = ((((ev.origin.x + ev.origin.y) * 10.0).abs() as usize) % 2) + 1;
+                    format!("debris/bustconcrete{snd_idx}.wav")
+                }
+                BreakableMaterial::CeilingTile => "debris/bustceiling.wav".to_string(),
+                BreakableMaterial::Computer => "weapons/explode3.wav".to_string(),
+            };
+
+            if let Some(snd) =
+                audio_bank.get_or_load_sound(&break_sound, &search_paths.dirs, &mut audio_sources)
+            {
+                commands.spawn((
+                    AudioPlayer::new(snd),
+                    PlaybackSettings::DESPAWN
+                        .with_spatial(true)
+                        .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 64.0))
+                        .with_volume(bevy::audio::Volume::new(1.0)),
+                    Transform::from_translation(ev.origin),
+                ));
+            }
+
             let shooter = EnvShooterEntity {
                 targetname: String::new(),
                 shootmodel: gib_model.to_string(),
@@ -1010,7 +1109,8 @@ fn spawn_gibs(
     materials: &mut ResMut<Assets<StandardMaterial>>,
     meshes: &mut ResMut<Assets<Mesh>>,
 ) {
-    let Some(model_data) = model_store.get_or_load(&shooter.shootmodel, search_paths, images, materials)
+    let Some(model_data) =
+        model_store.get_or_load(&shooter.shootmodel, search_paths, images, materials)
     else {
         tracing::warn!(model = shooter.shootmodel, "Could not load gib shootmodel");
         return;
@@ -1024,11 +1124,12 @@ fn spawn_gibs(
         let vy = shooter.velocity + rng.range_f32(-shooter.variance, shooter.variance) * 20.0;
         let vz = rng.range_f32(-shooter.variance, shooter.variance) * 15.0;
 
-        let spawn_pos = shooter.origin + Vec3::new(
-            rng.range_f32(-6.0, 6.0),
-            rng.range_f32(0.0, 8.0),
-            rng.range_f32(-6.0, 6.0),
-        );
+        let spawn_pos = shooter.origin
+            + Vec3::new(
+                rng.range_f32(-6.0, 6.0),
+                rng.range_f32(0.0, 8.0),
+                rng.range_f32(-6.0, 6.0),
+            );
 
         let gib_parent = commands
             .spawn((
@@ -1042,7 +1143,8 @@ fn spawn_gibs(
                     lifetime: 0.0,
                     max_lifetime: rng.range_f32(3.0, 5.0),
                 },
-                Transform::from_translation(spawn_pos).with_scale(Vec3::splat(rng.range_f32(0.8, 1.3))),
+                Transform::from_translation(spawn_pos)
+                    .with_scale(Vec3::splat(rng.range_f32(0.8, 1.3))),
                 Visibility::default(),
             ))
             .id();
@@ -1099,7 +1201,11 @@ pub fn update_gib_particles_system(
 }
 
 /// Advances active door state, interpolates movement, and manages door audio and collision.
-#[allow(clippy::too_many_arguments, clippy::type_complexity, clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
 pub fn update_doors_system(
     mut commands: Commands,
     time: Res<Time>,
@@ -1108,7 +1214,13 @@ pub fn update_doors_system(
     mut audio_sources: ResMut<Assets<AudioSource>>,
     mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
     mut door_query: Query<(Entity, &mut DoorEntity)>,
-    mut submodel_query: Query<(&BspSubmodelMesh, &mut Transform), (Without<DoorEntity>, Without<crate::player::PlayerController>)>,
+    mut submodel_query: Query<
+        (&BspSubmodelMesh, &mut Transform),
+        (
+            Without<DoorEntity>,
+            Without<crate::player::PlayerController>,
+        ),
+    >,
     player_query: Query<&Transform, With<crate::player::PlayerController>>,
 ) {
     let dt = time.delta_secs();
@@ -1119,6 +1231,7 @@ pub fn update_doors_system(
     // Touch to open: if player approaches within touch proximity of door bounding box, open unless use_only
     if let Ok(player_t) = player_query.get_single() {
         let player_pos = player_t.translation;
+        let mut triggered_targetnames = Vec::new();
         for (_door_ent, mut door) in &mut door_query {
             if door.state == DoorState::Closed && !door.use_only {
                 let center = (door.bmin + door.bmax) * 0.5;
@@ -1128,16 +1241,62 @@ pub fn update_doors_system(
                     && (player_pos.z >= door.bmin.z - 32.0 && player_pos.z <= door.bmax.z + 32.0)
                 {
                     door.state = DoorState::Opening;
-                    if let Some(ref move_snd) = door.move_sound
+                    if !door.targetname.is_empty() {
+                        triggered_targetnames.push(door.targetname.clone());
+                    }
+                    if door.is_rotating {
+                        let to_player = player_pos - center;
+                        let hinge_to_center = center - door.hinge_origin;
+                        let leaf_dir = Vec3::new(hinge_to_center.x, 0.0, hinge_to_center.z)
+                            .normalize_or_zero();
+                        let face_normal = Vec3::new(-leaf_dir.z, 0.0, leaf_dir.x);
+                        // Rotate door away from the activating player
+                        let angle_deg = if to_player.dot(face_normal) > 0.0 {
+                            door.distance
+                        } else {
+                            -door.distance
+                        };
+                        door.target_rot = Quat::from_rotation_y(angle_deg.to_radians());
+                    }
+                    if let Some(ref move_snd_name) = door.move_sound
                         && let Some(h) = audio_bank.get_or_load_sound(
-                            move_snd,
+                            move_snd_name,
                             &search_paths.dirs,
                             &mut audio_sources,
                         )
                     {
                         commands.spawn((
                             AudioPlayer::new(h),
-                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            PlaybackSettings::DESPAWN
+                                .with_spatial(true)
+                                .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 128.0))
+                                .with_volume(bevy::audio::Volume::new(1.5)),
+                            Transform::from_translation(center),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Open companion linked door leaves simultaneously (e.g. double sliding doors on Nuke)
+        for targetname in triggered_targetnames {
+            for (_door_ent, mut door) in &mut door_query {
+                if door.targetname == targetname && door.state == DoorState::Closed {
+                    door.state = DoorState::Opening;
+                    let center = (door.bmin + door.bmax) * 0.5;
+                    if let Some(ref move_snd_name) = door.move_sound
+                        && let Some(h) = audio_bank.get_or_load_sound(
+                            move_snd_name,
+                            &search_paths.dirs,
+                            &mut audio_sources,
+                        )
+                    {
+                        commands.spawn((
+                            AudioPlayer::new(h),
+                            PlaybackSettings::DESPAWN
+                                .with_spatial(true)
+                                .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 128.0))
+                                .with_volume(bevy::audio::Volume::new(1.5)),
                             Transform::from_translation(center),
                         ));
                     }
@@ -1155,7 +1314,11 @@ pub fn update_doors_system(
                 } else {
                     door.start_pos.distance(door.target_pos) / door.speed.max(1.0)
                 };
-                let step = if travel_time > 0.0 { dt / travel_time } else { 1.0 };
+                let step = if travel_time > 0.0 {
+                    dt / travel_time
+                } else {
+                    1.0
+                };
                 door.current_progress = (door.current_progress + step).min(1.0);
 
                 // Update submodel mesh transform
@@ -1167,8 +1330,38 @@ pub fn update_doors_system(
                             mesh_t.translation = p - rot.mul_vec3(p);
                             mesh_t.rotation = rot;
                         } else {
-                            mesh_t.translation = (door.target_pos - door.start_pos) * door.current_progress;
+                            mesh_t.translation =
+                                (door.target_pos - door.start_pos) * door.current_progress;
                             mesh_t.rotation = Quat::IDENTITY;
+                        }
+                    }
+                }
+
+                // Synchronize physical collision hull with active door position
+                if let Some(ref mut col_res) = collision_res
+                    && let Some(ref mut col_model) = col_res.model
+                    && let Some(sub_num_str) = door.model.strip_prefix('*')
+                    && let Ok(sub_num) = sub_num_str.parse::<usize>()
+                {
+                    for ent in &mut col_model.brush_entities {
+                        if ent.model_index == sub_num {
+                            ent.solid = goldhub_formats::ir::SOLID_BSP;
+                            if door.is_rotating {
+                                let rot =
+                                    door.start_rot.slerp(door.target_rot, door.current_progress);
+                                let (yaw, _, _) = rot.to_euler(EulerRot::YXZ);
+                                ent.angles[1] = yaw.to_degrees();
+                                let radius = (door.bmax - door.bmin).length() * 0.5;
+                                let c = ent.origin;
+                                ent.mins[0] = ent.mins[0].min(c[0] - radius);
+                                ent.mins[1] = ent.mins[1].min(c[1] - radius);
+                                ent.maxs[0] = ent.maxs[0].max(c[0] + radius);
+                                ent.maxs[1] = ent.maxs[1].max(c[1] + radius);
+                            } else {
+                                let delta =
+                                    (door.target_pos - door.start_pos) * door.current_progress;
+                                ent.origin = [delta.x, -delta.z, delta.y];
+                            }
                         }
                     }
                 }
@@ -1177,9 +1370,9 @@ pub fn update_doors_system(
                 if door.current_progress >= 1.0 {
                     door.state = DoorState::Open;
                     door.wait_timer = door.wait;
-                    if let Some(ref stop_snd) = door.stop_sound
+                    if let Some(ref stop_snd_name) = door.stop_sound
                         && let Some(h) = audio_bank.get_or_load_sound(
-                            stop_snd,
+                            stop_snd_name,
                             &search_paths.dirs,
                             &mut audio_sources,
                         )
@@ -1190,22 +1383,10 @@ pub fn update_doors_system(
                             Transform::from_translation((door.bmin + door.bmax) * 0.5),
                         ));
                     }
-                    // Disable physical collision while open
-                    if let Some(ref mut col_res) = collision_res
-                        && let Some(ref mut col_model) = col_res.model
-                        && let Some(sub_num_str) = door.model.strip_prefix('*')
-                        && let Ok(sub_num) = sub_num_str.parse::<usize>()
-                    {
-                        for ent in &mut col_model.brush_entities {
-                            if ent.model_index == sub_num {
-                                ent.solid = goldhub_formats::ir::SOLID_NOT;
-                            }
-                        }
-                    }
                 }
             }
             DoorState::Open => {
-                if door.wait >= 0.0 {
+                if !door.is_toggle && door.wait >= 0.0 {
                     door.wait_timer -= dt;
                     if door.wait_timer <= 0.0 {
                         door.state = DoorState::Closing;
@@ -1226,12 +1407,32 @@ pub fn update_doors_system(
                 }
             }
             DoorState::Closing => {
+                // If player is standing in the doorway, door cannot crush through player — reverse to opening!
+                if let Ok(player_t) = player_query.get_single() {
+                    let player_pos = player_t.translation;
+                    let center = (door.bmin + door.bmax) * 0.5;
+                    if player_pos.distance(center) < 64.0
+                        && (player_pos.x >= door.bmin.x - 24.0
+                            && player_pos.x <= door.bmax.x + 24.0)
+                        && (player_pos.y >= door.bmin.y - 36.0
+                            && player_pos.y <= door.bmax.y + 72.0)
+                        && (player_pos.z >= door.bmin.z - 24.0
+                            && player_pos.z <= door.bmax.z + 24.0)
+                    {
+                        door.state = DoorState::Opening;
+                    }
+                }
+
                 let travel_time = if door.is_rotating {
                     door.distance.to_radians() / door.speed.to_radians().max(0.1)
                 } else {
                     door.start_pos.distance(door.target_pos) / door.speed.max(1.0)
                 };
-                let step = if travel_time > 0.0 { dt / travel_time } else { 1.0 };
+                let step = if travel_time > 0.0 {
+                    dt / travel_time
+                } else {
+                    1.0
+                };
                 door.current_progress = (door.current_progress - step).max(0.0);
 
                 // Update submodel mesh transform
@@ -1243,8 +1444,38 @@ pub fn update_doors_system(
                             mesh_t.translation = p - rot.mul_vec3(p);
                             mesh_t.rotation = rot;
                         } else {
-                            mesh_t.translation = (door.target_pos - door.start_pos) * door.current_progress;
+                            mesh_t.translation =
+                                (door.target_pos - door.start_pos) * door.current_progress;
                             mesh_t.rotation = Quat::IDENTITY;
+                        }
+                    }
+                }
+
+                // Synchronize physical collision hull with active door position
+                if let Some(ref mut col_res) = collision_res
+                    && let Some(ref mut col_model) = col_res.model
+                    && let Some(sub_num_str) = door.model.strip_prefix('*')
+                    && let Ok(sub_num) = sub_num_str.parse::<usize>()
+                {
+                    for ent in &mut col_model.brush_entities {
+                        if ent.model_index == sub_num {
+                            ent.solid = goldhub_formats::ir::SOLID_BSP;
+                            if door.is_rotating {
+                                let rot =
+                                    door.start_rot.slerp(door.target_rot, door.current_progress);
+                                let (yaw, _, _) = rot.to_euler(EulerRot::YXZ);
+                                ent.angles[1] = yaw.to_degrees(); // Fix sign: match visual mesh orientation
+                                let radius = (door.bmax - door.bmin).length() * 0.5;
+                                let c = ent.origin;
+                                ent.mins[0] = ent.mins[0].min(c[0] - radius);
+                                ent.mins[1] = ent.mins[1].min(c[1] - radius);
+                                ent.maxs[0] = ent.maxs[0].max(c[0] + radius);
+                                ent.maxs[1] = ent.maxs[1].max(c[1] + radius);
+                            } else {
+                                let delta =
+                                    (door.target_pos - door.start_pos) * door.current_progress;
+                                ent.origin = [delta.x, -delta.z, delta.y];
+                            }
                         }
                     }
                 }
@@ -1264,18 +1495,6 @@ pub fn update_doors_system(
                             PlaybackSettings::DESPAWN.with_spatial(true),
                             Transform::from_translation((door.bmin + door.bmax) * 0.5),
                         ));
-                    }
-                    // Re-enable solid collision
-                    if let Some(ref mut col_res) = collision_res
-                        && let Some(ref mut col_model) = col_res.model
-                        && let Some(sub_num_str) = door.model.strip_prefix('*')
-                        && let Ok(sub_num) = sub_num_str.parse::<usize>()
-                    {
-                        for ent in &mut col_model.brush_entities {
-                            if ent.model_index == sub_num {
-                                ent.solid = goldhub_formats::ir::SOLID_BSP;
-                            }
-                        }
                     }
                 }
             }
@@ -1323,6 +1542,19 @@ pub fn interact_door_system(
             match door.state {
                 DoorState::Closed => {
                     door.state = DoorState::Opening;
+                    if door.is_rotating {
+                        let to_player = cam_pos - center;
+                        let hinge_to_center = center - door.hinge_origin;
+                        let leaf_dir = Vec3::new(hinge_to_center.x, 0.0, hinge_to_center.z)
+                            .normalize_or_zero();
+                        let face_normal = Vec3::new(-leaf_dir.z, 0.0, leaf_dir.x);
+                        let angle_deg = if to_player.dot(face_normal) > 0.0 {
+                            -door.distance
+                        } else {
+                            door.distance
+                        };
+                        door.target_rot = Quat::from_rotation_y(angle_deg.to_radians());
+                    }
                     if let Some(ref snd) = door.move_sound
                         && let Some(h) = audio_bank.get_or_load_sound(
                             snd,

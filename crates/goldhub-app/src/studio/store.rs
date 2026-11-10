@@ -64,20 +64,25 @@ impl StudioModelStore {
                 external_tex_bytes = fs::read(&t_path_direct_upper).ok();
             } else if t_path_direct_lower.exists() {
                 external_tex_bytes = fs::read(&t_path_direct_lower).ok();
-            } else if let Some(resolved_t) = resolve_model_file_path(&format!("models/{t_name_upper}"), search_paths) {
+            } else if let Some(resolved_t) =
+                resolve_model_file_path(&format!("models/{t_name_upper}"), search_paths)
+            {
                 external_tex_bytes = fs::read(&resolved_t).ok();
-            } else if let Some(resolved_t) = resolve_model_file_path(&format!("models/{t_name_lower}"), search_paths) {
+            } else if let Some(resolved_t) =
+                resolve_model_file_path(&format!("models/{t_name_lower}"), search_paths)
+            {
                 external_tex_bytes = fs::read(&resolved_t).ok();
             }
         }
 
-        let model: StudioModel = match decoder.decode_model_with_textures(&raw_bytes, external_tex_bytes.as_deref()) {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::warn!(path = ?file_path, error = ?err, "Failed to decode StudioModel");
-                return None;
-            }
-        };
+        let model: StudioModel =
+            match decoder.decode_model_with_textures(&raw_bytes, external_tex_bytes.as_deref()) {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::warn!(path = ?file_path, error = ?err, "Failed to decode StudioModel");
+                    return None;
+                }
+            };
 
         // 1. Upload textures to Bevy Image assets and create StandardMaterials
         let mut material_handles = Vec::with_capacity(model.textures.len());
@@ -115,8 +120,13 @@ impl StudioModelStore {
         for body_part in &model.body_parts {
             if let Some(submodel) = body_part.models.first() {
                 for mesh in &submodel.meshes {
-                    let mat_handle = if mesh.skin_ref < material_handles.len() {
-                        material_handles[mesh.skin_ref].clone()
+                    let tex_idx = model
+                        .skin_families
+                        .first()
+                        .and_then(|fam| fam.get(mesh.skin_ref).copied())
+                        .map_or(mesh.skin_ref, |idx| idx as usize);
+                    let mat_handle = if tex_idx < material_handles.len() {
+                        material_handles[tex_idx].clone()
                     } else {
                         // Fallback neutral material if skin_ref is out of range
                         materials.add(StandardMaterial {
@@ -157,10 +167,16 @@ pub fn create_initial_bevy_mesh(template: &SubmeshTemplate, is_viewmodel: bool) 
     for v in &template.rest_vertices {
         let (p, n) = if is_viewmodel {
             // Camera local coordinates: X_cam = -Y_gs, Y_cam = Z_gs, Z_cam = -X_gs
-            ([-v.position[1], v.position[2], -v.position[0]], [-v.normal[1], v.normal[2], -v.normal[0]])
+            (
+                [-v.position[1], v.position[2], -v.position[0]],
+                [-v.normal[1], v.normal[2], -v.normal[0]],
+            )
         } else {
             // World entity coordinates: X_bevy = X_gs, Y_bevy = Z_gs, Z_bevy = -Y_gs
-            ([v.position[0], v.position[2], -v.position[1]], [v.normal[0], v.normal[2], -v.normal[1]])
+            (
+                [v.position[0], v.position[2], -v.position[1]],
+                [v.normal[0], v.normal[2], -v.normal[1]],
+            )
         };
         positions.push(p);
         normals.push(n);

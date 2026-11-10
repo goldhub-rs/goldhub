@@ -81,7 +81,18 @@ impl<'a> WadArchive<'a> {
 
         let width = header.width;
         let height = header.height;
-        let pixel_count = (width * height) as usize;
+        if width > 4096 || height > 4096 {
+            return Err(FormatError::MalformedData {
+                location: "wad miptex dimensions",
+                reason: format!("dimensions {width}x{height} exceed limit of 4096"),
+            });
+        }
+        let pixel_count = width
+            .checked_mul(height)
+            .ok_or_else(|| FormatError::MalformedData {
+                location: "wad miptex dimensions",
+                reason: "dimension overflow".into(),
+            })? as usize;
 
         // The palette is stored after mip level 3: [u16 color_count, [u8; 3] * 256]
         // Base mip data starts at header.offsets[0]
@@ -111,26 +122,37 @@ impl<'a> WadArchive<'a> {
 
         // Unpack into RGBA8
         let mut rgba = Vec::with_capacity(pixel_count * 4);
-        for &idx in pixel_indices {
-            let p_idx = (idx as usize) * 3;
-            let is_chroma_blue = palette_slice[p_idx] == 0
-                && palette_slice[p_idx + 1] == 0
-                && palette_slice[p_idx + 2] == 255;
-            let is_transparent = ((header.name[0] == b'{'
-                || (palette_slice[255 * 3] == 0
-                    && palette_slice[255 * 3 + 1] == 0
-                    && palette_slice[255 * 3 + 2] == 255))
-                && idx == 255)
-                || (header.name[0] == b'{' && is_chroma_blue);
+        let is_chroma_blue_255 = palette_slice[255 * 3] == 0
+            && palette_slice[255 * 3 + 1] == 0
+            && palette_slice[255 * 3 + 2] == 255;
+        let is_gradient_decal = header.name[0] == b'{' && !is_chroma_blue_255;
+        let decal_r = palette_slice[255 * 3];
+        let decal_g = palette_slice[255 * 3 + 1];
+        let decal_b = palette_slice[255 * 3 + 2];
 
-            if is_transparent {
-                // Zero out RGB and Alpha to prevent blue fringe bleeding
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
+        for &idx in pixel_indices {
+            if is_gradient_decal {
+                // Classic GoldSrc gradient decal:
+                // idx is alpha value (0 = transparent background), RGB is last palette entry
+                let a = idx;
+                rgba.extend_from_slice(&[decal_r, decal_g, decal_b, a]);
             } else {
-                let r = palette_slice[p_idx];
-                let g = palette_slice[p_idx + 1];
-                let b = palette_slice[p_idx + 2];
-                rgba.extend_from_slice(&[r, g, b, 255]);
+                let p_idx = (idx as usize) * 3;
+                let is_chroma_blue = palette_slice[p_idx] == 0
+                    && palette_slice[p_idx + 1] == 0
+                    && palette_slice[p_idx + 2] == 255;
+                let is_transparent = ((header.name[0] == b'{' || is_chroma_blue_255) && idx == 255)
+                    || (header.name[0] == b'{' && is_chroma_blue);
+
+                if is_transparent {
+                    // Zero out RGB and Alpha to prevent blue fringe bleeding
+                    rgba.extend_from_slice(&[0, 0, 0, 0]);
+                } else {
+                    let r = palette_slice[p_idx];
+                    let g = palette_slice[p_idx + 1];
+                    let b = palette_slice[p_idx + 2];
+                    rgba.extend_from_slice(&[r, g, b, 255]);
+                }
             }
         }
 

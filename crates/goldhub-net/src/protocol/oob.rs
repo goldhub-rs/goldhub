@@ -42,12 +42,35 @@ impl<'a> OobMessage<'a> {
             return Ok(Some(Self::ChallengeRequest));
         }
 
+        if (body.starts_with(b"A00000000") || body.starts_with(b"challenge "))
+            && let Ok(text) = core::str::from_utf8(body)
+        {
+            let mut parts = text.split_whitespace();
+            let _prefix = parts.next();
+            if let Some(num_str) = parts.next()
+                && let Ok(challenge) = num_str.parse::<u32>()
+            {
+                return Ok(Some(Self::ChallengeResponse { challenge }));
+            }
+        }
+
         let opcode = body[0];
         let payload = &body[1..];
 
         let msg = match opcode {
             A2A_GETCHALLENGE => Self::ChallengeRequest,
             S2C_CHALLENGE => {
+                if payload.starts_with(b"00000000")
+                    && let Ok(text) = core::str::from_utf8(payload)
+                {
+                    let mut parts = text.split_whitespace();
+                    let _zeros = parts.next();
+                    if let Some(num_str) = parts.next()
+                        && let Ok(challenge) = num_str.parse::<u32>()
+                    {
+                        return Ok(Some(Self::ChallengeResponse { challenge }));
+                    }
+                }
                 if payload.len() < 4 {
                     return Err(NetError::MalformedPayload {
                         opcode,

@@ -13,18 +13,32 @@ pub const DEFAULT_LIGHTSCALE: u32 = 256;
 
 /// Canonical GoldSrc 1024-entry display gamma lookup table.
 ///
-/// Ported from `D:\Repo\GoldSrc.rs\references\xash3d-fwgs\ref\gl\gl_rsurf.c` and
-/// `references\xash3d-fwgs\engine\client\gamma.c`.
+/// Ported from `references\xash3d-fwgs\engine\client\gamma.c`:
 ///
 /// Formula:
-/// `val = (pow((i / 1023.0), (1.0 / v_lightgamma)) * 1023.0) as u16`
+/// `f = pow(i / 1023.0, (double)lightgamma)`
+/// `if (f <= g3) f = (f / g3) * 0.125 else f = ((f - g3) / (1.0 - g3)) * 0.875 + 0.125`
+/// `lightgammatable[i] = bound(0, (pow(f, 1.0 / gamma) * 1023.0), 1023)`
 #[must_use]
 pub fn build_lightgamma_table(lightgamma: f32) -> [u16; 1024] {
     let mut table = [0u16; 1024];
-    let inv_gamma = 1.0 / f64::from(lightgamma);
+    let gamma = 2.5f64;
+    let g1 = 1.0 / gamma;
+    let g3 = 0.125f64; // brightness <= 0.0 standard
+    let lightgamma_f64 = f64::from(lightgamma);
+
     for (i, entry) in table.iter_mut().enumerate() {
         let normalized = (i as f64) / 1023.0;
-        let val = (normalized.powf(inv_gamma) * 1023.0).round();
+        let mut f = normalized.powf(lightgamma_f64);
+
+        if f <= g3 {
+            f = (f / g3) * 0.125;
+        } else {
+            f = ((f - g3) / (1.0 - g3)) * 0.875 + 0.125;
+        }
+
+        let d = f.powf(g1);
+        let val = (d * 1023.0).round();
         *entry = (val as i32).clamp(0, 1023) as u16;
     }
     table
@@ -373,9 +387,9 @@ pub fn compile_bsp_geometry_and_lightmap(
         let submesh_start = indices.len() as u32;
         let base_vert_idx = vertices.len() as u32;
 
-        let (tex_w, tex_h) = textures
-            .get(tex_id as usize)
-            .map_or((128.0, 128.0), |t| (t.width as f32, t.height as f32));
+        let (tex_w, tex_h) = textures.get(tex_id as usize).map_or((128.0, 128.0), |t| {
+            (t.width.max(1) as f32, t.height.max(1) as f32)
+        });
 
         // Lightmap atlas mapping parameters for this face
         let lm_info = face_uv_map.get(&face_idx);
@@ -430,13 +444,10 @@ pub fn compile_bsp_geometry_and_lightmap(
         }
 
         let submesh_count = (indices.len() as u32) - submesh_start;
-        let submesh_name = metadata
-            .face_submodels
-            .get(&face_idx)
-            .map_or_else(
-                || format!("face_{face_idx}"),
-                |sub| format!("{sub}:face_{face_idx}"),
-            );
+        let submesh_name = metadata.face_submodels.get(&face_idx).map_or_else(
+            || format!("face_{face_idx}"),
+            |sub| format!("{sub}:face_{face_idx}"),
+        );
         submeshes.push(SubMesh {
             name: submesh_name,
             index_start: submesh_start,
@@ -528,13 +539,10 @@ pub fn compile_bsp_geometry_with_atlas(
         }
 
         let submesh_count = (indices.len() as u32) - submesh_start;
-        let submesh_name = metadata
-            .face_submodels
-            .get(&face_idx)
-            .map_or_else(
-                || format!("face_{face_idx}"),
-                |sub| format!("{sub}:face_{face_idx}"),
-            );
+        let submesh_name = metadata.face_submodels.get(&face_idx).map_or_else(
+            || format!("face_{face_idx}"),
+            |sub| format!("{sub}:face_{face_idx}"),
+        );
         submeshes.push(SubMesh {
             name: submesh_name,
             index_start: submesh_start,
@@ -670,23 +678,21 @@ mod tests {
         }
 
         // Spot-check canonical values
-        // i=4: ((4/1023)^(1/2.5))*1023 = 111
-        assert_eq!(table[4], 111);
-        // i=40: ((40/1023)^(1/2.5))*1023 = 280
-        assert_eq!(table[40], 280);
-        // i=1020: ((1020/1023)^(1/2.5))*1023 = 1022
-        assert_eq!(table[1020], 1022);
+        // With default gamma = 2.5 and lightgamma = 2.5, table is identity
+        assert_eq!(table[4], 4);
+        assert_eq!(table[40], 40);
+        assert_eq!(table[1020], 1020);
     }
 
     #[test]
     fn test_decode_luxel_values() {
         let table = build_lightgamma_table(DEFAULT_LIGHTGAMMA);
         assert_eq!(decode_luxel(0, DEFAULT_LIGHTSCALE, &table), 0);
-        assert_eq!(decode_luxel(1, DEFAULT_LIGHTSCALE, &table), 27);
-        assert_eq!(decode_luxel(10, DEFAULT_LIGHTSCALE, &table), 70);
-        assert_eq!(decode_luxel(50, DEFAULT_LIGHTSCALE, &table), 133);
-        assert_eq!(decode_luxel(100, DEFAULT_LIGHTSCALE, &table), 175);
-        assert_eq!(decode_luxel(200, DEFAULT_LIGHTSCALE, &table), 231);
+        assert_eq!(decode_luxel(1, DEFAULT_LIGHTSCALE, &table), 1);
+        assert_eq!(decode_luxel(10, DEFAULT_LIGHTSCALE, &table), 10);
+        assert_eq!(decode_luxel(50, DEFAULT_LIGHTSCALE, &table), 50);
+        assert_eq!(decode_luxel(100, DEFAULT_LIGHTSCALE, &table), 100);
+        assert_eq!(decode_luxel(200, DEFAULT_LIGHTSCALE, &table), 200);
         assert_eq!(decode_luxel(255, DEFAULT_LIGHTSCALE, &table), 255);
 
         // Verify strictly monotonic for increasing luxels

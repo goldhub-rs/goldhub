@@ -274,7 +274,8 @@ impl StudioMdlDecoder {
             self.decode_textures_internal(bytes, header, external_textures)?;
 
         // 3. Body parts & Submodels
-        let body_parts = self.decode_body_parts_internal(bytes, header, &textures)?;
+        let body_parts =
+            self.decode_body_parts_internal(bytes, header, &textures, &skin_families)?;
 
         Ok(StudioModel {
             name,
@@ -501,8 +502,27 @@ impl StudioMdlDecoder {
             let tex_name = null_terminated_ascii(&t.name);
             let width = t.width.max(0) as usize;
             let height = t.height.max(0) as usize;
-            let pixel_count = width * height;
-            let pal_offset = t.index as usize + pixel_count;
+            if width > 4096 || height > 4096 {
+                return Err(FormatError::MalformedData {
+                    location: "mdl texture dimensions",
+                    reason: format!("dimensions {width}x{height} exceed limit of 4096"),
+                });
+            }
+            let pixel_count =
+                width
+                    .checked_mul(height)
+                    .ok_or_else(|| FormatError::MalformedData {
+                        location: "mdl texture dimensions",
+                        reason: "dimension overflow".into(),
+                    })?;
+            let tex_base = t.index.max(0) as usize;
+            let pal_offset =
+                tex_base
+                    .checked_add(pixel_count)
+                    .ok_or_else(|| FormatError::MalformedData {
+                        location: "mdl texture offset",
+                        reason: "palette offset overflow".into(),
+                    })?;
 
             if pal_offset + 768 > tex_bytes.len() {
                 return Err(FormatError::BufferTooSmall {
@@ -511,7 +531,7 @@ impl StudioMdlDecoder {
                 });
             }
 
-            let index_data = &tex_bytes[t.index as usize..pal_offset];
+            let index_data = &tex_bytes[tex_base..pal_offset];
             let palette = &tex_bytes[pal_offset..pal_offset + 768];
 
             let is_masked = (t.flags & STUDIO_NF_MASKED) != 0;
@@ -565,6 +585,7 @@ impl StudioMdlDecoder {
         bytes: &[u8],
         header: &MdlHeader,
         textures: &[StudioTexture],
+        skin_families: &[Vec<u16>],
     ) -> Result<Vec<StudioBodyPart>, FormatError> {
         let num_parts = header.num_body_parts as usize;
         if num_parts == 0 {
@@ -683,7 +704,11 @@ impl StudioMdlDecoder {
                 let mut meshes = Vec::with_capacity(num_mesh);
                 for mesh in raw_meshes {
                     let skin_ref = mesh.skin_ref.max(0) as usize;
-                    let (tex_w, tex_h) = textures.get(skin_ref).map_or((1.0, 1.0), |tex| {
+                    let tex_idx = skin_families
+                        .first()
+                        .and_then(|fam| fam.get(skin_ref).copied())
+                        .map_or(skin_ref, |idx| idx as usize);
+                    let (tex_w, tex_h) = textures.get(tex_idx).map_or((1.0, 1.0), |tex| {
                         (tex.width.max(1) as f32, tex.height.max(1) as f32)
                     });
 
@@ -839,7 +864,24 @@ fn sample_sequence_bone_matrices(
         return Vec::new();
     }
 
-    let anim_base = seq.anim_index as usize;
+    // In GoldSrc / CS 1.6, sequences with 9-way blending (e.g. ref_aim_*, crouch_aim_*)
+    // arrange blend animations in a 3x3 grid:
+    // Row 0 (0..2): pitch up (+45°)
+    // Row 1 (3..5): pitch level (0°), where blend 4 is center (forward)
+    // Row 2 (6..8): pitch down (-45°)
+    // For 2-way blending, blend 0 is typically center.
+    let blend_idx = if seq.num_blends == 9 {
+        4
+    } else if seq.num_blends > 1 {
+        (seq.num_blends / 2) as usize
+    } else {
+        0
+    };
+    let blend_offset = blend_idx * num_bones * 12;
+    let anim_base = (seq.anim_index as usize) + blend_offset;
+    if anim_base >= bytes.len() {
+        return Vec::new();
+    }
     let mut all_frame_matrices = Vec::with_capacity(num_frames);
 
     // Temp buffers for bone poses
