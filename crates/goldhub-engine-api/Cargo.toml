@@ -1,0 +1,20 @@
+[package]
+name = "goldhub-engine-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure vendor-agnostic engine abstractions, contracts, and lifecycle traits for GoldHub"
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = ["serde?/std"]
+serde = ["dep:serde"]
+
+[lints]
+workspace = true

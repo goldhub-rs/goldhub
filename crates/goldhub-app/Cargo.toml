@@ -11,7 +11,9 @@ description = "Interactive 3D engine viewport and seamless hybrid launcher shell
 [dependencies]
 bevy = { workspace = true }
 goldhub-audio = { path = "../goldhub-audio" }
+goldhub-engine-api = { path = "../goldhub-engine-api" }
 goldhub-formats = { path = "../goldhub-formats" }
+goldhub-game-cstrike = { path = "../goldhub-game-cstrike" }
 goldhub-vfs = { path = "../goldhub-vfs" }
 goldhub-manifest = { path = "../goldhub-manifest" }
 goldhub-net = { path = "../goldhub-net" }

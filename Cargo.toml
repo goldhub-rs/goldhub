@@ -7,6 +7,8 @@ members = [
     "crates/goldhub-net",
     "crates/goldhub-physics",
     "crates/goldhub-audio",
+    "crates/goldhub-engine-api",
+    "crates/goldhub-game-cstrike",
     "crates/goldhub-app",
 ]
 

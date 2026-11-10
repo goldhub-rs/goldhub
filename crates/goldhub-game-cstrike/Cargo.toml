@@ -1,0 +1,24 @@
+[package]
+name = "goldhub-game-cstrike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical Counter-Strike 1.6 game logic, weapon balance, recoil tables, and GameRules"
+
+[dependencies]
+goldhub-engine-api = { path = "../goldhub-engine-api" }
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = ["goldhub-engine-api/std", "serde?/std"]
+serde = ["dep:serde", "goldhub-engine-api/serde"]
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
