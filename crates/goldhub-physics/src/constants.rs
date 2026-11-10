@@ -81,6 +81,10 @@ pub struct MoveVars {
     pub airaccelerate: f32,
     /// Ground surface friction coefficient (default 4.0).
     pub friction: f32,
+    /// Edge friction factor (default 2.0, sv_edgefriction).
+    pub edgefriction: f32,
+    /// Maximum velocity bound before clamp (default 2000.0, sv_maxvelocity).
+    pub maxvelocity: f32,
     /// Maximum vertical height the player can step up automatically (default 18.0 units).
     pub stepsize: f32,
     /// Speed multiplier while crouching (default 0.333).
@@ -89,6 +93,8 @@ pub struct MoveVars {
     pub walking_speed_multiplier: f32,
     /// Velocity bounce coefficient (default 1.0 = full reflection).
     pub bounce: f32,
+    /// Allow bunnyhopping without speed penalty (sv_enablebunnyhopping).
+    pub enable_bunnyhopping: bool,
 }
 
 impl Default for MoveVars {
@@ -100,10 +106,13 @@ impl Default for MoveVars {
             accelerate: 5.0,
             airaccelerate: 10.0,
             friction: 4.0,
+            edgefriction: 2.0,
+            maxvelocity: 2000.0,
             stepsize: 18.0,
             ducking_speed_multiplier: PLAYER_DUCKING_MULTIPLIER,
             walking_speed_multiplier: 0.52,
             bounce: 1.0,
+            enable_bunnyhopping: false,
         }
     }
 }

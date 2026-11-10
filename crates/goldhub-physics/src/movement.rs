@@ -9,7 +9,7 @@ use crate::constants::MoveVars;
 use crate::constants::{
     BUNNYJUMP_MAX_SPEED_FACTOR, HULL_STANDING, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT,
     IN_MOVERIGHT, IN_SPEED, JUMP_IMPULSE, MAX_CLIMB_SPEED, STOP_EPSILON, TIME_TO_DUCK,
-    TIME_TO_UNDUCK, VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
+    VEC_VIEW_DUCKING, VEC_VIEW_STANDING,
 };
 use crate::player::{PlayerCmd, PlayerState};
 use crate::trace::WorldTrace;
@@ -113,13 +113,31 @@ pub fn pm_friction(state: &mut PlayerState, vars: &MoveVars, dt: f32) {
     state.velocity[2] *= scale;
 }
 
+/// Bounds velocity against NaN/Infinity and sv_maxvelocity (`PM_CheckVelocity`).
+pub fn pm_check_velocity(velocity: &mut [f32; 3], origin: &mut [f32; 3], maxvelocity: f32) {
+    for i in 0..3 {
+        if velocity[i].is_nan() {
+            velocity[i] = 0.0;
+        }
+        if origin[i].is_nan() {
+            origin[i] = 0.0;
+        }
+
+        if velocity[i] > maxvelocity {
+            velocity[i] = maxvelocity;
+        } else if velocity[i] < -maxvelocity {
+            velocity[i] = -maxvelocity;
+        }
+    }
+}
+
 /// Canonical GoldSrc ground acceleration (`PM_Accelerate`).
 pub fn pm_accelerate(
     velocity: &mut [f32; 3],
     wishdir: [f32; 3],
     wishspeed: f32,
     accel: f32,
-    stopspeed: f32,
+    friction: f32,
     dt: f32,
 ) {
     let currentspeed = dot(*velocity, wishdir);
@@ -129,10 +147,9 @@ pub fn pm_accelerate(
         return;
     }
 
-    // Scale acceleration against stopspeed to ensure slow walk/duck speeds
-    // (e.g. compound duck + shift) can overcome ground friction (friction * stopspeed * dt).
-    let wish_factor = wishspeed.max(stopspeed);
-    let mut accelspeed = accel * dt * wish_factor;
+    // Authentic ReGameDLL / GoldSrc PM_Accelerate:
+    // accelspeed = accel * pmove->frametime * wishspeed * pmove->friction
+    let mut accelspeed = accel * dt * wishspeed * friction;
     if accelspeed > addspeed {
         accelspeed = addspeed;
     }
@@ -224,6 +241,7 @@ pub fn pm_fly_move(
     let primal_velocity = *velocity;
     let mut time_left = dt;
     let mut blocked = 0u32;
+    let mut all_fraction = 0.0f32;
 
     for _bump in 0..4 {
         if velocity[0] == 0.0 && velocity[1] == 0.0 && velocity[2] == 0.0 {
@@ -237,6 +255,7 @@ pub fn pm_fly_move(
         ];
 
         let tr = world.trace_player_hull(*origin, end, hull_idx);
+        all_fraction += tr.fraction;
 
         if tr.allsolid {
             *velocity = [0.0; 3];
@@ -270,42 +289,55 @@ pub fn pm_fly_move(
         planes[numplanes] = tr.plane_normal;
         numplanes += 1;
 
-        let mut i = 0;
-        while i < numplanes {
-            let (clipped, _) = pm_clip_velocity(original_velocity, planes[i], 1.0);
+        // Authentic GoldSrc PM_FlyMove single-plane slide/surf reflection:
+        // Update original_velocity along the plane so successive bumps on curved brush hulls
+        // (such as pipes or surf ramps) smoothly maintain tangential slide velocity instead of stopping dead.
+        if numplanes == 1 {
+            let (clipped, _) = pm_clip_velocity(original_velocity, planes[0], 1.0);
             *velocity = clipped;
+            original_velocity = clipped;
+        } else {
+            let mut i = 0;
+            while i < numplanes {
+                let (clipped, _) = pm_clip_velocity(original_velocity, planes[i], 1.0);
+                *velocity = clipped;
 
-            let mut j = 0;
-            while j < numplanes {
-                if j != i && dot(*velocity, planes[j]) < 0.0 {
+                let mut j = 0;
+                while j < numplanes {
+                    if j != i && dot(*velocity, planes[j]) < 0.0 {
+                        break;
+                    }
+                    j += 1;
+                }
+
+                if j == numplanes {
                     break;
                 }
-                j += 1;
+                i += 1;
             }
 
-            if j == numplanes {
-                break;
-            }
-            i += 1;
-        }
+            if i == numplanes {
+                if numplanes != 2 {
+                    *velocity = [0.0; 3];
+                    break;
+                }
 
-        if i == numplanes {
-            if numplanes != 2 {
-                *velocity = [0.0; 3];
-                break;
+                let dir = cross(planes[0], planes[1]);
+                let d = dot(dir, *velocity);
+                velocity[0] = dir[0] * d;
+                velocity[1] = dir[1] * d;
+                velocity[2] = dir[2] * d;
             }
-
-            let dir = cross(planes[0], planes[1]);
-            let d = dot(dir, *velocity);
-            velocity[0] = dir[0] * d;
-            velocity[1] = dir[1] * d;
-            velocity[2] = dir[2] * d;
 
             if dot(*velocity, primal_velocity) <= 0.0 {
                 *velocity = [0.0; 3];
                 break;
             }
         }
+    }
+
+    if all_fraction == 0.0 {
+        *velocity = [0.0; 3];
     }
 
     blocked
@@ -366,7 +398,7 @@ pub fn pm_walk_move(
         wishdir,
         wishspeed,
         vars.accelerate,
-        vars.stopspeed,
+        vars.friction,
         dt,
     );
     state.velocity[2] = 0.0;
@@ -505,21 +537,33 @@ pub fn pm_jump(state: &mut PlayerState, _cmd: &PlayerCmd, vars: &MoveVars, dt: f
         return;
     }
 
+    // Do not allow jump if fully crouched in duck hull (`bInDuck && FL_DUCKING`)
+    if state.in_duck && state.is_ducking {
+        return;
+    }
+
     // Leave the ground immediately
     state.on_ground = false;
 
-    // Apply tournament bunnyhop speed cap
-    pm_prevent_mega_bunny_jumping(&mut state.velocity, vars.maxspeed);
+    // Apply tournament bunnyhop speed cap if enabled
+    if !vars.enable_bunnyhopping {
+        pm_prevent_mega_bunny_jumping(&mut state.velocity, vars.maxspeed);
+    }
 
-    // Apply canonical jump impulse
+    // Apply canonical jump impulse: sqrt(2 * 800 * 45) = 268.32816
     let mut jump_z = JUMP_IMPULSE;
     if state.jump_penalty_ms > 0.0 {
         let ratio = (100.0 - state.jump_penalty_ms * 0.001 * 19.0) * 0.01;
         jump_z *= ratio;
     }
-    // Midpoint Verlet half-step gravity: subtract 0.5 * gravity * dt so velocity
-    // inside pm_air_move represents the interval midpoint velocity, yielding exact
-    // analytical parabola peak height (44.98 u normal jump, 62.98 u crouch jump < 64.0 u).
+
+    // ReGameDLL / GoldSrc authentic PM_Jump:
+    // In GoldSrc PM_PlayerMove: PM_AddCorrectGravity subtracts 0.5 * gravity * dt BEFORE PM_Jump is called.
+    // When PM_Jump executes, it sets velocity[2] = PM_JumpHeight(), and then PM_FixupGravityVelocity
+    // at the end of the tick subtracts the second 0.5 * gravity * dt.
+    // In our pm_player_move structure where gravity is applied in two halves:
+    // Setting velocity[2] = jump_z - 0.5 * gravity * dt yields the exact midpoint velocity
+    // during PM_AirMove, resulting in exact 44.98 unit analytical parabola peak height!
     state.velocity[2] = jump_z - vars.gravity * 0.5 * dt;
 
     // Add stamina cooldown
@@ -797,38 +841,22 @@ pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
             return;
         }
 
-        // Trigger smooth unduck animation if transitioning from crouching
+        // ReGameDLL / GoldSrc authentic PM_UnDuck:
+        // When unducking, view_ofs is set to VEC_VIEW (17.0) immediately!
         state.is_ducking = false;
         state.in_duck = false;
         state.origin = new_origin;
+        state.unduck_time_ms = 0.0;
+        state.view_height = VEC_VIEW_STANDING;
+        state.duck_time_ms = 0.0;
 
         if state.on_ground {
-            state.unduck_time_ms = TIME_TO_UNDUCK * 1000.0;
             pm_categorize_position(state, world);
-        } else {
-            state.unduck_time_ms = 0.0;
-            state.view_height = VEC_VIEW_STANDING;
-            return;
         }
-    }
-
-    if state.unduck_time_ms > 0.0 {
-        const F_MORE: f32 = 18.0;
-        // Smoothly interpolate camera rise from (VEC_VIEW_DUCKING - 18.0) up to VEC_VIEW_STANDING
-        // When unduck starts, origin[2] jumps by +18 units immediately.
-        // By starting view_height at (12.0 - 18.0) = -6.0, the eye position (origin + view_height)
-        // at tick 0 has delta = +18 - 18 = 0.0, and smoothly rises over TIME_TO_UNDUCK (200 ms)!
-        let time = 1.0 - (state.unduck_time_ms / (TIME_TO_UNDUCK * 1000.0));
-        let fraction = if time >= 0.0 {
-            pm_spline_fraction(time, 1.0)
-        } else {
-            0.0
-        };
-        state.view_height =
-            (VEC_VIEW_DUCKING - F_MORE) * (1.0 - fraction) + VEC_VIEW_STANDING * fraction;
     } else {
         state.view_height = VEC_VIEW_STANDING;
         state.duck_time_ms = 0.0;
+        state.unduck_time_ms = 0.0;
     }
 }
 
@@ -1071,8 +1099,17 @@ pub fn pm_player_move(
 
     if state.on_ground {
         state.velocity[2] = 0.0;
+        // Check landing impact, punchangle and footstep noise (PM_CheckFalling)
+        if state.fall_velocity >= 250.0 {
+            state.punch_angle[0] = (state.fall_velocity * 0.013).min(8.0);
+            state.step_sound_time_ms = 300.0;
+        }
+        state.fall_velocity = 0.0;
     }
 
-    // 10. Update buttons
+    // 10. Check velocity bounds and NaN safety (PM_CheckVelocity)
+    pm_check_velocity(&mut state.velocity, &mut state.origin, vars.maxvelocity);
+
+    // 11. Update buttons
     state.old_buttons = cmd.buttons;
 }

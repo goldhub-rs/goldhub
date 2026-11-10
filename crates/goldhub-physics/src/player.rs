@@ -57,6 +57,10 @@ pub struct PlayerState {
     pub step_sound_time_ms: f32,
     /// Downward vertical velocity prior to landing (for falling damage / sound).
     pub fall_velocity: f32,
+    /// Base velocity imparted by moving platforms/doors/conveyors (`basevelocity`).
+    pub base_velocity: [f32; 3],
+    /// Screen punch angle [Pitch, Yaw, Roll] from landing impact or recoil (`punchangle`).
+    pub punch_angle: [f32; 3],
     /// True if player is actively mounted on a ladder (`g_onladder`).
     pub on_ladder: bool,
     /// Previous tick's button state for edge-detection (jump/duck triggers).
@@ -80,6 +84,8 @@ impl Default for PlayerState {
             jump_penalty_ms: 0.0,
             step_sound_time_ms: 0.0,
             fall_velocity: 0.0,
+            base_velocity: [0.0; 3],
+            punch_angle: [0.0; 3],
             on_ladder: false,
             old_buttons: 0,
             dead: false,
