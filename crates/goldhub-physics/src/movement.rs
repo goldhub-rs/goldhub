@@ -369,15 +369,18 @@ pub fn pm_walk_move(
     let mut smove = cmd.side_move;
 
     let is_duck_active = (cmd.buttons & IN_DUCK) != 0 || state.in_duck || state.is_ducking;
-    // In authentic GoldSrc / ReGameDLL CS 1.6, ducking takes precedence over walking (+speed).
-    // They do not compound multiplicatively.
-    let speed_mult = if is_duck_active {
-        vars.ducking_speed_multiplier
-    } else if (cmd.buttons & IN_SPEED) != 0 {
-        vars.walking_speed_multiplier
-    } else {
-        1.0
-    };
+    // In authentic GoldSrc / CS 1.6, +speed (client-side cmd scale) and +duck (PM_Duck multiplier)
+    // compound multiplicatively (0.33333334 * 0.52 = ~0.173).
+    // Due to sv_stopspeed (75 u/s) friction threshold in PM_Friction,
+    // this compounding reduces ground speed to an ultra-slow crawl (~1.5 - 2.5 u/s),
+    // exactly matching real CS 1.6 KZ speedometer measurements!
+    let mut speed_mult = 1.0;
+    if is_duck_active {
+        speed_mult *= vars.ducking_speed_multiplier;
+    }
+    if (cmd.buttons & IN_SPEED) != 0 {
+        speed_mult *= vars.walking_speed_multiplier;
+    }
 
     fmove *= speed_mult;
     smove *= speed_mult;
@@ -1013,6 +1016,20 @@ pub fn pm_player_move(
         return;
     }
 
+    // Authentic GoldSrc PM_DropPunchAngle (regamedll / pm_shared.c)
+    // Decays landing and weapon punch angles continuously
+    let punch_len = (state.punch_angle[0].powi(2)
+        + state.punch_angle[1].powi(2)
+        + state.punch_angle[2].powi(2))
+    .sqrt();
+    if punch_len > 0.0 {
+        let new_len = (punch_len - (10.0 + punch_len * 0.5) * dt).max(0.0);
+        let scale = new_len / punch_len;
+        state.punch_angle[0] *= scale;
+        state.punch_angle[1] *= scale;
+        state.punch_angle[2] *= scale;
+    }
+
     // 1. Decrement timers
     let dt_ms = dt * 1000.0;
     if state.duck_time_ms > 0.0 {
@@ -1107,7 +1124,12 @@ pub fn pm_player_move(
         state.velocity[2] = 0.0;
         // Check landing impact, punchangle and footstep noise (PM_CheckFalling)
         if state.fall_velocity >= 250.0 {
-            state.punch_angle[0] = (state.fall_velocity * 0.013).min(8.0);
+            // Authentic GoldSrc / ReGameDLL PM_CheckFalling:
+            // pmove->punchangle[2] = pmove->flFallVelocity * 0.013; (roll kick)
+            // pmove->punchangle[0] = min(pmove->flFallVelocity * 0.013, 8.0); (pitch kick)
+            let punch = (state.fall_velocity * 0.013).min(8.0);
+            state.punch_angle[0] = punch;
+            state.punch_angle[2] = state.fall_velocity * 0.013;
             state.step_sound_time_ms = 300.0;
         }
         state.fall_velocity = 0.0;

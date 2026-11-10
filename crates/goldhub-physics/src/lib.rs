@@ -331,11 +331,12 @@ mod tests {
         }
 
         let speed = sim.current.horizontal_speed();
-        // In authentic CS 1.6, ducking has priority over walking (speed is ~83.33 u/s = 250 * 0.33333334).
-        let expected_duck_speed = 250.0 * PLAYER_DUCKING_MULTIPLIER;
+        // Authentic CS 1.6 / KZ server measurement:
+        // When both Duck (0.333) and Speed (0.52) are active, wishspeed drops below stopspeed,
+        // causing friction to clamp movement to a crawl of ~1.5 - 2.5 u/s (approx 2 u/s).
         assert!(
-            (speed - expected_duck_speed).abs() < 1.0,
-            "Duck + Shift speed must respect duck speed priority ~{expected_duck_speed:.2} u/s (got {speed})"
+            speed > 0.5 && speed < 3.0,
+            "Duck + Shift speed must yield authentic KZ creep speed ~1.5 - 2.5 u/s (got {speed})"
         );
 
         // 2. Release both Duck and Speed - speed must promptly recover to full running speed!

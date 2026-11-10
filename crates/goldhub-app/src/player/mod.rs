@@ -394,11 +394,21 @@ pub fn player_movement_system(
 
         // 6. Coordinate system transformation from GoldSrc (Z-up) to Bevy (Y-up)
         let eye_pos = Vec3::new(gs_pos[0], gs_pos[2] + view_h, -gs_pos[1]);
-        let (punch_pitch, punch_yaw) = recoil.map_or((0.0, 0.0), |r| {
+        let (recoil_pitch, recoil_yaw) = recoil.map_or((0.0, 0.0), |r| {
             (r.punch_pitch.to_radians(), r.punch_yaw.to_radians())
         });
-        let cam_rot = Quat::from_rotation_y(player.yaw + punch_yaw)
-            * Quat::from_rotation_x(player.pitch + punch_pitch);
+        // Combine weapon kickback recoil with physical impact landing punch (pitch and roll)
+        let sim_punch = player.sim.current.punch_angle;
+        let landing_pitch = sim_punch[0].to_radians();
+        let landing_roll = sim_punch[2].to_radians();
+
+        let total_pitch = player.pitch + recoil_pitch - landing_pitch;
+        let total_yaw = player.yaw + recoil_yaw;
+        let total_roll = landing_roll;
+
+        let cam_rot = Quat::from_rotation_y(total_yaw)
+            * Quat::from_rotation_x(total_pitch)
+            * Quat::from_rotation_z(total_roll);
 
         // Support GoldSrc Third-Person View (cam_idealdist = 64) with wall-clip protection
         let final_pos = if *perspective == CameraPerspective::ThirdPerson {
