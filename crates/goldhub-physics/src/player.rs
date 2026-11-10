@@ -61,6 +61,8 @@ pub struct PlayerState {
     pub base_velocity: [f32; 3],
     /// Screen punch angle [Pitch, Yaw, Roll] from landing impact or recoil (`punchangle`).
     pub punch_angle: [f32; 3],
+    /// Surface friction modifier (`pmove->friction`, default 1.0).
+    pub surface_friction: f32,
     /// True if player is actively mounted on a ladder (`g_onladder`).
     pub on_ladder: bool,
     /// Previous tick's button state for edge-detection (jump/duck triggers).
@@ -86,6 +88,7 @@ impl Default for PlayerState {
             fall_velocity: 0.0,
             base_velocity: [0.0; 3],
             punch_angle: [0.0; 3],
+            surface_friction: 1.0,
             on_ladder: false,
             old_buttons: 0,
             dead: false,

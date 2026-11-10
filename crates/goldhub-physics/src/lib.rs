@@ -331,10 +331,11 @@ mod tests {
         }
 
         let speed = sim.current.horizontal_speed();
-        // Compound duck (0.333) and walk (0.52) speed yields slow creep speed (~43.29 u/s).
+        // In authentic CS 1.6, ducking has priority over walking (speed is ~83.33 u/s = 250 * 0.33333334).
+        let expected_duck_speed = 250.0 * PLAYER_DUCKING_MULTIPLIER;
         assert!(
-            (speed - 43.29).abs() < 1.0,
-            "Duck + Shift speed must compound to slow creep speed ~43.29 u/s (got {speed})"
+            (speed - expected_duck_speed).abs() < 1.0,
+            "Duck + Shift speed must respect duck speed priority ~{expected_duck_speed:.2} u/s (got {speed})"
         );
 
         // 2. Release both Duck and Speed - speed must promptly recover to full running speed!

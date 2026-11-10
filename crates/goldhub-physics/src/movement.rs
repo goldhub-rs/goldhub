@@ -101,7 +101,8 @@ pub fn pm_friction(state: &mut PlayerState, vars: &MoveVars, dt: f32) {
         speed
     };
 
-    let drop = vars.friction * control * dt;
+    let friction = vars.friction * state.surface_friction;
+    let drop = friction * control * dt;
     let mut newspeed = speed - drop;
     if newspeed < 0.0 {
         newspeed = 0.0;
@@ -137,7 +138,7 @@ pub fn pm_accelerate(
     wishdir: [f32; 3],
     wishspeed: f32,
     accel: f32,
-    friction: f32,
+    surface_friction: f32,
     dt: f32,
 ) {
     let currentspeed = dot(*velocity, wishdir);
@@ -149,7 +150,7 @@ pub fn pm_accelerate(
 
     // Authentic ReGameDLL / GoldSrc PM_Accelerate:
     // accelspeed = accel * pmove->frametime * wishspeed * pmove->friction
-    let mut accelspeed = accel * dt * wishspeed * friction;
+    let mut accelspeed = accel * dt * wishspeed * surface_friction;
     if accelspeed > addspeed {
         accelspeed = addspeed;
     }
@@ -368,13 +369,15 @@ pub fn pm_walk_move(
     let mut smove = cmd.side_move;
 
     let is_duck_active = (cmd.buttons & IN_DUCK) != 0 || state.in_duck || state.is_ducking;
-    let mut speed_mult = 1.0;
-    if is_duck_active {
-        speed_mult *= vars.ducking_speed_multiplier;
-    }
-    if (cmd.buttons & IN_SPEED) != 0 {
-        speed_mult *= vars.walking_speed_multiplier;
-    }
+    // In authentic GoldSrc / ReGameDLL CS 1.6, ducking takes precedence over walking (+speed).
+    // They do not compound multiplicatively.
+    let speed_mult = if is_duck_active {
+        vars.ducking_speed_multiplier
+    } else if (cmd.buttons & IN_SPEED) != 0 {
+        vars.walking_speed_multiplier
+    } else {
+        1.0
+    };
 
     fmove *= speed_mult;
     smove *= speed_mult;
@@ -398,7 +401,7 @@ pub fn pm_walk_move(
         wishdir,
         wishspeed,
         vars.accelerate,
-        vars.friction,
+        state.surface_friction,
         dt,
     );
     state.velocity[2] = 0.0;
@@ -1001,6 +1004,9 @@ pub fn pm_player_move(
     if state.dead {
         return;
     }
+
+    // Reset surface friction modifier each frame (ReGameDLL pmove->friction = 1.0f)
+    state.surface_friction = 1.0;
 
     // 0. Always test and unstick player (PM_CheckStuck)
     if pm_check_stuck(state, world) {
