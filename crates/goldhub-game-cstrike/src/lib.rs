@@ -34,6 +34,20 @@ mod tests {
         let knife = get_weapon_def(WeaponId::Knife);
         assert_eq!(knife.clip_size, 0);
         assert_eq!(knife.damage, 25.0);
+
+        // Verify all 30 canonical weapons define non-empty names and valid slots
+        let all_weapons = WeaponId::all();
+        assert_eq!(all_weapons.len(), 30);
+        for id in all_weapons {
+            let def = get_weapon_def(id);
+            assert!(!def.name.is_empty(), "Weapon {id:?} must have a name");
+            assert!(!def.v_model.is_empty(), "Weapon {id:?} must have a v_model");
+            assert!(!def.p_model.is_empty(), "Weapon {id:?} must have a p_model");
+            assert!(
+                !def.shoot_sound.is_empty(),
+                "Weapon {id:?} must have a shoot sound"
+            );
+        }
     }
 
     #[test]
