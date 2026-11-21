@@ -15,12 +15,8 @@ nextgen = []
 
 [dependencies]
 wire-ring = { workspace = true }
-zerocopy = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
-blake3 = { workspace = true }
-odd-int = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
