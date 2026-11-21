@@ -12,8 +12,6 @@ description = "Deterministic CS 1.6 tournament-grade player physics engine (128 
 goldhub-engine-api = { path = "../goldhub-engine-api" }
 goldhub-formats = { path = "../goldhub-formats" }
 goldhub-net = { path = "../goldhub-net" }
-bytemuck = { workspace = true }
-zerocopy = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
