@@ -46,12 +46,16 @@ Benchmarks measured on official Counter-Strike 1.6 game assets (`de_dust2`, `v_a
 
 | Crate | Layer | Description |
 | --- | --- | --- |
-| [`goldhub-app`](crates/goldhub-app) | Runtime | Main desktop application entry point, lifecycle, and window management. |
-| [`goldhub-core`](crates/goldhub-core) | Core | Foundational game engine primitives, math, time, and identity tokens. |
-| [`goldhub-vfs`](crates/goldhub-vfs) | Storage | Zero-copy sandboxed virtual filesystem, CAS shared pool, and BLAKE3 verification. |
-| [`goldhub-ui`](crates/goldhub-ui) | Interface | Native OS WebView (`wry`) bridge, UI overlay, and IPC message bus. |
-| [`goldhub-game-cstrike`](crates/goldhub-game-cstrike) | Game | Clean-room deterministic Counter-Strike 1.6 game rules, buy menu, and physics. |
-| [`goldhub-network`](crates/goldhub-network) | Network | High-throughput packet framing and tick-based client-server synchronization. |
+| [`goldhub-app`](crates/goldhub-app) | Runtime | Main desktop application entry point, lifecycle, and comparative benchmark harness. |
+| [`goldhub-vfs`](crates/goldhub-vfs) | Storage | Zero-copy sandboxed virtual filesystem, CAS shared pool (`.flb`), and BLAKE3 verification. |
+| [`goldhub-formats`](crates/goldhub-formats) | Formats | Legacy GoldSrc BSP30, StudioMDL, and WAV asset parser bridge. |
+| [`goldhub-game-cstrike`](crates/goldhub-game-cstrike) | Game | Clean-room deterministic Counter-Strike 1.6 game rules, buy menu, cash, and weapons. |
+| [`goldhub-server-cstrike`](crates/goldhub-server-cstrike) | Server | Dedicated server runtime, tick loop, and player state orchestration. |
+| [`goldhub-engine-api`](crates/goldhub-engine-api) | API | Stable engine API, entity system contracts, and modding interfaces. |
+| [`goldhub-audio`](crates/goldhub-audio) | Audio | Spatial sound mixer, zero-copy buffer streaming, and audio playback. |
+| [`goldhub-physics`](crates/goldhub-physics) | Physics | Deterministic player movement (PMov), hull collision, and raycasting. |
+| [`goldhub-net`](crates/goldhub-net) | Network | High-throughput packet framing and tick-based client-server synchronization. |
+| [`goldhub-manifest`](crates/goldhub-manifest) | Manifest | Declarative `game.toml` and package configuration parser. |
 
 ---
 
