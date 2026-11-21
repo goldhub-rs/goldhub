@@ -10,12 +10,6 @@ description = "Orthogonal, transport-agnostic Counter-Strike 1.6 authoritative s
 
 [dependencies]
 bevy = { workspace = true, default-features = false }
-goldhub-engine-api = { path = "../goldhub-engine-api" }
-goldhub-game-cstrike = { path = "../goldhub-game-cstrike" }
-goldhub-formats = { path = "../goldhub-formats" }
-goldhub-physics = { path = "../goldhub-physics" }
-goldhub-net = { path = "../goldhub-net" }
-tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
