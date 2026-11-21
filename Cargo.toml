@@ -58,11 +58,11 @@ stitch-data-layout = { git = "https://github.com/ulquiorracode/stitch-rs.git", b
 odd-int = { git = "https://github.com/ulquiorracode/odd-int-rs.git", branch = "dev" }
 
 # FlatFormats zero-allocation ecosystem
-flatasset-core = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-core" }
-flatasset-texture = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-texture" }
-flatasset-mesh = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-mesh" }
-flatasset-world = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-world" }
-flatasset-audio = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-audio" }
+flatasset-core = { git = "https://github.com/flat-formats-rs/flat-formats-asset.git", branch = "dev" }
+flatasset-texture = { git = "https://github.com/flat-formats-rs/flat-formats-asset.git", branch = "dev" }
+flatasset-mesh = { git = "https://github.com/flat-formats-rs/flat-formats-asset.git", branch = "dev" }
+flatasset-world = { git = "https://github.com/flat-formats-rs/flat-formats-asset.git", branch = "dev" }
+flatasset-audio = { git = "https://github.com/flat-formats-rs/flat-formats-asset.git", branch = "dev" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
@@ -105,15 +105,4 @@ codegen-units = 1
 panic = "unwind"
 strip = "debuginfo"
 
-[patch."https://github.com/ulquiorracode/wire-ring-rs.git"]
-wire-ring = { path = "../wire-ring-rs/crates/wire-ring" }
-wire-ring-core = { path = "../wire-ring-rs/crates/wire-ring-core" }
 
-[patch."https://github.com/ulquiorracode/proc-safety-rs.git"]
-proc-safety = { path = "../proc-safety-rs" }
-
-[patch."https://github.com/ulquiorracode/odd-int-rs.git"]
-odd-int = { path = "../odd-int-rs" }
-
-[patch."https://github.com/flat-formats-rs/flat-formats-demo.git"]
-flatdemo-core = { path = "../FlatFormats.rs/flat-formats-demo/core/flatdemo-core" }
