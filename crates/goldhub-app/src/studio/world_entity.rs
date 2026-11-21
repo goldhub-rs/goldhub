@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use goldhub_physics::WorldTrace;
 
 use super::animation::StudioAnimatedModel;
-use super::store::{StudioModelStore, create_initial_bevy_mesh};
+use super::store::{StudioModelStore, spawn_model_submesh_children};
 use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
 use crate::player::LevelCollisionResource;
 
@@ -50,6 +50,7 @@ pub struct HostageEntity {
     pub velocity: Vec3,
     pub next_use_time: f32,
     pub home_pos: Vec3,
+    pub home_rot: Quat,
 }
 
 /// Spawns interactive 3D studio entities parsed from the BSP map's entity lump.
@@ -319,26 +320,16 @@ pub fn spawn_studio_entity(
         ))
         .id();
 
-    // Spawn child entities for each submesh
-    let mut mesh_children = Vec::with_capacity(model_data.submeshes.len());
-    for (sub_idx, template) in model_data.submeshes.iter().enumerate() {
-        let bevy_mesh = create_initial_bevy_mesh(template, false);
-        let mesh_handle = meshes.add(bevy_mesh);
-
-        let child_entity = commands
-            .spawn((
-                Mesh3d(mesh_handle.clone()),
-                MeshMaterial3d(template.material.clone()),
-                Transform::IDENTITY,
-                bevy::render::view::NoFrustumCulling,
-            ))
-            .id();
-
-        commands.entity(parent_entity).add_child(child_entity);
-        mesh_children.push((child_entity, mesh_handle, sub_idx));
-    }
-
-    anim_component.mesh_entities = mesh_children;
+    // Spawn child entities for each submesh via shared helper
+    anim_component.mesh_entities = spawn_model_submesh_children(
+        commands,
+        parent_entity,
+        &model_data,
+        initial_seq,
+        false,
+        None,
+        meshes,
+    );
     commands.entity(parent_entity).insert(anim_component);
 
     let is_hostage = classname == "hostage_entity" || classname == "monster_scientist";
@@ -353,6 +344,7 @@ pub fn spawn_studio_entity(
             velocity: Vec3::ZERO,
             next_use_time: 0.0,
             home_pos: position,
+            home_rot: rotation,
         });
     }
 
@@ -394,6 +386,7 @@ pub fn hostage_interaction_and_ai_system(
         ),
         Without<crate::player::PlayerController>,
     >,
+    mut scenario_map: Option<ResMut<crate::entity::ScenarioMapData>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -413,14 +406,16 @@ pub fn hostage_interaction_and_ai_system(
         }
 
         let h_pos = h_t.translation;
-        let delta = player_pos - h_pos;
-        let dist = delta.length();
+        // Target hostage chest (~36u above feet) so looking straight ahead interacts cleanly even close up
+        let h_chest = h_pos + Vec3::Y * 36.0;
+        let chest_delta = h_chest - player_pos;
+        let dist = chest_delta.length();
 
         // 1. +use (E key) toggle between Stand and Follow
-        if use_pressed && dist <= 80.0 {
-            let dir_to_hostage = (h_pos - player_pos).normalize_or_zero();
+        if use_pressed && dist <= 96.0 {
+            let dir_to_hostage = chest_delta.normalize_or_zero();
             let dot = player_fwd.dot(dir_to_hostage);
-            if dot >= 0.65 && hostage.next_use_time <= time.elapsed_secs() {
+            if dot >= 0.45 && hostage.next_use_time <= time.elapsed_secs() {
                 hostage.next_use_time = time.elapsed_secs() + 1.0;
 
                 if hostage.state == HostageState::Follow && hostage.leader == Some(player_ent) {
@@ -442,8 +437,10 @@ pub fn hostage_interaction_and_ai_system(
                 {
                     commands.spawn((
                         AudioPlayer::new(h),
-                        PlaybackSettings::DESPAWN.with_spatial(true),
-                        Transform::from_translation(h_pos),
+                        PlaybackSettings::DESPAWN
+                            .with_spatial(true)
+                            .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 64.0)),
+                        Transform::from_translation(h_chest),
                     ));
                 }
             }
@@ -484,8 +481,8 @@ pub fn hostage_interaction_and_ai_system(
                 hostage.velocity = move_dir * speed;
                 h_t.translation += move_dir * speed * dt;
 
-                // Face moving direction (GoldSrc model forward is -Z in Bevy coords, facing along yaw)
-                let target_yaw = move_dir.x.atan2(-move_dir.z);
+                // Face moving direction (+X local forward maps to (cos yaw, 0, -sin yaw))
+                let target_yaw = (-move_dir.z).atan2(move_dir.x);
                 h_t.rotation = Quat::from_rotation_y(target_yaw);
 
                 // Snap feet to ground using BSP collision trace
@@ -533,6 +530,9 @@ pub fn hostage_interaction_and_ai_system(
                     *vis = Visibility::Hidden;
                     bounds.mins = Vec3::ZERO;
                     bounds.maxs = Vec3::ZERO;
+                    if let Some(ref mut map_data) = scenario_map {
+                        map_data.hostages_rescued += 1;
+                    }
 
                     if let Some(h) = audio_bank.get_or_load_sound(
                         "radio/rescued.wav",
@@ -544,6 +544,43 @@ pub fn hostage_interaction_and_ai_system(
                     tracing::info!(hostage = ?h_ent, "Hostage successfully rescued in rescue zone!");
                     break;
                 }
+            }
+        }
+    }
+}
+
+/// Restores all hostages to their initial spawn transforms, health, and standing idle pose on round reset.
+pub fn handle_round_reset_hostages_system(
+    mut reset_events: EventReader<crate::entity::RoundResetEvent>,
+    model_store: Res<StudioModelStore>,
+    mut hostage_query: Query<(
+        &mut HostageEntity,
+        &mut Transform,
+        &mut StudioAnimatedModel,
+        &mut EntityCollisionBounds,
+        &mut Visibility,
+    )>,
+) {
+    if reset_events.read().last().is_none() {
+        return;
+    }
+    for (mut hostage, mut h_t, mut h_anim, mut bounds, mut vis) in &mut hostage_query {
+        hostage.health = hostage.max_health;
+        hostage.is_dead = false;
+        hostage.pain_cooldown = 0.0;
+        hostage.state = HostageState::Stand;
+        hostage.leader = None;
+        hostage.velocity = Vec3::ZERO;
+        hostage.next_use_time = 0.0;
+        h_t.translation = hostage.home_pos;
+        h_t.rotation = hostage.home_rot;
+        bounds.mins = Vec3::new(-16.0, 0.0, -16.0);
+        bounds.maxs = Vec3::new(16.0, 72.0, 16.0);
+        *vis = Visibility::Inherited;
+        if let Some(model_data) = model_store.models.get(&h_anim.model_id) {
+            let seqs = &model_data.model.rig.sequences;
+            if let Some(idle_idx) = seqs.iter().position(|s| s.name == "idle1") {
+                h_anim.set_sequence(idle_idx, seqs[idle_idx].fps, true);
             }
         }
     }

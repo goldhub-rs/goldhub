@@ -731,12 +731,14 @@ pub fn pm_duck(
         return;
     }
 
-    if (cmd.buttons & IN_DUCK) == 0
-        && !state.in_duck
-        && !state.is_ducking
-        && state.unduck_time_ms <= 0.0
-    {
-        state.view_height = VEC_VIEW_STANDING;
+    if (cmd.buttons & IN_DUCK) == 0 && !state.in_duck && !state.is_ducking {
+        if state.unduck_time_ms > 0.0 {
+            let t = (1.0 - state.unduck_time_ms / 200.0).clamp(0.0, 1.0);
+            let frac = pm_spline_fraction(t, 1.0);
+            state.view_height = state.unduck_start_height * (1.0 - frac) + VEC_VIEW_STANDING * frac;
+        } else {
+            state.view_height = VEC_VIEW_STANDING;
+        }
         return;
     }
 
@@ -847,13 +849,18 @@ pub fn pm_unduck(state: &mut PlayerState, world: &impl WorldTrace) {
             return;
         }
 
-        // ReGameDLL / GoldSrc authentic PM_UnDuck:
-        // When unducking, view_ofs is set to VEC_VIEW (17.0) immediately!
+        // Smooth cubic Hermite spline stand-up interpolation (TIME_TO_UNDUCK = 200ms):
+        // Collision hull immediately restores standing clearance, while view_height starts
+        // from (VEC_VIEW_DUCKING - dz) so eye world Z has zero discontinuity across the
+        // hull lift, then smoothly rises to VEC_VIEW_STANDING over 200 ms.
+        let dz = new_origin[2] - state.origin[2];
+        let start_height = VEC_VIEW_DUCKING - dz;
         state.is_ducking = false;
         state.in_duck = false;
         state.origin = new_origin;
-        state.unduck_time_ms = 0.0;
-        state.view_height = VEC_VIEW_STANDING;
+        state.unduck_start_height = start_height;
+        state.unduck_time_ms = 200.0;
+        state.view_height = start_height;
         state.duck_time_ms = 0.0;
 
         if state.on_ground {
@@ -1123,13 +1130,18 @@ pub fn pm_player_move(
     if state.on_ground {
         state.velocity[2] = 0.0;
         // Check landing impact, punchangle and footstep noise (PM_CheckFalling)
-        if state.fall_velocity >= 250.0 {
+        // PM_PLAYER_MAX_SAFE_FALL_SPEED is 580 u/s; PM_PLAYER_FALL_PUNCH_THRESHHOLD is 250 u/s.
+        // A standard GoldSrc jump reaches ~250 u/s at landing. In authentic CS 1.6, standard jumps
+        // do not produce screen shake. Only genuine falls exceeding safe thresholds (> 350 u/s) punch view.
+        if state.fall_velocity >= 360.0 {
             // Authentic GoldSrc / ReGameDLL PM_CheckFalling:
             // pmove->punchangle[2] = pmove->flFallVelocity * 0.013; (roll kick)
             // pmove->punchangle[0] = min(pmove->flFallVelocity * 0.013, 8.0); (pitch kick)
-            let punch = (state.fall_velocity * 0.013).min(8.0);
-            state.punch_angle[0] = punch;
-            state.punch_angle[2] = state.fall_velocity * 0.013;
+            let excess = state.fall_velocity - 360.0;
+            let punch_pitch = (excess * 0.008).min(6.0);
+            let punch_roll = (excess * 0.006).min(4.0);
+            state.punch_angle[0] = punch_pitch;
+            state.punch_angle[2] = punch_roll;
             state.step_sound_time_ms = 300.0;
         }
         state.fall_velocity = 0.0;

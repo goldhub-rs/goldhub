@@ -429,8 +429,9 @@ impl StudioMdlDecoder {
                             }
                         }
 
-                        // Sample animation bone matrices for each frame
-                        let bone_matrices = sample_sequence_bone_matrices(bytes, raw_bones, s);
+                        // Sample center blend plus full multi-blend grid (e.g. 9-way player aim pitch/yaw)
+                        let (bone_matrices, blend_bone_matrices) =
+                            sample_sequence_bone_matrices_with_blends(bytes, raw_bones, s);
 
                         sequences.push(SequenceData {
                             name: label,
@@ -442,7 +443,9 @@ impl StudioMdlDecoder {
                             events,
                             bbmin: s.bbmin,
                             bbmax: s.bbmax,
+                            blend_count: s.num_blends.clamp(0, i32::from(u8::MAX)) as u8,
                             bone_matrices,
+                            blend_bone_matrices,
                         });
                     }
                 }
@@ -852,34 +855,18 @@ fn multiply_4x4(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     out
 }
 
-/// Samples bone transform matrices for every frame of a sequence.
-fn sample_sequence_bone_matrices(
+/// Samples bone transform matrices for every frame of a single blend index.
+fn sample_blend_bone_matrices(
     bytes: &[u8],
     bones: &[MdlBone],
     seq: &MdlSequenceDesc,
+    blend_idx: usize,
 ) -> Vec<Vec<[f32; 16]>> {
     let num_frames = seq.num_frames.max(1) as usize;
     let num_bones = bones.len();
-    if seq.anim_index <= 0 || (seq.anim_index as usize) >= bytes.len() {
-        return Vec::new();
-    }
-
-    // In GoldSrc / CS 1.6, sequences with 9-way blending (e.g. ref_aim_*, crouch_aim_*)
-    // arrange blend animations in a 3x3 grid:
-    // Row 0 (0..2): pitch up (+45°)
-    // Row 1 (3..5): pitch level (0°), where blend 4 is center (forward)
-    // Row 2 (6..8): pitch down (-45°)
-    // For 2-way blending, blend 0 is typically center.
-    let blend_idx = if seq.num_blends == 9 {
-        4
-    } else if seq.num_blends > 1 {
-        (seq.num_blends / 2) as usize
-    } else {
-        0
-    };
     let blend_offset = blend_idx * num_bones * 12;
     let anim_base = (seq.anim_index as usize) + blend_offset;
-    if anim_base >= bytes.len() {
+    if seq.anim_index <= 0 || anim_base >= bytes.len() {
         return Vec::new();
     }
     let mut all_frame_matrices = Vec::with_capacity(num_frames);
@@ -910,6 +897,38 @@ fn sample_sequence_bone_matrices(
     }
 
     all_frame_matrices
+}
+
+/// Samples center blend matrices and, when `num_blends > 1`, all blend slots (`[blend][frame][bone]`).
+#[allow(clippy::type_complexity)]
+fn sample_sequence_bone_matrices_with_blends(
+    bytes: &[u8],
+    bones: &[MdlBone],
+    seq: &MdlSequenceDesc,
+) -> (Vec<Vec<[f32; 16]>>, Vec<Vec<Vec<[f32; 16]>>>) {
+    if seq.anim_index <= 0 || (seq.anim_index as usize) >= bytes.len() {
+        return (Vec::new(), Vec::new());
+    }
+    let num_blends = seq.num_blends.max(1) as usize;
+    let center_blend = if num_blends == 9 {
+        4
+    } else if num_blends > 1 {
+        num_blends / 2
+    } else {
+        0
+    };
+
+    if num_blends <= 1 {
+        let center = sample_blend_bone_matrices(bytes, bones, seq, 0);
+        return (center, Vec::new());
+    }
+
+    let mut blends = Vec::with_capacity(num_blends);
+    for b in 0..num_blends {
+        blends.push(sample_blend_bone_matrices(bytes, bones, seq, b));
+    }
+    let center = blends.get(center_blend).cloned().unwrap_or_default();
+    (center, blends)
 }
 
 /// Evaluates position `[x, y, z]` and angles `[xr, yr, zr]` for a single bone frame.

@@ -11,10 +11,16 @@ use crate::error::VfsError;
 pub const MMAP_THRESHOLD_BYTES: u64 = 64 * 1024; // 64 KiB
 
 /// Zero-copy or in-memory byte buffer leased from the VFS.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum VfsFileHandle {
     /// Zero-copy memory mapped buffer for large assets (BSP, WAD, MDL).
     Mapped(Arc<Mmap>),
+    /// Zero-copy borrowed slice from a mounted CAS pool or memory container.
+    SharedSlice {
+        source: Arc<Mmap>,
+        offset: usize,
+        length: usize,
+    },
     /// In-memory heap buffer for small files (scripts, configs, text).
     Buffered(Vec<u8>),
 }
@@ -25,6 +31,11 @@ impl VfsFileHandle {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Mapped(mmap) => mmap.as_ref(),
+            Self::SharedSlice {
+                source,
+                offset,
+                length,
+            } => &source[*offset..*offset + *length],
             Self::Buffered(vec) => vec.as_slice(),
         }
     }
@@ -56,16 +67,38 @@ pub struct VfsMountLayer {
     pub priority: i32,
 }
 
+/// An entry in a mounted CAS pool.
+#[derive(Debug, Clone, Copy)]
+pub struct VfsCasEntry {
+    pub name_hash: u64,
+    pub asset_kind: u32,
+    pub byte_offset: u64,
+    pub byte_length: u64,
+    pub uncompressed_size: u64,
+}
+
+/// A mounted CAS (Content-Addressable Storage) pool file (`pool.flb`).
+#[derive(Debug, Clone)]
+pub struct VfsCasMount {
+    pub pool_path: PathBuf,
+    pub mmap: Arc<Mmap>,
+    pub entries: std::collections::BTreeMap<u64, VfsCasEntry>,
+}
+
 /// The multi-layered sandboxed Virtual File System resolver.
 #[derive(Debug, Default)]
 pub struct VfsResolver {
     layers: Vec<VfsMountLayer>,
+    cas_pools: Vec<VfsCasMount>,
 }
 
 impl VfsResolver {
     /// Creates an empty VFS resolver.
     pub fn new() -> Self {
-        Self { layers: Vec::new() }
+        Self {
+            layers: Vec::new(),
+            cas_pools: Vec::new(),
+        }
     }
 
     /// Mounts a package directory into the VFS.
@@ -93,6 +126,74 @@ impl VfsResolver {
         // Sort descending: highest priority first
         self.layers.sort_by_key(|a| std::cmp::Reverse(a.priority));
         Ok(())
+    }
+
+    /// Mounts a CAS (Content-Addressable Storage) pool file into the VFS.
+    pub fn mount_cas_pool(&mut self, pool_path: impl Into<PathBuf>) -> Result<(), VfsError> {
+        let path = pool_path.into();
+        let file = File::open(&path).map_err(|e| VfsError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| VfsError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        let view = flatasset_core::bundle::FlatBundleView::new(&mmap)
+            .map_err(|e| VfsError::Layer(format!("Failed to parse CAS pool {path:?}: {e:?}")))?;
+
+        let mut entries = std::collections::BTreeMap::new();
+        for item in view.items() {
+            if !item.is_cas_reference() || item.byte_length > 0 {
+                entries.insert(
+                    item.name_hash,
+                    VfsCasEntry {
+                        name_hash: item.name_hash,
+                        asset_kind: item.asset_kind,
+                        byte_offset: item.file_offset,
+                        byte_length: item.byte_length,
+                        uncompressed_size: item.uncompressed_size,
+                    },
+                );
+            }
+        }
+
+        self.cas_pools.push(VfsCasMount {
+            pool_path: path,
+            mmap: Arc::new(mmap),
+            entries,
+        });
+
+        Ok(())
+    }
+
+    /// Resolves an asset directly by its 64-bit BLAKE3 Content-Addressable Storage (CAS) hash.
+    pub fn open_cas_asset(&self, name_hash: u64) -> Result<VfsFileHandle, VfsError> {
+        for cas in &self.cas_pools {
+            if let Some(entry) = cas.entries.get(&name_hash) {
+                let offset = entry.byte_offset as usize;
+                let length = entry.byte_length as usize;
+                if offset + length <= cas.mmap.len() {
+                    return Ok(VfsFileHandle::SharedSlice {
+                        source: Arc::clone(&cas.mmap),
+                        offset,
+                        length,
+                    });
+                }
+            }
+        }
+
+        Err(VfsError::FileNotFound(PathBuf::from(format!(
+            "@cas/0x{:016X}",
+            name_hash
+        ))))
+    }
+
+    /// Returns a slice of all mounted CAS pools.
+    pub fn cas_pools(&self) -> &[VfsCasMount] {
+        &self.cas_pools
     }
 
     /// Resolves an asset path across all mounted layers.
@@ -258,8 +359,6 @@ impl VfsResolver {
 
     /// Reads file contents safely into memory with bounded allocation limits.
     fn read_file_safe(file: File, path: &Path) -> Result<VfsFileHandle, VfsError> {
-        use std::io::Read;
-
         let metadata = file.metadata().map_err(|e| VfsError::Io {
             path: path.to_path_buf(),
             source: e,
@@ -274,6 +373,15 @@ impl VfsResolver {
             )));
         }
 
+        if len >= MMAP_THRESHOLD_BYTES {
+            let mmap = unsafe { Mmap::map(&file) }.map_err(|e| VfsError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            return Ok(VfsFileHandle::Mapped(Arc::new(mmap)));
+        }
+
+        use std::io::Read;
         let mut buf = Vec::with_capacity(len as usize);
         let mut reader = std::io::BufReader::new(file);
         reader.read_to_end(&mut buf).map_err(|e| VfsError::Io {

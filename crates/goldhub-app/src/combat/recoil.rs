@@ -8,7 +8,7 @@ pub use goldhub_game_cstrike::PlayerRecoil as CorePlayerRecoil;
 pub struct PlayerRecoil(pub goldhub_game_cstrike::PlayerRecoil);
 
 impl PlayerRecoil {
-    /// Applies authentic CS 1.6 KickBack impulses to player camera angles with maximum angular bounds.
+    /// Creates an unbounded single-impulse kickback (`direction_change = 0`) matching `KickBack`.
     #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn apply_kickback(
@@ -19,6 +19,7 @@ impl PlayerRecoil {
         lateral_mod: f32,
         up_max: f32,
         lateral_max: f32,
+        direction_change: u32,
         shots_fired: u32,
         seed: f32,
     ) {
@@ -29,6 +30,28 @@ impl PlayerRecoil {
             lateral_mod,
             up_max,
             lateral_max,
+            direction_change,
+            shots_fired,
+            seed,
+        );
+    }
+
+    /// Applies full posture-specific [`goldhub_game_cstrike::KickBackParams`] to player camera punch angles.
+    #[inline]
+    pub fn apply_kickback_params(
+        &mut self,
+        params: goldhub_game_cstrike::KickBackParams,
+        shots_fired: u32,
+        seed: f32,
+    ) {
+        self.0.apply_kickback(
+            params.up_base,
+            params.lateral_base,
+            params.up_mod,
+            params.lateral_mod,
+            params.up_max,
+            params.lateral_max,
+            params.direction_change,
             shots_fired,
             seed,
         );

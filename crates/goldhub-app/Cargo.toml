@@ -14,13 +14,24 @@ goldhub-audio = { path = "../goldhub-audio" }
 goldhub-engine-api = { path = "../goldhub-engine-api" }
 goldhub-formats = { path = "../goldhub-formats" }
 goldhub-game-cstrike = { path = "../goldhub-game-cstrike" }
+goldhub-server-cstrike = { path = "../goldhub-server-cstrike" }
 goldhub-vfs = { path = "../goldhub-vfs" }
 goldhub-manifest = { path = "../goldhub-manifest" }
 goldhub-net = { path = "../goldhub-net" }
 goldhub-physics = { path = "../goldhub-physics" }
+flatasset-core = { workspace = true }
+flatasset-texture = { workspace = true }
+flatasset-mesh = { workspace = true }
+flatasset-world = { workspace = true }
+flatasset-audio = { workspace = true }
 proc-safety = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+memmap2 = { workspace = true }
+
+[[bench]]
+name = "comparative_asset_bench"
+harness = false
 
 [lints]
 workspace = true

@@ -94,6 +94,8 @@ pub fn setup_level(
             }
         }
 
+        let search_dirs = crate::audio::collect_game_search_dirs(&search_dirs);
+
         commands.insert_resource(crate::audio::GameSearchPaths {
             dirs: search_dirs.clone(),
         });

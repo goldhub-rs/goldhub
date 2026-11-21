@@ -850,13 +850,21 @@ mod tests {
             let eye_z = state.origin[2] + state.view_height;
 
             if was_ducking && !state.is_ducking {
-                // ReGameDLL / GoldSrc parity: When unducking completes, origin[2] rises by 18,
-                // and view_height switches instantly to VEC_VIEW_STANDING (17.0).
-                assert_eq!(state.view_height, VEC_VIEW_STANDING);
+                let delta = (eye_z - prev_eye_z).abs();
+                assert!(
+                    delta < 0.01,
+                    "Eye height delta at unduck start must be continuous (<0.01 u)! Got delta = {delta}"
+                );
                 unduck_transition_verified = true;
+            } else {
+                let step_delta = (eye_z - prev_eye_z).abs();
+                assert!(
+                    step_delta < 2.5,
+                    "Sub-tick eye height step delta during smooth unduck must be smooth (<2.5 u/tick), got {step_delta}"
+                );
             }
 
-            let _ = eye_z;
+            prev_eye_z = eye_z;
         }
 
         assert!(

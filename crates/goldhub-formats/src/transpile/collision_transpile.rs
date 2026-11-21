@@ -80,6 +80,7 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
             let mut origin = [0.0f32; 3];
             let mut has_origin = false;
             let mut angles = [0.0f32; 3];
+            let mut spawnflags = 0u32;
 
             for line in block.lines() {
                 let trimmed = line.trim();
@@ -92,6 +93,10 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
                     && let Some(c_str) = trimmed.split('"').nth(3)
                 {
                     classname = c_str.to_string();
+                } else if trimmed.starts_with("\"spawnflags\"")
+                    && let Some(sf_str) = trimmed.split('"').nth(3)
+                {
+                    spawnflags = sf_str.parse::<u32>().unwrap_or(0);
                 } else if trimmed.starts_with("\"rendermode\"") {
                     if let Some(r_str) = trimmed.split('"').nth(3) {
                         rendermode = r_str.parse::<u32>().unwrap_or(0);
@@ -129,14 +134,20 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
                 && let Some(submodel) = bsp.models.get(m_idx)
             {
                 entity_id += 1;
-                let is_solid = match classname.as_str() {
-                    "func_illusionary" => false,
-                    c if c.starts_with("trigger_") => false,
-                    "func_bomb_target"
-                    | "func_buyzone"
-                    | "func_vip_safetyzone"
-                    | "func_escapezone" => false,
-                    _ => true,
+                let is_door_passable = (spawnflags & 8) != 0 && classname.starts_with("func_door");
+                let is_solid = if is_door_passable {
+                    false
+                } else {
+                    match classname.as_str() {
+                        "func_illusionary"
+                        | "func_bomb_target"
+                        | "func_buyzone"
+                        | "func_hostage_rescue"
+                        | "func_vip_safetyzone"
+                        | "func_escapezone" => false,
+                        c if c.starts_with("trigger_") => false,
+                        _ => true,
+                    }
                 };
                 let solid = if is_solid { SOLID_BSP } else { SOLID_NOT };
 

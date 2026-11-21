@@ -6,6 +6,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod ir;
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 

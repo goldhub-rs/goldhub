@@ -701,4 +701,7 @@ fn test_inspect_urban_player_model() {
         .expect("find ref_aim_ak47");
     assert_eq!(ak_aim.bone_matrices.len(), 2);
     assert_eq!(ak_aim.bone_matrices[0].len(), 23);
+    assert_eq!(ak_aim.blend_count, 9);
+    assert_eq!(ak_aim.blend_bone_matrices.len(), 9);
+    assert_eq!(ak_aim.blend_bone_matrices[0].len(), 2);
 }

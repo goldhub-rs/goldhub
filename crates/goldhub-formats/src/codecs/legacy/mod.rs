@@ -13,5 +13,5 @@ pub use bsp::{Bsp30Decoder, BspLeaf, BspLevel, BspNode};
 pub use mdl::{MdlHeader, StudioMdlDecoder};
 pub use spr::{SpriteData, SpriteDecoder, SpriteFrame, SpriteHeader};
 pub use tga::{TgaImage, decode_tga};
-pub use wad::{Wad3Decoder, WadArchive};
+pub use wad::{QCharInfo, QFontData, TYP_QFONT, Wad3Decoder, WadArchive};
 pub use wad_resolver::{find_wad_file, resolve_bsp_wad_textures};

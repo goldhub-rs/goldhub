@@ -270,9 +270,16 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
                 }
             } else if trimmed.starts_with("\"classname\"")
                 && let Some(c_str) = trimmed.split('"').nth(3)
-                && (c_str == "func_ladder"
-                    || c_str == "func_bomb_target"
-                    || c_str.starts_with("trigger_"))
+                && (c_str.starts_with("trigger_")
+                    || matches!(
+                        c_str,
+                        "func_ladder"
+                            | "func_bomb_target"
+                            | "func_buyzone"
+                            | "func_hostage_rescue"
+                            | "func_vip_safetyzone"
+                            | "func_escapezone"
+                    ))
             {
                 is_trigger = true;
             }
@@ -381,7 +388,7 @@ pub fn compile_bsp_geometry_and_lightmap(
         if face_positions.len() < 3 {
             continue;
         }
-        let normal = compute_face_normal(&face_positions);
+        let normal = resolve_face_normal(face, bsp, &face_positions);
         let tangent = [s_vec[0], s_vec[1], s_vec[2], 1.0];
 
         let submesh_start = indices.len() as u32;
@@ -489,7 +496,7 @@ pub fn compile_bsp_geometry_with_atlas(
         if face_positions.len() < 3 {
             continue;
         }
-        let normal = compute_face_normal(&face_positions);
+        let normal = resolve_face_normal(face, bsp, &face_positions);
         let tangent = [s_vec[0], s_vec[1], s_vec[2], 1.0];
 
         let submesh_start = indices.len() as u32;
@@ -627,6 +634,19 @@ fn resolve_texture_projection(
     } else {
         ([1.0, 0.0, 0.0], 0.0, [0.0, 1.0, 0.0], 0.0, 0)
     }
+}
+
+fn resolve_face_normal(face: &BspFace, bsp: &BspLevel, positions: &[[f32; 3]]) -> [f32; 3] {
+    bsp.planes.get(face.plane_id as usize).map_or_else(
+        || compute_face_normal(positions),
+        |plane| {
+            if face.side != 0 {
+                [-plane.normal[0], -plane.normal[1], -plane.normal[2]]
+            } else {
+                plane.normal
+            }
+        },
+    )
 }
 
 fn compute_face_normal(face_positions: &[[f32; 3]]) -> [f32; 3] {

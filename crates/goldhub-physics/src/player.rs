@@ -51,6 +51,8 @@ pub struct PlayerState {
     pub duck_time_ms: f32,
     /// Unduck transition timer in milliseconds (for smooth camera rise).
     pub unduck_time_ms: f32,
+    /// Starting `view_height` captured when unduck begins (eliminates snap across hull shift).
+    pub unduck_start_height: f32,
     /// Jump stamina penalty timer in milliseconds (`fuser2`).
     pub jump_penalty_ms: f32,
     /// Step sound cooldown timer in milliseconds.
@@ -83,6 +85,7 @@ impl Default for PlayerState {
             in_duck: false,
             duck_time_ms: 0.0,
             unduck_time_ms: 0.0,
+            unduck_start_height: 0.0,
             jump_penalty_ms: 0.0,
             step_sound_time_ms: 0.0,
             fall_velocity: 0.0,

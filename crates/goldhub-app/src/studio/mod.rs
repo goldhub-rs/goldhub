@@ -16,7 +16,8 @@ pub use viewmodel::{
 };
 pub use world_entity::{
     BspEntitiesLump, EntityCollisionBounds, HostageEntity, HostageState, WorldStudioEntity,
-    hostage_interaction_and_ai_system, spawn_map_studio_entities, spawn_studio_entity,
+    handle_round_reset_hostages_system, hostage_interaction_and_ai_system,
+    spawn_map_studio_entities, spawn_studio_entity,
 };
 
 use bevy::prelude::*;
@@ -36,6 +37,7 @@ impl Plugin for StudioModelPlugin {
                 widescreen_horplus_fov_system,
                 studio_animation_system,
                 hostage_interaction_and_ai_system,
+                handle_round_reset_hostages_system,
             ),
         );
     }

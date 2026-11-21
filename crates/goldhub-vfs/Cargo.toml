@@ -10,6 +10,7 @@ description = "High-performance sandboxed Zero-Copy Virtual File System (VFS) fo
 
 [dependencies]
 goldhub-manifest = { path = "../goldhub-manifest" }
+flatasset-core = { workspace = true }
 memmap2 = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }

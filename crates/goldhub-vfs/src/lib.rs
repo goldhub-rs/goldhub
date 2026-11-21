@@ -76,4 +76,20 @@ mod tests {
         assert_eq!(handle[0], 0x42);
         assert_eq!(handle.blake3_hash(), blake3::hash(&payload));
     }
+
+    #[test]
+    fn test_vfs_mount_cas_pool() {
+        let pool_path = std::path::Path::new("D:/Repo/cstrike_flat/shared/pool.flb");
+        if !pool_path.exists() {
+            return;
+        }
+
+        let mut vfs = VfsResolver::new();
+        vfs.mount_cas_pool(pool_path).unwrap();
+
+        // Check opening a known CAS asset
+        let first_entry_hash = vfs.cas_pools()[0].entries.keys().next().copied().unwrap();
+        let asset = vfs.open_cas_asset(first_entry_hash).unwrap();
+        assert!(!asset.is_empty());
+    }
 }

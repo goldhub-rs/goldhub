@@ -9,14 +9,24 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod hitbox;
+pub mod localization;
 pub mod recoil;
 pub mod rules;
 pub mod weapons;
 
 pub use hitbox::{HitboxGroup, calculate_damage};
+pub use localization::builtin_fallback;
+#[cfg(feature = "std")]
+pub use localization::{CsLocalizationTable, decode_resource_text};
 pub use recoil::PlayerRecoil;
-pub use rules::{CsGameRules, CsTeam, RoundState};
-pub use weapons::{WeaponDef, WeaponId, WeaponSlot, get_weapon_def};
+pub use rules::{
+    CsGameRules, CsTeam, MapScenarioFlags, MapScenarioKind, RoundEndReason, RoundOutcome,
+    RoundState, ScenarioTickCounts,
+};
+pub use weapons::{
+    AmmoCaliber, KickBackParams, RecoilPostures, SpreadContext, SpreadResult, WeaponDef, WeaponId,
+    WeaponSlot, compute_weapon_spread, get_weapon_def, initial_weapon_accuracy,
+};
 
 #[cfg(test)]
 mod tests {
@@ -53,9 +63,38 @@ mod tests {
     #[test]
     fn test_recoil_decay_simulation() {
         let mut recoil = PlayerRecoil::new();
-        recoil.apply_kickback(1.0, 0.5, 0.2, 0.1, 6.0, 2.0, 1, 0.8);
+        recoil.apply_kickback(1.0, 0.5, 0.2, 0.1, 6.0, 2.0, 8, 1, 0.8);
         assert!(recoil.punch_pitch > 0.9);
         assert!(recoil.punch_yaw > 0.4);
+
+        // Trigger a flip & unbounded pistol accumulation (USP has up_max = 0.0)
+        let mut usp_recoil = PlayerRecoil::new();
+        let usp_k = get_weapon_def(WeaponId::USP45).recoil.standing;
+        assert_eq!(usp_k.up_base, 2.0);
+        assert_eq!(usp_k.up_max, 0.0);
+        usp_recoil.apply_kickback(
+            usp_k.up_base,
+            usp_k.lateral_base,
+            usp_k.up_mod,
+            usp_k.lateral_mod,
+            usp_k.up_max,
+            usp_k.lateral_max,
+            usp_k.direction_change,
+            1,
+            0.5,
+        );
+        usp_recoil.apply_kickback(
+            usp_k.up_base,
+            usp_k.lateral_base,
+            usp_k.up_mod,
+            usp_k.lateral_mod,
+            usp_k.up_max,
+            usp_k.lateral_max,
+            usp_k.direction_change,
+            2,
+            0.5,
+        );
+        assert_eq!(usp_recoil.punch_pitch, 4.0);
 
         recoil.decay(0.5);
         assert!(recoil.punch_pitch < 1.0);
@@ -83,5 +122,101 @@ mod tests {
         // After buy time expires
         rules.update_round(20.0);
         assert!(!rules.can_player_buy(1));
+    }
+
+    #[test]
+    fn test_weapon_spread_and_zoom_parity() {
+        // AWP zoomed standing vs hipfire
+        let awp_zoom = compute_weapon_spread(SpreadContext {
+            weapon: WeaponId::AWP,
+            silenced: false,
+            burst_mode: false,
+            shots_fired: 0,
+            prev_accuracy: 0.0,
+            time_since_last_fire: 0.0,
+            has_fired_before: false,
+            speed_2d: 0.0,
+            on_ground: true,
+            is_ducking: false,
+            fov: 40,
+        });
+        let awp_hip = compute_weapon_spread(SpreadContext {
+            weapon: WeaponId::AWP,
+            silenced: false,
+            burst_mode: false,
+            shots_fired: 0,
+            prev_accuracy: 0.0,
+            time_since_last_fire: 0.0,
+            has_fired_before: false,
+            speed_2d: 0.0,
+            on_ground: true,
+            is_ducking: false,
+            fov: 90,
+        });
+        assert!((awp_zoom.spread - 0.001).abs() < 1e-6);
+        assert!((awp_hip.spread - 0.081).abs() < 1e-6);
+
+        // First shot AK47 matches m_flAccuracy = 0.2 -> 0.0275 * 0.2 = 0.0055
+        let ak1 = compute_weapon_spread(SpreadContext {
+            weapon: WeaponId::AK47,
+            silenced: false,
+            burst_mode: false,
+            shots_fired: 0,
+            prev_accuracy: 0.2,
+            time_since_last_fire: 0.0,
+            has_fired_before: false,
+            speed_2d: 0.0,
+            on_ground: true,
+            is_ducking: false,
+            fov: 90,
+        });
+        assert!((ak1.spread - 0.0055).abs() < 1e-6);
+        assert_eq!(WeaponId::AWP.zoom_fovs(), &[90, 40, 10]);
+        assert!(!WeaponId::Knife.is_droppable());
+        assert!(!WeaponId::HeGrenade.is_droppable());
+        assert!(WeaponId::C4.is_droppable());
+        assert_eq!(WeaponId::M3.pellet_count(), 9);
+    }
+
+    #[test]
+    fn test_scenario_rules_and_localization() {
+        let mut rules = CsGameRules::new(0.0, 105.0, false);
+        rules.map_flags.has_bomb_target = true;
+        rules.state = RoundState::RoundLive;
+
+        // While C4 is planted, timer never expires into TargetSaved
+        let expired_while_planted = rules.evaluate_scenario(
+            120.0,
+            ScenarioTickCounts {
+                bomb_planted: true,
+                ..Default::default()
+            },
+        );
+        assert!(expired_while_planted.is_none());
+
+        // Explosion awards Terrorists
+        let blown = rules.evaluate_scenario(
+            0.1,
+            ScenarioTickCounts {
+                bomb_planted: true,
+                target_bombed: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(blown.map(|o| o.reason), Some(RoundEndReason::TargetBombed));
+        assert_eq!(rules.t_score, 1);
+
+        // UTF-16LE + VDF localization parser check
+        let vdf = "\"lang\"\n{\n\"Tokens\"\n{\n\"Cstrike_TitlesTXT_Weapon_Cannot_Be_Dropped\" \"Это оружие нельзя бросить.\"\n}\n}";
+        let mut table = CsLocalizationTable::new();
+        let mut utf16 = vec![0xFFu8, 0xFE];
+        for cu in vdf.encode_utf16() {
+            utf16.extend_from_slice(&cu.to_le_bytes());
+        }
+        table.load_vdf_bytes(&utf16, false);
+        assert_eq!(
+            table.resolve("#Weapon_Cannot_Be_Dropped"),
+            "Это оружие нельзя бросить."
+        );
     }
 }

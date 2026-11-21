@@ -17,6 +17,9 @@ use crate::audio::GameSearchPaths;
 /// Pre-processed template for a single mesh partition in a submodel.
 #[derive(Clone)]
 pub struct SubmeshTemplate {
+    pub body_part_name: String,
+    pub body_part_index: usize,
+    pub submodel_index: usize,
     pub skin_ref: usize,
     pub material: Handle<StandardMaterial>,
     pub rest_vertices: Vec<StudioVertex>,
@@ -115,10 +118,11 @@ impl StudioModelStore {
             material_handles.push(materials.add(mat));
         }
 
-        // 2. Extract submeshes from all bodyparts and primary submodels
+        // 2. Extract submeshes from all bodyparts and their submodels (submodel 0 visible by default;
+        // alternate submodels e.g. player `backpack` bodygroup 'defuse' spawned hidden until toggled).
         let mut submeshes = Vec::new();
-        for body_part in &model.body_parts {
-            if let Some(submodel) = body_part.models.first() {
+        for (body_part_index, body_part) in model.body_parts.iter().enumerate() {
+            for (submodel_index, submodel) in body_part.models.iter().enumerate() {
                 for mesh in &submodel.meshes {
                     let tex_idx = model
                         .skin_families
@@ -137,6 +141,9 @@ impl StudioModelStore {
                     };
 
                     submeshes.push(SubmeshTemplate {
+                        body_part_name: body_part.name.clone(),
+                        body_part_index,
+                        submodel_index,
                         skin_ref: mesh.skin_ref,
                         material: mat_handle,
                         rest_vertices: mesh.vertices.clone(),
@@ -189,6 +196,98 @@ pub fn create_initial_bevy_mesh(template: &SubmeshTemplate, is_viewmodel: bool) 
     mesh.insert_indices(Indices::U32(template.indices.clone()));
 
     mesh
+}
+
+/// Creates a new GPU Bevy `Mesh` initialized with bone-skinned vertices from `seq_idx` frame 0
+/// (falling back to `rest_vertices` when no sampled bone matrices exist).
+#[must_use]
+pub fn create_sequence_frame0_mesh(
+    model_data: &StudioModelData,
+    seq_idx: usize,
+    template: &SubmeshTemplate,
+    is_viewmodel: bool,
+) -> Mesh {
+    let mut mesh = create_initial_bevy_mesh(template, is_viewmodel);
+    let Some(m0_slice) = model_data
+        .model
+        .rig
+        .sequences
+        .get(seq_idx)
+        .and_then(|s| s.bone_matrices.first())
+    else {
+        return mesh;
+    };
+
+    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(pos_vec)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    {
+        for (v, out_p) in template.rest_vertices.iter().zip(pos_vec.iter_mut()) {
+            let bone_idx = v.bone_index as usize;
+            if bone_idx < m0_slice.len() {
+                let bm = Mat4::from_cols_array(&m0_slice[bone_idx]);
+                let p = bm.transform_point3(Vec3::from(v.position));
+                *out_p = if is_viewmodel {
+                    [-p.y, p.z, -p.x]
+                } else {
+                    [p.x, p.z, -p.y]
+                };
+            }
+        }
+    }
+    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(norm_vec)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
+    {
+        for (v, out_n) in template.rest_vertices.iter().zip(norm_vec.iter_mut()) {
+            let bone_idx = v.bone_index as usize;
+            if bone_idx < m0_slice.len() {
+                let bm = Mat4::from_cols_array(&m0_slice[bone_idx]);
+                let n = bm.transform_vector3(Vec3::from(v.normal));
+                *out_n = if is_viewmodel {
+                    [-n.y, n.z, -n.x]
+                } else {
+                    [n.x, n.z, -n.y]
+                };
+            }
+        }
+    }
+    mesh
+}
+
+/// Spawns skinned or posed child submesh entities under `parent_entity` on `layer_opt`
+/// and returns `(child_entity, mesh_handle, submesh_idx)` tuples.
+pub fn spawn_model_submesh_children(
+    commands: &mut Commands,
+    parent_entity: Entity,
+    model_data: &StudioModelData,
+    seq_idx: usize,
+    is_viewmodel: bool,
+    render_layer: Option<usize>,
+    meshes: &mut Assets<Mesh>,
+) -> Vec<(Entity, Handle<Mesh>, usize)> {
+    let mut children = Vec::with_capacity(model_data.submeshes.len());
+    for (sub_idx, template) in model_data.submeshes.iter().enumerate() {
+        let bevy_mesh = create_sequence_frame0_mesh(model_data, seq_idx, template, is_viewmodel);
+        let mesh_handle = meshes.add(bevy_mesh);
+        let initial_vis = if template.submodel_index == 0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        let mut child_cmd = commands.spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(template.material.clone()),
+            Transform::IDENTITY,
+            initial_vis,
+            bevy::render::view::NoFrustumCulling,
+        ));
+        if let Some(layer) = render_layer {
+            child_cmd.insert(bevy::render::view::RenderLayers::layer(layer));
+        }
+        let child = child_cmd.id();
+        commands.entity(parent_entity).add_child(child);
+        children.push((child, mesh_handle, sub_idx));
+    }
+    children
 }
 
 /// Default root directories for locating CS 1.6 game assets.

@@ -22,7 +22,14 @@ pub struct SkyboxRoot;
 /// System that locks the Skybox entity position to the camera in world space,
 /// creating the illusion of infinite distance.
 pub fn update_skybox_position(
-    camera_query: Query<&Transform, (With<Camera3d>, Without<SkyboxRoot>)>,
+    camera_query: Query<
+        &Transform,
+        (
+            With<Camera3d>,
+            With<crate::player::PlayerController>,
+            Without<SkyboxRoot>,
+        ),
+    >,
     mut skybox_query: Query<&mut Transform, With<SkyboxRoot>>,
 ) {
     if let Ok(cam_tf) = camera_query.get_single() {

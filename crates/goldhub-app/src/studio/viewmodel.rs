@@ -2,10 +2,14 @@
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
+use bevy::render::view::RenderLayers;
 use goldhub_physics::WorldTrace;
 
+/// Dedicated render layer for the first-person ViewModel overlay camera (prevents wall clipping).
+pub const VIEWMODEL_RENDER_LAYER: usize = 1;
+
 use super::animation::StudioAnimatedModel;
-use super::store::{StudioModelStore, create_initial_bevy_mesh};
+use super::store::StudioModelStore;
 use super::world_entity::{EntityCollisionBounds, WorldStudioEntity};
 use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
 use crate::player::{LevelCollisionResource, PlayerController};
@@ -14,6 +18,7 @@ use crate::player::{LevelCollisionResource, PlayerController};
 #[derive(Component, Debug, Clone)]
 pub struct ViewModelWeapon {
     pub last_swing: u8,
+    pub last_swing_time: f32,
     pub attack_cooldown: f32,
     pub bob_phase: f32,
     pub current_sway: Vec2,
@@ -23,6 +28,7 @@ impl Default for ViewModelWeapon {
     fn default() -> Self {
         Self {
             last_swing: 0,
+            last_swing_time: -10.0,
             attack_cooldown: 0.0,
             bob_phase: 0.0,
             current_sway: Vec2::ZERO,
@@ -79,27 +85,56 @@ pub fn spawn_viewmodel_system(
             ))
             .id();
 
-        // Spawn child entities for each submesh
-        let mut mesh_children = Vec::with_capacity(model_data.submeshes.len());
-        for (sub_idx, template) in model_data.submeshes.iter().enumerate() {
-            let bevy_mesh = create_initial_bevy_mesh(template, true);
-            let mesh_handle = meshes.add(bevy_mesh);
-
-            let child_entity = commands
-                .spawn((
-                    Mesh3d(mesh_handle.clone()),
-                    MeshMaterial3d(template.material.clone()),
-                    Transform::IDENTITY,
-                ))
-                .id();
-
-            commands.entity(vm_root).add_child(child_entity);
-            mesh_children.push((child_entity, mesh_handle, sub_idx));
-        }
-
-        anim_component.mesh_entities = mesh_children;
+        // Spawn child entities for each submesh posed at frame 0 (+ NoFrustumCulling prevents near-plane cull on knife)
+        anim_component.mesh_entities = crate::studio::store::spawn_model_submesh_children(
+            &mut commands,
+            vm_root,
+            &model_data,
+            0,
+            true,
+            Some(VIEWMODEL_RENDER_LAYER),
+            &mut meshes,
+        );
         commands.entity(vm_root).insert(anim_component);
         commands.entity(cam_entity).add_child(vm_root);
+
+        // Spawn depth-cleared ViewModel overlay camera (order: 1) so first-person weapons render
+        // cleanly over walls (`glDepthRange` parity).
+        let vm_cam = commands
+            .spawn((
+                Camera3d::default(),
+                Camera {
+                    order: 1,
+                    clear_color: ClearColorConfig::None,
+                    ..default()
+                },
+                Projection::Perspective(PerspectiveProjection {
+                    fov: 74.0f32.to_radians(),
+                    near: 0.5,
+                    far: 256.0,
+                    ..default()
+                }),
+                RenderLayers::layer(VIEWMODEL_RENDER_LAYER),
+            ))
+            .id();
+        commands.entity(cam_entity).add_child(vm_cam);
+
+        // Soft overlay fill light on Layer 1 so viewmodel speculars remain crisp
+        let vm_light = commands
+            .spawn((
+                PointLight {
+                    color: Color::srgb(1.0, 0.98, 0.95),
+                    intensity: 45_000.0,
+                    range: 200.0,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(8.0, 12.0, -10.0),
+                RenderLayers::layer(VIEWMODEL_RENDER_LAYER),
+            ))
+            .id();
+        commands.entity(cam_entity).add_child(vm_light);
+
         commands.entity(cam_entity).insert(HasViewModel);
 
         tracing::info!(
@@ -149,8 +184,11 @@ fn ray_intersects_aabb(
     if tmin <= max_dist { Some(tmin) } else { None }
 }
 
-/// Maximum forward trace reach for knife slash and stab attacks (GoldSrc KnifeSwingDistance).
-const KNIFE_REACH: f32 = 48.0;
+/// Maximum forward trace reach for primary LMB knife slash (GoldSrc `CKnife::Swing`: 48u).
+const KNIFE_SWING_DISTANCE: f32 = 48.0;
+
+/// Maximum forward trace reach for secondary RMB knife stab (GoldSrc `CKnife::Stab`: 32u).
+const KNIFE_STAB_DISTANCE: f32 = 32.0;
 
 /// Bounding hull half-extents expansion for authentic GoldSrc knife swept hull (UTIL_TraceHull).
 const KNIFE_HULL_EXPAND: Vec3 = Vec3::splat(16.0);
@@ -188,15 +226,22 @@ pub struct KnifeAudioParams<'w> {
     pub sources: ResMut<'w, Assets<AudioSource>>,
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct KnifeContextParams<'w> {
+    pub time: Res<'w, Time>,
+    pub mouse_button: Res<'w, ButtonInput<MouseButton>>,
+    pub model_store: Res<'w, StudioModelStore>,
+    pub collision_res: Res<'w, LevelCollisionResource>,
+    pub pending_sel: Option<Res<'w, crate::combat::weapon::PendingWeaponSelection>>,
+    pub console: Option<Res<'w, crate::hud::text_channels::ConsoleOverlayState>>,
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn viewmodel_input_system(
     mut commands: Commands,
-    time: Res<Time>,
     mut audio: KnifeAudioParams,
     mut vfx: KnifeVfxParams,
-    mouse_button: Res<ButtonInput<MouseButton>>,
-    model_store: Res<StudioModelStore>,
-    collision_res: Res<LevelCollisionResource>,
+    ctx: KnifeContextParams,
     camera_query: Query<&GlobalTransform, (With<Camera3d>, With<PlayerController>)>,
     entity_query: Query<
         (
@@ -221,20 +266,32 @@ pub fn viewmodel_input_system(
     mut fire_events: EventWriter<crate::entity::FireTargetEvent>,
     mut break_events: EventWriter<crate::entity::BreakEntityEvent>,
     active_weapon_query: Query<&crate::combat::ActiveWeaponState>,
+    mut player_ctrl_query: Query<&mut PlayerController>,
     mut vm_query: Query<(&mut ViewModelWeapon, &mut StudioAnimatedModel)>,
 ) {
-    let dt = time.delta_secs();
+    let dt = ctx.time.delta_secs();
     if dt <= 0.0 {
         return;
     }
 
-    if let Ok(state) = active_weapon_query.get_single()
-        && state.id != crate::combat::WeaponId::Knife
+    if ctx.console.as_ref().is_some_and(|c| c.open)
+        || ctx
+            .pending_sel
+            .as_ref()
+            .is_some_and(|p| p.open || p.consume_next_attack)
     {
         return;
     }
 
-    let Some(knife_data) = model_store.models.get("models/v_knife.mdl") else {
+    if let Ok(state) = active_weapon_query.get_single()
+        && (state.id != crate::combat::WeaponId::Knife
+            || state.next_primary_attack > 0.0
+            || state.next_secondary_attack > 0.0)
+    {
+        return;
+    }
+
+    let Some(knife_data) = ctx.model_store.models.get("models/v_knife.mdl") else {
         return;
     };
     let sequences = &knife_data.model.rig.sequences;
@@ -261,13 +318,19 @@ pub fn viewmodel_input_system(
             continue;
         }
 
-        let lmb = mouse_button.just_pressed(MouseButton::Left);
-        let rmb = mouse_button.just_pressed(MouseButton::Right);
+        let lmb = ctx.mouse_button.pressed(MouseButton::Left);
+        let rmb = ctx.mouse_button.pressed(MouseButton::Right);
         if !lmb && !rmb {
             continue;
         }
 
-        // Raytrace 48 units from camera forward vector (CS 1.6 KnifeSwingDistance / KnifeStabDistance)
+        let reach = if lmb {
+            KNIFE_SWING_DISTANCE
+        } else {
+            KNIFE_STAB_DISTANCE
+        };
+
+        // Raytrace from camera forward vector (LMB: 48u slash, RMB: 32u heavy stab)
         let (cam_pos, cam_forward) = camera_query
             .get_single()
             .map_or((Vec3::ZERO, Vec3::NEG_Z), |cam_t| {
@@ -283,7 +346,7 @@ pub fn viewmodel_input_system(
             if let Some(t) = ray_intersects_aabb(
                 cam_pos,
                 cam_forward,
-                KNIFE_REACH,
+                reach,
                 b.bmin - KNIFE_HULL_EXPAND,
                 b.bmax + KNIFE_HULL_EXPAND,
             ) && closest_breakable.as_ref().is_none_or(|(_, d, _)| t < *d)
@@ -300,7 +363,7 @@ pub fn viewmodel_input_system(
             let ep = h_t.translation();
             let bmin = ep + bounds.mins - KNIFE_HULL_EXPAND;
             let bmax = ep + bounds.maxs + KNIFE_HULL_EXPAND;
-            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, bmin, bmax)
+            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, reach, bmin, bmax)
                 && closest_entity_dist.is_none_or(|cd| t < cd)
             {
                 closest_entity_dist = Some(t);
@@ -312,7 +375,7 @@ pub fn viewmodel_input_system(
             let ep = ent_t.translation();
             let bmin = ep + bounds.mins - KNIFE_HULL_EXPAND;
             let bmax = ep + bounds.maxs + KNIFE_HULL_EXPAND;
-            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, KNIFE_REACH, bmin, bmax) {
+            if let Some(t) = ray_intersects_aabb(cam_pos, cam_forward, reach, bmin, bmax) {
                 if studio_ent.is_solid {
                     if closest_entity_dist.is_none_or(|cd| t < cd) {
                         closest_entity_dist = Some(t);
@@ -334,22 +397,22 @@ pub fn viewmodel_input_system(
 
         // 3. Trace against world BSP collision geometry
         let mut wall_hit_dist: Option<f32> = None;
-        if let Some(ref col_model) = collision_res.model {
+        if let Some(ref col_model) = ctx.collision_res.model {
             let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
             let gs_start = [cam_pos.x, -cam_pos.z, cam_pos.y];
-            let ray_end = cam_pos + cam_forward * KNIFE_REACH;
+            let ray_end = cam_pos + cam_forward * reach;
             let gs_end = [ray_end.x, -ray_end.z, ray_end.y];
 
             let tr = bsp_world.trace_player_hull(gs_start, gs_end, 0); // 0 is HULL_POINT
             if tr.fraction < 1.0 {
-                wall_hit_dist = Some(tr.fraction * KNIFE_REACH);
+                wall_hit_dist = Some(tr.fraction * reach);
             }
         }
 
         // Determine closest struck object
 
         let mut hit = HitTarget::Miss;
-        let mut min_t = KNIFE_REACH + 1.0;
+        let mut min_t = reach + 1.0;
 
         if let Some((b_ent, b_t, mat)) = closest_breakable
             && b_t < min_t
@@ -373,14 +436,35 @@ pub fn viewmodel_input_system(
             hit = HitTarget::Wall;
         }
 
-        let damage = if lmb { 25.0f32 } else { 65.0f32 };
+        let now = ctx.time.elapsed_secs();
+        let damage = if lmb {
+            if now - vm.last_swing_time < 0.85 {
+                20.0
+            } else {
+                15.0
+            }
+        } else if let HitTarget::Hostage(h_ent) = hit
+            && let Ok((_, _, _, _, h_t)) = hostage_query.get(h_ent)
+        {
+            let h_fwd = h_t.right().as_vec3();
+            let h_xz = Vec2::new(h_fwd.x, h_fwd.z).normalize_or_zero();
+            let p_xz = Vec2::new(cam_forward.x, cam_forward.z).normalize_or_zero();
+            if p_xz.dot(h_xz) > 0.8 { 195.0 } else { 65.0 }
+        } else {
+            65.0
+        };
 
         if lmb {
             // Primary Attack: alternating midslash1 (seq 6) and midslash2 (seq 7)
             vm.last_swing = 1 - vm.last_swing;
+            vm.last_swing_time = now;
             let target_seq = if vm.last_swing == 0 { 6 } else { 7 };
             anim.set_sequence(target_seq, 75.0, false);
-            vm.attack_cooldown = 0.35;
+            vm.attack_cooldown = if matches!(hit, HitTarget::Miss) {
+                0.35
+            } else {
+                0.40
+            };
 
             let sound_name = match hit {
                 HitTarget::Breakable(b_ent, mat) => {
@@ -432,7 +516,7 @@ pub fn viewmodel_input_system(
                         hostage.health -= damage;
                         if hostage.health > 0.0 {
                             h_anim.set_sequence(7, 30.0, false); // flinch
-                            let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
+                            let pain_idx = ((ctx.time.elapsed_secs() * 100.0) as usize % 6) + 1;
                             let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
                             if let Some(h) = audio.bank.get_or_load_sound(
                                 &pain_snd,
@@ -459,11 +543,13 @@ pub fn viewmodel_input_system(
                             }
                         }
                     }
-                    let pick = ((time.elapsed_secs() * 1000.0) as usize) % KNIFE_FLESH_HITS.len();
+                    let pick =
+                        ((ctx.time.elapsed_secs() * 1000.0) as usize) % KNIFE_FLESH_HITS.len();
                     KNIFE_FLESH_HITS[pick]
                 }
                 HitTarget::Flesh => {
-                    let pick = ((time.elapsed_secs() * 1000.0) as usize) % KNIFE_FLESH_HITS.len();
+                    let pick =
+                        ((ctx.time.elapsed_secs() * 1000.0) as usize) % KNIFE_FLESH_HITS.len();
                     KNIFE_FLESH_HITS[pick]
                 }
                 HitTarget::Wall => "weapons/knife_hitwall1.wav",
@@ -538,7 +624,7 @@ pub fn viewmodel_input_system(
                         hostage.health -= damage;
                         if hostage.health > 0.0 {
                             h_anim.set_sequence(7, 30.0, false); // flinch
-                            let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
+                            let pain_idx = ((ctx.time.elapsed_secs() * 100.0) as usize % 6) + 1;
                             let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
                             if let Some(h) = audio.bank.get_or_load_sound(
                                 &pain_snd,
@@ -582,7 +668,15 @@ pub fn viewmodel_input_system(
             };
 
             anim.set_sequence(target_seq, stab_fps, false);
-            vm.attack_cooldown = 1.0;
+            vm.attack_cooldown = if matches!(hit, HitTarget::Miss) {
+                1.0
+            } else {
+                1.1
+            };
+
+            if let Ok(mut pc) = player_ctrl_query.get_single_mut() {
+                pc.trigger_third_person_shoot(0.35);
+            }
 
             if let Some(handle) = audio.bank.get_or_load_sound(
                 sound_name,
@@ -595,12 +689,17 @@ pub fn viewmodel_input_system(
     }
 }
 
-/// Applies authentic weapon bobbing and mouse sway lag, and manages first/third person visibility.
+/// Applies authentic weapon bobbing, mouse sway lag, viewmodel punch kick, handedness (`cl_righthand` + knife parity),
+/// and manages first/third person visibility.
 pub fn viewmodel_bob_and_sway_system(
     time: Res<Time>,
     perspective: Option<Res<crate::player::CameraPerspective>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
-    player_query: Query<&PlayerController>,
+    player_query: Query<(
+        &PlayerController,
+        Option<&crate::combat::ActiveWeaponState>,
+        Option<&crate::combat::PlayerRecoil>,
+    )>,
     mut vm_query: Query<(&mut ViewModelWeapon, &mut Transform, &mut Visibility)>,
 ) {
     let dt = time.delta_secs();
@@ -608,20 +707,28 @@ pub fn viewmodel_bob_and_sway_system(
         return;
     }
 
-    let Ok(player) = player_query.get_single() else {
+    let Ok((player, active_weapon, recoil)) = player_query.get_single() else {
         return;
     };
     let speed = player.sim.current.horizontal_speed();
+    let is_knife = active_weapon.is_some_and(|w| w.id == crate::combat::WeaponId::Knife);
+    let (punch_pitch, punch_yaw) = recoil.map_or((0.0, 0.0), |r| {
+        (r.punch_pitch.to_radians(), r.punch_yaw.to_radians())
+    });
 
     for (mut vm, mut transform, mut visibility) in &mut vm_query {
-        // Hide viewmodel in Third-Person mode
-        if let Some(ref pers) = perspective {
-            if **pers == crate::player::CameraPerspective::ThirdPerson {
-                *visibility = Visibility::Hidden;
-                continue;
-            }
-            *visibility = Visibility::Inherited;
+        // Hide viewmodel in Third-Person mode or while sniper scope overlay is active
+        let scoped_sniper =
+            active_weapon.is_some_and(|w| w.id.is_sniper_scope() && w.current_fov <= 40.0);
+        if scoped_sniper
+            || perspective
+                .as_ref()
+                .is_some_and(|pers| **pers == crate::player::CameraPerspective::ThirdPerson)
+        {
+            *visibility = Visibility::Hidden;
+            continue;
         }
+        *visibility = Visibility::Inherited;
 
         // 1. Movement Bobbing
         if speed > 10.0 && player.sim.current.on_ground {
@@ -638,30 +745,45 @@ pub fn viewmodel_bob_and_sway_system(
             transform.translation.y *= 1.0 - dt * 10.0;
         }
 
-        // 2. Mouse Sway Lag
+        // 2. Mouse Sway Lag + CS 1.6 V_CalcGunAngle recoil feedback
         let target_sway_x = (-mouse_motion.delta.x * 0.0008).clamp(-0.05, 0.05);
         let target_sway_y = (mouse_motion.delta.y * 0.0008).clamp(-0.05, 0.05);
 
         vm.current_sway.x = vm.current_sway.x.lerp(target_sway_x, dt * 12.0);
         vm.current_sway.y = vm.current_sway.y.lerp(target_sway_y, dt * 12.0);
 
-        transform.rotation =
-            Quat::from_rotation_y(vm.current_sway.x) * Quat::from_rotation_x(vm.current_sway.y);
-        transform.scale = Vec3::new(-1.0, 1.0, 1.0);
+        transform.rotation = Quat::from_rotation_y(vm.current_sway.x + punch_yaw)
+            * Quat::from_rotation_x(vm.current_sway.y + punch_pitch * 0.25);
+
+        // CS 1.6 StudioModelRenderer::StudioDrawModel parity (`g_bHoldingKnife` inverts `cl_righthand`):
+        // Gun models are authored left-handed and mirrored to right-hand (-X),
+        // whereas v_knife.mdl is authored right-handed and renders unmirrored (+X) in right hand.
+        transform.scale = if is_knife {
+            Vec3::ONE
+        } else {
+            Vec3::new(-1.0, 1.0, 1.0)
+        };
     }
 }
 
-/// True Hor+ Widescreen FOV system for the player camera.
-pub fn widescreen_horplus_fov_system(mut query: Query<&mut Projection, With<Camera3d>>) {
-    // Hor+ vertical FOV keeping 4:3 90-degree framing invariant:
-    // tan(90 deg / 2) * 0.75 = 0.75 -> VFOV = 2 * atan(0.75) ≈ 1.2870022 rad (73.74 degrees)
-    const HORPLUS_VFOV_RAD: f32 = 1.287_002_2;
+/// True Hor+ Widescreen FOV system for the player camera (supports 90°, 55°, 40°, 15°, 10° weapon zoom).
+pub fn widescreen_horplus_fov_system(
+    active_weapon: Query<&crate::combat::ActiveWeaponState>,
+    mut query: Query<&mut Projection, With<Camera3d>>,
+) {
+    let target_hfov_deg = active_weapon
+        .get_single()
+        .map_or(90.0_f32, |w| w.current_fov)
+        .clamp(5.0, 120.0);
+    // Hor+ vertical FOV keeping 4:3 GoldSrc horizontal framing invariant:
+    // tan(hfov / 2) * 0.75 -> vfov = 2 * atan(tan(hfov / 2) * 0.75)
+    let target_vfov_rad = 2.0 * ((target_hfov_deg * 0.5).to_radians().tan() * 0.75).atan();
 
     for mut projection in &mut query {
         if let Projection::Perspective(ref mut perspective) = *projection
-            && (perspective.fov - HORPLUS_VFOV_RAD).abs() > 1e-4
+            && (perspective.fov - target_vfov_rad).abs() > 1e-4
         {
-            perspective.fov = HORPLUS_VFOV_RAD;
+            perspective.fov = target_vfov_rad;
         }
     }
 }
