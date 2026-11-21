@@ -17,7 +17,6 @@ nextgen = []
 wire-ring = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
-odd-int = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

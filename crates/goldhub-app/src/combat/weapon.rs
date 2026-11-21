@@ -892,8 +892,8 @@ pub fn weapon_switch_system(
                 let mut flat_items: Vec<(u8, usize)> = Vec::new();
                 for s_num in 1u8..=5 {
                     let b = (s_num - 1) as usize;
-                    for idx in 0..inv.bucket_weapons[b].len() {
-                        if inv.bucket_weapons[b][idx].id.is_some() {
+                    for (idx, item) in inv.bucket_weapons[b].iter().enumerate() {
+                        if item.id.is_some() {
                             flat_items.push((s_num, idx));
                         }
                     }
