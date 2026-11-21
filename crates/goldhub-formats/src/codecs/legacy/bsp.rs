@@ -94,6 +94,32 @@ pub struct BspEdge {
     pub vertices: [u16; 2],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct BspNode {
+    pub plane_id: u32,
+    pub children: [i16; 2],
+    pub mins: [i16; 3],
+    pub maxs: [i16; 3],
+    pub first_face: u16,
+    pub num_faces: u16,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct BspLeaf {
+    pub contents: i32,
+    pub vis_offset: i32,
+    pub mins: [i16; 3],
+    pub maxs: [i16; 3],
+    pub first_marksurface: u16,
+    pub num_marksurfaces: u16,
+    pub ambient_level: [u8; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<BspNode>() == 24);
+const _: () = assert!(core::mem::size_of::<BspLeaf>() == 28);
+
 /// In-memory view of parsed BSP30 lumps.
 pub struct BspLevel<'a> {
     pub planes: &'a [BspPlane],
@@ -104,6 +130,8 @@ pub struct BspLevel<'a> {
     pub edges: &'a [BspEdge],
     pub surfedges: &'a [i32],
     pub models: &'a [BspModel],
+    pub nodes: &'a [BspNode],
+    pub leafs: &'a [BspLeaf],
     pub lighting: &'a [u8],
     pub visdata: &'a [u8],
     pub entities: &'a [u8],
@@ -179,6 +207,8 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
         let faces = extract_lump_slice(bytes, &header.lumps[LUMP_FACES], "faces")?;
         let lighting = extract_lump_raw(bytes, &header.lumps[LUMP_LIGHTING], "lighting")?;
         let clip_nodes = extract_lump_slice(bytes, &header.lumps[LUMP_CLIPNODES], "clipnodes")?;
+        let nodes = extract_lump_slice(bytes, &header.lumps[LUMP_NODES], "nodes")?;
+        let leafs = extract_lump_slice(bytes, &header.lumps[LUMP_LEAVES], "leafs")?;
         let edges = extract_lump_slice(bytes, &header.lumps[LUMP_EDGES], "edges")?;
         let surfedges = extract_lump_slice(bytes, &header.lumps[LUMP_SURFEDGES], "surfedges")?;
         let models = extract_lump_slice(bytes, &header.lumps[LUMP_MODELS], "models")?;
@@ -193,6 +223,8 @@ impl<'a> AssetDecoder<'a, BspLevel<'a>> for Bsp30Decoder {
             edges,
             surfedges,
             models,
+            nodes,
+            leafs,
             lighting,
             visdata,
             entities,
@@ -264,7 +296,10 @@ impl<'a> BspLevel<'a> {
 
             let tw = mip_header.width;
             let th = mip_header.height;
-            let pixel_count = (tw * th) as usize;
+            let pixel_count_opt = tw
+                .checked_mul(th)
+                .filter(|&cnt| cnt <= 4096 * 4096 && tw <= 4096 && th <= 4096)
+                .map(|cnt| cnt as usize);
 
             if mip_header.offsets[0] == 0 || tw == 0 || th == 0 {
                 // External WAD texture stub (to be resolved by WAD resolver)
@@ -278,10 +313,30 @@ impl<'a> BspLevel<'a> {
                 continue;
             }
 
+            let Some(pixel_count) = pixel_count_opt else {
+                descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                    format!("corrupt_tex_{i}"),
+                    crate::ir::TextureFormat::Rgba8Unorm,
+                    16,
+                    16,
+                    vec![220; 16 * 16 * 4],
+                ));
+                continue;
+            };
+
             let offset0 = mip_header.offsets[0] as usize;
             let offset3 = mip_header.offsets[3] as usize;
-            let mip3_len = (tw / 8) * (th / 8);
-            let palette_offset = offset3 + (mip3_len as usize) + 2;
+            let Some(mip3_len) = (tw / 8).checked_mul(th / 8).map(|len| len as usize) else {
+                descriptors.push(crate::ir::TextureDescriptor::new_2d(
+                    format!("corrupt_tex_{i}"),
+                    crate::ir::TextureFormat::Rgba8Unorm,
+                    16,
+                    16,
+                    vec![220; 16 * 16 * 4],
+                ));
+                continue;
+            };
+            let palette_offset = offset3 + mip3_len + 2;
 
             if offset0 + pixel_count > miptex_bytes.len()
                 || palette_offset + 768 > miptex_bytes.len()

@@ -66,8 +66,12 @@ pub struct SequenceData {
     pub events: Vec<AnimEventData>,
     pub bbmin: [f32; 3],
     pub bbmax: [f32; 3],
-    /// Optional sampled keyframe matrices per frame per bone: `[frame][bone]`
+    /// Number of animation blend directions (`9` for 3x3 player aim/shoot pitch/yaw blends).
+    pub blend_count: u8,
+    /// Optional sampled keyframe matrices for the center blend: `[frame][bone]`.
     pub bone_matrices: Vec<Vec<[f32; 16]>>,
+    /// Full blend grid sampled matrices when `blend_count > 1`: `[blend][frame][bone]`.
+    pub blend_bone_matrices: Vec<Vec<Vec<[f32; 16]>>>,
 }
 
 /// Canonical skeletal rig and animation database.

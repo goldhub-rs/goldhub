@@ -25,13 +25,22 @@ pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_level);
+        app.add_systems(
+            Startup,
+            (
+                setup_level,
+                apply_deferred,
+                crate::entity::spawn_bsp_interactive_entities,
+                crate::studio::spawn_map_studio_entities,
+            )
+                .chain(),
+        );
         app.add_systems(Update, skybox::update_skybox_position);
     }
 }
 
 #[allow(clippy::too_many_lines)]
-fn setup_level(
+pub fn setup_level(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -67,25 +76,37 @@ fn setup_level(
                 });
             }
             spawn_point = crate::player::parse_first_player_spawn(bsp.entities);
+            commands.insert_resource(crate::studio::BspEntitiesLump(bsp.entities.to_vec()));
             // In authentic GoldSrc, map lights ('light', 'light_spot') are 100% baked into BSP lightmaps.
             // Spawning dynamic high-lumen PointLights blows out lightmaps and washes out shadows.
         }
 
-        let mut search_dirs = Vec::new();
+        let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
         if let Some(dir) = bsp_path.parent() {
-            search_dirs.push(dir);
+            search_dirs.push(dir.to_path_buf());
             if let Some(parent) = dir.parent() {
-                search_dirs.push(parent);
+                search_dirs.push(parent.to_path_buf());
+                if let Some(grandparent) = parent.parent() {
+                    search_dirs.push(grandparent.to_path_buf());
+                    search_dirs.push(grandparent.join("valve"));
+                    search_dirs.push(grandparent.join("cstrike"));
+                }
             }
         }
 
+        let search_dirs = crate::audio::collect_game_search_dirs(&search_dirs);
+
         commands.insert_resource(crate::audio::GameSearchPaths {
-            dirs: search_dirs.iter().map(|p| (*p).to_path_buf()).collect(),
+            dirs: search_dirs.clone(),
         });
 
+        let search_dirs_refs: Vec<&Path> = search_dirs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
         let pipeline = AssetPipeline::new(".cache/goldhub/assets");
         if let Ok((mesh_buffer, textures, lightmap_atlas, sky_name)) =
-            pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs)
+            pipeline.load_bsp_level_full_with_search_dirs(&raw_bytes, &search_dirs_refs)
         {
             // Build ground materials index for authentic GoldSrc footstep sounds
             if let Ok(bsp) = goldhub_formats::codecs::legacy::bsp::BspLevel::from_bytes(&raw_bytes)
@@ -352,7 +373,7 @@ fn setup_level(
                     }
                 });
 
-                commands.spawn((
+                let mut entity_cmds = commands.spawn((
                     Mesh3d(mesh_handle),
                     MeshMaterial3d(mat_handle.clone()),
                     bevy::pbr::Lightmap {
@@ -361,6 +382,12 @@ fn setup_level(
                     },
                     Transform::from_xyz(0.0, 0.0, 0.0),
                 ));
+
+                if let Some(ref submodel) = part.submodel_id {
+                    entity_cmds.insert(crate::entity::BspSubmodelMesh {
+                        model: submodel.clone(),
+                    });
+                }
             }
 
             tracing::info!(
@@ -414,6 +441,10 @@ fn setup_level(
         bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
         initial_grading,
         Transform::from_translation(bevy_spawn_pos).with_rotation(Quat::from_rotation_y(bevy_yaw)),
+        crate::combat::PlayerWeaponInventory::default(),
+        crate::combat::ActiveWeaponState::default(),
+        crate::combat::PlayerRecoil::default(),
+        crate::player::PlayerFlashlight::default(),
         crate::player::PlayerController {
             sim: goldhub_physics::FixedSubtickSimulator::new(spawn_pos, spawn_yaw),
             pitch: 0.0,
@@ -429,6 +460,7 @@ fn setup_level(
             pitch: 0.0,
             yaw: bevy_yaw,
             is_active: false,
+            ..default()
         },
     ));
 }

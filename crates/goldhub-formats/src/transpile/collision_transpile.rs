@@ -27,17 +27,45 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
         });
     }
 
+    // Convert BSP visual nodes and leaves into Hull 0 (Point / Ray) collision tree:
+    let mut hull0_clip_nodes = Vec::with_capacity(bsp.nodes.len());
+    for node in bsp.nodes {
+        let mut children = [0i16; 2];
+        for (i, child_slot) in children.iter_mut().enumerate() {
+            let child = node.children[i];
+            if child >= 0 {
+                *child_slot = child;
+            } else {
+                let leaf_idx = (-child - 1) as usize;
+                let contents = bsp.leafs.get(leaf_idx).map_or(-1, |l| l.contents);
+                *child_slot = contents as i16;
+            }
+        }
+        hull0_clip_nodes.push(ClipNode {
+            plane_index: node.plane_id,
+            children,
+        });
+    }
+
     let world_model = bsp.models.first();
     let headnodes = world_model.map_or([0; 4], |m| m.headnode);
 
     // Extract all 4 hulls (0: Point/Ray, 1: Standing Player, 2: Large, 3: Ducking Player)
     let mut hulls = Vec::with_capacity(4);
     for (hull_idx, &headnode) in headnodes.iter().enumerate() {
-        hulls.push(CollisionHull {
-            hull_index: hull_idx as u32,
-            root_node: headnode,
-            clip_nodes: clip_nodes.clone(),
-        });
+        if hull_idx == 0 {
+            hulls.push(CollisionHull {
+                hull_index: 0,
+                root_node: headnode,
+                clip_nodes: hull0_clip_nodes.clone(),
+            });
+        } else {
+            hulls.push(CollisionHull {
+                hull_index: hull_idx as u32,
+                root_node: headnode,
+                clip_nodes: clip_nodes.clone(),
+            });
+        }
     }
 
     // Extract all brush entities (*1..*N) for multi-entity collision (physents)
@@ -52,6 +80,7 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
             let mut origin = [0.0f32; 3];
             let mut has_origin = false;
             let mut angles = [0.0f32; 3];
+            let mut spawnflags = 0u32;
 
             for line in block.lines() {
                 let trimmed = line.trim();
@@ -64,6 +93,10 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
                     && let Some(c_str) = trimmed.split('"').nth(3)
                 {
                     classname = c_str.to_string();
+                } else if trimmed.starts_with("\"spawnflags\"")
+                    && let Some(sf_str) = trimmed.split('"').nth(3)
+                {
+                    spawnflags = sf_str.parse::<u32>().unwrap_or(0);
                 } else if trimmed.starts_with("\"rendermode\"") {
                     if let Some(r_str) = trimmed.split('"').nth(3) {
                         rendermode = r_str.parse::<u32>().unwrap_or(0);
@@ -101,14 +134,20 @@ pub fn compile_bsp_collision(bsp: &BspLevel<'_>) -> Result<CollisionModel, Forma
                 && let Some(submodel) = bsp.models.get(m_idx)
             {
                 entity_id += 1;
-                let is_solid = match classname.as_str() {
-                    "func_illusionary" => false,
-                    c if c.starts_with("trigger_") => false,
-                    "func_bomb_target"
-                    | "func_buyzone"
-                    | "func_vip_safetyzone"
-                    | "func_escapezone" => false,
-                    _ => true,
+                let is_door_passable = (spawnflags & 8) != 0 && classname.starts_with("func_door");
+                let is_solid = if is_door_passable {
+                    false
+                } else {
+                    match classname.as_str() {
+                        "func_illusionary"
+                        | "func_bomb_target"
+                        | "func_buyzone"
+                        | "func_hostage_rescue"
+                        | "func_vip_safetyzone"
+                        | "func_escapezone" => false,
+                        c if c.starts_with("trigger_") => false,
+                        _ => true,
+                    }
                 };
                 let solid = if is_solid { SOLID_BSP } else { SOLID_NOT };
 

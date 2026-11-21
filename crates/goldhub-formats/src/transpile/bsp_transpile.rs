@@ -13,18 +13,32 @@ pub const DEFAULT_LIGHTSCALE: u32 = 256;
 
 /// Canonical GoldSrc 1024-entry display gamma lookup table.
 ///
-/// Ported from `D:\Repo\GoldSrc.rs\references\xash3d-fwgs\ref\gl\gl_rsurf.c` and
-/// `references\xash3d-fwgs\engine\client\gamma.c`.
+/// Ported from `references\xash3d-fwgs\engine\client\gamma.c`:
 ///
 /// Formula:
-/// `val = (pow((i / 1023.0), (1.0 / v_lightgamma)) * 1023.0) as u16`
+/// `f = pow(i / 1023.0, (double)lightgamma)`
+/// `if (f <= g3) f = (f / g3) * 0.125 else f = ((f - g3) / (1.0 - g3)) * 0.875 + 0.125`
+/// `lightgammatable[i] = bound(0, (pow(f, 1.0 / gamma) * 1023.0), 1023)`
 #[must_use]
 pub fn build_lightgamma_table(lightgamma: f32) -> [u16; 1024] {
     let mut table = [0u16; 1024];
-    let inv_gamma = 1.0 / f64::from(lightgamma);
+    let gamma = 2.5f64;
+    let g1 = 1.0 / gamma;
+    let g3 = 0.125f64; // brightness <= 0.0 standard
+    let lightgamma_f64 = f64::from(lightgamma);
+
     for (i, entry) in table.iter_mut().enumerate() {
         let normalized = (i as f64) / 1023.0;
-        let val = (normalized.powf(inv_gamma) * 1023.0).round();
+        let mut f = normalized.powf(lightgamma_f64);
+
+        if f <= g3 {
+            f = (f / g3) * 0.125;
+        } else {
+            f = ((f - g3) / (1.0 - g3)) * 0.875 + 0.125;
+        }
+
+        let d = f.powf(g1);
+        let val = (d * 1023.0).round();
         *entry = (val as i32).clamp(0, 1023) as u16;
     }
     table
@@ -201,6 +215,7 @@ pub struct EntityMetadata {
     pub invisible_faces: std::collections::HashSet<usize>,
     pub face_origins: std::collections::HashMap<usize, [f32; 3]>,
     pub face_render_props: std::collections::HashMap<usize, (u32, u8, [u8; 3])>,
+    pub face_submodels: std::collections::HashMap<usize, String>,
 }
 
 fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
@@ -255,9 +270,16 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
                 }
             } else if trimmed.starts_with("\"classname\"")
                 && let Some(c_str) = trimmed.split('"').nth(3)
-                && (c_str == "func_ladder"
-                    || c_str == "func_bomb_target"
-                    || c_str.starts_with("trigger_"))
+                && (c_str.starts_with("trigger_")
+                    || matches!(
+                        c_str,
+                        "func_ladder"
+                            | "func_bomb_target"
+                            | "func_buyzone"
+                            | "func_hostage_rescue"
+                            | "func_vip_safetyzone"
+                            | "func_escapezone"
+                    ))
             {
                 is_trigger = true;
             }
@@ -290,6 +312,12 @@ fn collect_entity_metadata(bsp: &BspLevel<'_>) -> EntityMetadata {
                     metadata.face_origins.insert(f, orig);
                 }
             }
+
+            // Tag submodel face index with model ID (e.g. "*65")
+            let submodel_tag = format!("*{m_idx}");
+            for f in first..first + num {
+                metadata.face_submodels.insert(f, submodel_tag.clone());
+            }
         }
     }
 
@@ -313,6 +341,7 @@ pub fn compile_bsp_geometry_submeshes(
 }
 
 /// Compiles raw BSP30 level geometry and generates the hardware-accelerated packed lightmap atlas.
+#[allow(clippy::too_many_lines)]
 pub fn compile_bsp_geometry_and_lightmap(
     bsp: &BspLevel<'_>,
     textures: &[crate::ir::TextureDescriptor],
@@ -359,15 +388,15 @@ pub fn compile_bsp_geometry_and_lightmap(
         if face_positions.len() < 3 {
             continue;
         }
-        let normal = compute_face_normal(&face_positions);
+        let normal = resolve_face_normal(face, bsp, &face_positions);
         let tangent = [s_vec[0], s_vec[1], s_vec[2], 1.0];
 
         let submesh_start = indices.len() as u32;
         let base_vert_idx = vertices.len() as u32;
 
-        let (tex_w, tex_h) = textures
-            .get(tex_id as usize)
-            .map_or((128.0, 128.0), |t| (t.width as f32, t.height as f32));
+        let (tex_w, tex_h) = textures.get(tex_id as usize).map_or((128.0, 128.0), |t| {
+            (t.width.max(1) as f32, t.height.max(1) as f32)
+        });
 
         // Lightmap atlas mapping parameters for this face
         let lm_info = face_uv_map.get(&face_idx);
@@ -422,8 +451,12 @@ pub fn compile_bsp_geometry_and_lightmap(
         }
 
         let submesh_count = (indices.len() as u32) - submesh_start;
+        let submesh_name = metadata.face_submodels.get(&face_idx).map_or_else(
+            || format!("face_{face_idx}"),
+            |sub| format!("{sub}:face_{face_idx}"),
+        );
         submeshes.push(SubMesh {
-            name: format!("face_{face_idx}"),
+            name: submesh_name,
             index_start: submesh_start,
             index_count: submesh_count,
             material_id: tex_id,
@@ -450,6 +483,7 @@ pub fn compile_bsp_geometry_with_atlas(
     bsp: &BspLevel<'_>,
     atlas: Option<&crate::ir::TextureAtlas>,
 ) -> Result<MeshBuffer, FormatError> {
+    let metadata = collect_entity_metadata(bsp);
     let mut vertices: Vec<Vertex> = Vec::with_capacity(bsp.faces.len() * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(bsp.faces.len() * 6);
     let mut submeshes: Vec<SubMesh> = Vec::with_capacity(bsp.faces.len());
@@ -462,7 +496,7 @@ pub fn compile_bsp_geometry_with_atlas(
         if face_positions.len() < 3 {
             continue;
         }
-        let normal = compute_face_normal(&face_positions);
+        let normal = resolve_face_normal(face, bsp, &face_positions);
         let tangent = [s_vec[0], s_vec[1], s_vec[2], 1.0];
 
         let submesh_start = indices.len() as u32;
@@ -512,8 +546,12 @@ pub fn compile_bsp_geometry_with_atlas(
         }
 
         let submesh_count = (indices.len() as u32) - submesh_start;
+        let submesh_name = metadata.face_submodels.get(&face_idx).map_or_else(
+            || format!("face_{face_idx}"),
+            |sub| format!("{sub}:face_{face_idx}"),
+        );
         submeshes.push(SubMesh {
-            name: format!("face_{face_idx}"),
+            name: submesh_name,
             index_start: submesh_start,
             index_count: submesh_count,
             material_id: tex_id,
@@ -598,6 +636,19 @@ fn resolve_texture_projection(
     }
 }
 
+fn resolve_face_normal(face: &BspFace, bsp: &BspLevel, positions: &[[f32; 3]]) -> [f32; 3] {
+    bsp.planes.get(face.plane_id as usize).map_or_else(
+        || compute_face_normal(positions),
+        |plane| {
+            if face.side != 0 {
+                [-plane.normal[0], -plane.normal[1], -plane.normal[2]]
+            } else {
+                plane.normal
+            }
+        },
+    )
+}
+
 fn compute_face_normal(face_positions: &[[f32; 3]]) -> [f32; 3] {
     let p0 = face_positions[0];
     let p1 = face_positions[1];
@@ -647,23 +698,21 @@ mod tests {
         }
 
         // Spot-check canonical values
-        // i=4: ((4/1023)^(1/2.5))*1023 = 111
-        assert_eq!(table[4], 111);
-        // i=40: ((40/1023)^(1/2.5))*1023 = 280
-        assert_eq!(table[40], 280);
-        // i=1020: ((1020/1023)^(1/2.5))*1023 = 1022
-        assert_eq!(table[1020], 1022);
+        // With default gamma = 2.5 and lightgamma = 2.5, table is identity
+        assert_eq!(table[4], 4);
+        assert_eq!(table[40], 40);
+        assert_eq!(table[1020], 1020);
     }
 
     #[test]
     fn test_decode_luxel_values() {
         let table = build_lightgamma_table(DEFAULT_LIGHTGAMMA);
         assert_eq!(decode_luxel(0, DEFAULT_LIGHTSCALE, &table), 0);
-        assert_eq!(decode_luxel(1, DEFAULT_LIGHTSCALE, &table), 27);
-        assert_eq!(decode_luxel(10, DEFAULT_LIGHTSCALE, &table), 70);
-        assert_eq!(decode_luxel(50, DEFAULT_LIGHTSCALE, &table), 133);
-        assert_eq!(decode_luxel(100, DEFAULT_LIGHTSCALE, &table), 175);
-        assert_eq!(decode_luxel(200, DEFAULT_LIGHTSCALE, &table), 231);
+        assert_eq!(decode_luxel(1, DEFAULT_LIGHTSCALE, &table), 1);
+        assert_eq!(decode_luxel(10, DEFAULT_LIGHTSCALE, &table), 10);
+        assert_eq!(decode_luxel(50, DEFAULT_LIGHTSCALE, &table), 50);
+        assert_eq!(decode_luxel(100, DEFAULT_LIGHTSCALE, &table), 100);
+        assert_eq!(decode_luxel(200, DEFAULT_LIGHTSCALE, &table), 200);
         assert_eq!(decode_luxel(255, DEFAULT_LIGHTSCALE, &table), 255);
 
         // Verify strictly monotonic for increasing luxels

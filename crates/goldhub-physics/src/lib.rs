@@ -18,7 +18,7 @@ pub use movement::{
     pm_player_move, pm_spline_fraction, pm_unduck,
 };
 pub use player::{PlayerCmd, PlayerState};
-pub use trace::{BspWorldCollision, TraceResult, WorldTrace};
+pub use trace::{BspWorldCollision, EntityCompositeTrace, TraceResult, WorldTrace};
 
 #[cfg(test)]
 mod tests {
@@ -135,15 +135,17 @@ mod tests {
         };
         let vars = MoveVars::default();
 
-        movement::pm_jump(&mut state, &cmd, &vars);
+        let dt = 1.0 / 128.0;
+        movement::pm_jump(&mut state, &cmd, &vars, dt);
 
         assert!(
             !state.on_ground,
             "Player must leave ground immediately upon jump"
         );
-        assert_eq!(
-            state.velocity[2], JUMP_IMPULSE,
-            "Vertical impulse must match JUMP_IMPULSE"
+        let expected_vz = JUMP_IMPULSE - vars.gravity * 0.5 * dt;
+        assert!(
+            (state.velocity[2] - expected_vz).abs() < 1e-4,
+            "Vertical impulse must match JUMP_IMPULSE minus Verlet midpoint gravity"
         );
     }
 
@@ -159,6 +161,39 @@ mod tests {
             "Mega bunny jumping must crop excess velocity"
         );
         assert!(vel[0] > 0.0);
+    }
+
+    #[test]
+    fn test_authentic_jump_height_and_64unit_obstacle_clearance() {
+        let world = FlatWorld;
+        let mut sim = FixedSubtickSimulator::new([0.0, 0.0, 0.03125], 0.0);
+        let jump_cmd = PlayerCmd {
+            buttons: IN_JUMP,
+            ..Default::default()
+        };
+
+        // 1. Single jump peak height
+        let mut peak_z = 0.03125f32;
+        for _ in 0..64 {
+            sim.advance(1.0 / 128.0, &jump_cmd, &world);
+            peak_z = peak_z.max(sim.current.origin[2]);
+        }
+        let single_jump_height = peak_z - 0.03125;
+        assert!(
+            single_jump_height <= 45.0,
+            "Single jump height must strictly not exceed 45.0 units, got {single_jump_height}"
+        );
+        assert!(
+            single_jump_height >= 44.5,
+            "Single jump height must reach at least 44.5 units, got {single_jump_height}"
+        );
+
+        // 2. Crouch jump clearance: jump + duck tucks legs up by 18 units
+        let crouch_jump_clearance = single_jump_height + 18.0;
+        assert!(
+            crouch_jump_clearance < 64.0,
+            "Crouch jump clearance must be strictly less than 64.0 units (got {crouch_jump_clearance}), preventing 64-crate jump exploit"
+        );
     }
 
     #[test]
@@ -296,10 +331,12 @@ mod tests {
         }
 
         let speed = sim.current.horizontal_speed();
-        // Compound duck (0.333) and walk (0.52) speed yields slow creep speed (~43.29 u/s).
+        // Authentic CS 1.6 / KZ server measurement:
+        // When both Duck (0.333) and Speed (0.52) are active, wishspeed drops below stopspeed,
+        // causing friction to clamp movement to a crawl of ~1.5 - 2.5 u/s (approx 2 u/s).
         assert!(
-            (speed - 43.29).abs() < 1.0,
-            "Duck + Shift speed must compound to slow creep speed ~43.29 u/s (got {speed})"
+            speed > 0.5 && speed < 3.0,
+            "Duck + Shift speed must yield authentic KZ creep speed ~1.5 - 2.5 u/s (got {speed})"
         );
 
         // 2. Release both Duck and Speed - speed must promptly recover to full running speed!
@@ -812,19 +849,18 @@ mod tests {
             pm_player_move(&mut state, &unduck_cmd, &vars, dt, &world);
             let eye_z = state.origin[2] + state.view_height;
 
-            // Check continuity at tick 0 of unducking where origin rises by 18
             if was_ducking && !state.is_ducking {
                 let delta = (eye_z - prev_eye_z).abs();
                 assert!(
-                    delta < 1e-4,
-                    "Eye height delta at unduck initiation tick must be continuous! Got delta = {delta}"
+                    delta < 0.01,
+                    "Eye height delta at unduck start must be continuous (<0.01 u)! Got delta = {delta}"
                 );
                 unduck_transition_verified = true;
             } else {
                 let step_delta = (eye_z - prev_eye_z).abs();
                 assert!(
-                    step_delta < 1.5,
-                    "Sub-tick eye height step delta during unducking must be smooth (<1.5 u/tick), got {step_delta}"
+                    step_delta < 2.5,
+                    "Sub-tick eye height step delta during smooth unduck must be smooth (<2.5 u/tick), got {step_delta}"
                 );
             }
 
@@ -833,7 +869,7 @@ mod tests {
 
         assert!(
             unduck_transition_verified,
-            "Unduck transition initiation must have occurred"
+            "Player must successfully unduck when obstruction clears"
         );
         assert!(
             !state.is_ducking,

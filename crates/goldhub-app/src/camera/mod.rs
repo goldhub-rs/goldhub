@@ -23,6 +23,7 @@ pub struct SpectatorCamera {
     pub pitch: f32,
     pub yaw: f32,
     pub is_active: bool,
+    pub velocity: Vec3,
 }
 
 impl Default for SpectatorCamera {
@@ -34,6 +35,7 @@ impl Default for SpectatorCamera {
             pitch: 0.0,
             yaw: 0.0,
             is_active: true,
+            velocity: Vec3::ZERO,
         }
     }
 }
@@ -101,7 +103,11 @@ fn spectator_camera_movement(
         }
 
         if wish_dir.length_squared() > 0.0 {
-            transform.translation += wish_dir.normalize() * speed * dt;
+            let vel = wish_dir.normalize() * speed;
+            cam.velocity = vel;
+            transform.translation += vel * dt;
+        } else {
+            cam.velocity = Vec3::ZERO;
         }
     }
 }

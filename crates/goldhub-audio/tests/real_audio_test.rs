@@ -53,9 +53,9 @@ fn test_decode_real_cs16_wav_assets() {
                     bytes[pos + 7],
                 ]) as usize;
                 let id_str = String::from_utf8_lossy(id);
-                println!("   Chunk '{}' size={} offset={}", id_str, size, pos);
+                println!("   Chunk '{id_str}' size={size} offset={pos}");
                 pos += 8 + size;
-                if size % 2 != 0 {
+                if !size.is_multiple_of(2) {
                     pos += 1;
                 }
             }

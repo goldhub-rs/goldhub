@@ -684,6 +684,164 @@ impl WorldTrace for BspWorldCollision<'_> {
     }
 }
 
+/// Composite spatial collision tracer combining a base WorldTrace with dynamic solid entity bounding boxes.
+#[derive(Debug, Clone)]
+pub struct EntityCompositeTrace<'a, W: WorldTrace> {
+    pub base: &'a W,
+    pub solid_entities: &'a [([f32; 3], [f32; 3])],
+}
+
+impl<'a, W: WorldTrace> EntityCompositeTrace<'a, W> {
+    #[must_use]
+    pub const fn new(base: &'a W, solid_entities: &'a [([f32; 3], [f32; 3])]) -> Self {
+        Self {
+            base,
+            solid_entities,
+        }
+    }
+}
+
+impl<W: WorldTrace> WorldTrace for EntityCompositeTrace<'_, W> {
+    fn test_player_position(&self, pos: [f32; 3], hull_idx: u32) -> Option<u32> {
+        const DIST_EPSILON: f32 = 0.03125;
+
+        if let Some(hit) = self.base.test_player_position(pos, hull_idx) {
+            return Some(hit);
+        }
+        let (pmins, pmaxs) = player_hull_bounds(hull_idx);
+        for (i, &(emins, emaxs)) in self.solid_entities.iter().enumerate() {
+            let exp_min = [
+                emins[0] - pmaxs[0] + DIST_EPSILON,
+                emins[1] - pmaxs[1] + DIST_EPSILON,
+                emins[2] - pmaxs[2] + DIST_EPSILON,
+            ];
+            let exp_max = [
+                emaxs[0] - pmins[0] - DIST_EPSILON,
+                emaxs[1] - pmins[1] - DIST_EPSILON,
+                emaxs[2] - pmins[2] - DIST_EPSILON,
+            ];
+
+            if pos[0] > exp_min[0]
+                && pos[0] < exp_max[0]
+                && pos[1] > exp_min[1]
+                && pos[1] < exp_max[1]
+                && pos[2] > exp_min[2]
+                && pos[2] < exp_max[2]
+            {
+                return Some(10_000 + i as u32);
+            }
+        }
+
+        None
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    fn trace_player_hull(&self, start: [f32; 3], end: [f32; 3], hull_idx: u32) -> TraceResult {
+        const DIST_EPSILON: f32 = 0.03125;
+
+        let mut tr = self.base.trace_player_hull(start, end, hull_idx);
+        if tr.allsolid {
+            return tr;
+        }
+
+        let (pmins, pmaxs) = player_hull_bounds(hull_idx);
+
+        for (i, &(emins, emaxs)) in self.solid_entities.iter().enumerate() {
+            let exp_min = [
+                emins[0] - pmaxs[0],
+                emins[1] - pmaxs[1],
+                emins[2] - pmaxs[2],
+            ];
+            let exp_max = [
+                emaxs[0] - pmins[0],
+                emaxs[1] - pmins[1],
+                emaxs[2] - pmins[2],
+            ];
+
+            let strict_min = [
+                exp_min[0] + DIST_EPSILON,
+                exp_min[1] + DIST_EPSILON,
+                exp_min[2] + DIST_EPSILON,
+            ];
+            let strict_max = [
+                exp_max[0] - DIST_EPSILON,
+                exp_max[1] - DIST_EPSILON,
+                exp_max[2] - DIST_EPSILON,
+            ];
+
+            // Check if strictly starting inside with epsilon clearance
+            if start[0] >= strict_min[0]
+                && start[0] <= strict_max[0]
+                && start[1] >= strict_min[1]
+                && start[1] <= strict_max[1]
+                && start[2] >= strict_min[2]
+                && start[2] <= strict_max[2]
+            {
+                tr.startsolid = true;
+                tr.fraction = 0.0;
+                tr.endpos = start;
+                tr.hit_entity = Some(10_000 + i as u32);
+                return tr;
+            }
+
+            // Ray-box intersection from start to tr.endpos
+            let mut tmin = 0.0f32;
+            let mut tmax = 1.0f32;
+            let mut hit_normal = [0.0f32; 3];
+            let mut intersected = true;
+
+            for axis in 0..3 {
+                let d = end[axis] - start[axis];
+                if d.abs() < 1e-6 {
+                    if start[axis] < exp_min[axis] || start[axis] > exp_max[axis] {
+                        intersected = false;
+                        break;
+                    }
+                } else {
+                    let inv_d = 1.0 / d;
+                    let mut t1 = (exp_min[axis] - start[axis]) * inv_d;
+                    let mut t2 = (exp_max[axis] - start[axis]) * inv_d;
+                    let mut norm = [0.0f32; 3];
+                    norm[axis] = -1.0;
+
+                    if t1 > t2 {
+                        std::mem::swap(&mut t1, &mut t2);
+                        norm[axis] = 1.0;
+                    }
+
+                    if t1 > tmin {
+                        tmin = t1;
+                        hit_normal = norm;
+                    }
+                    tmax = tmax.min(t2);
+
+                    if tmin > tmax {
+                        intersected = false;
+                        break;
+                    }
+                }
+            }
+
+            if intersected && tmin >= 0.0 && tmin < tr.fraction {
+                tr.fraction = tmin;
+                tr.plane_normal = hit_normal;
+                tr.endpos = [
+                    start[0] + (end[0] - start[0]) * tmin + hit_normal[0] * DIST_EPSILON,
+                    start[1] + (end[1] - start[1]) * tmin + hit_normal[1] * DIST_EPSILON,
+                    start[2] + (end[2] - start[2]) * tmin + hit_normal[2] * DIST_EPSILON,
+                ];
+                tr.hit_entity = Some(10_000 + i as u32);
+            }
+        }
+
+        tr
+    }
+
+    fn find_ladder(&self, origin: [f32; 3], hull_idx: u32) -> Option<LadderContact> {
+        self.base.find_ladder(origin, hull_idx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,5 +959,40 @@ mod tests {
 
         // 3. Position test outside crate in empty world air (X = 10, Y = 0, Z = 20)
         assert_eq!(col.test_player_position([10.0, 0.0, 20.0], 1), None);
+    }
+
+    #[test]
+    fn test_entity_composite_trace_stops_player() {
+        struct EmptyWorld;
+        impl WorldTrace for EmptyWorld {
+            fn trace_player_hull(&self, _s: [f32; 3], end: [f32; 3], _h: u32) -> TraceResult {
+                TraceResult {
+                    startsolid: false,
+                    allsolid: false,
+                    fraction: 1.0,
+                    endpos: end,
+                    plane_normal: [0.0, 0.0, 1.0],
+                    plane_dist: 0.0,
+                    hit_entity: None,
+                }
+            }
+            fn test_player_position(&self, _p: [f32; 3], _h: u32) -> Option<u32> {
+                None
+            }
+        }
+
+        let empty = EmptyWorld;
+        // Hostage entity placed at X = 100, Y = 0, Z = 0 with bounds [-16, -16, 0] to [16, 16, 72]
+        let solid_entities = vec![([84.0, -16.0, 0.0], [116.0, 16.0, 72.0])];
+        let composite = EntityCompositeTrace::new(&empty, &solid_entities);
+
+        // Player standing hull is [-16, -16, -36] to [16, 16, 36] (hull 1)
+        // Moving from X = 0 to X = 100 at Y = 0, Z = 36
+        // Contact occurs when player maxs.x (X + 16) reaches entity mins.x (84) -> X = 68!
+        let tr = composite.trace_player_hull([0.0, 0.0, 36.0], [100.0, 0.0, 36.0], 1);
+        assert!(tr.fraction < 1.0, "Must hit hostage entity");
+        assert_eq!(tr.hit_entity, Some(10_000));
+        assert_eq!(tr.plane_normal, [-1.0, 0.0, 0.0]);
+        assert!((tr.endpos[0] - (68.0 - 0.03125)).abs() < 1e-4);
     }
 }

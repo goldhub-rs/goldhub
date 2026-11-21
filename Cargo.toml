@@ -7,6 +7,9 @@ members = [
     "crates/goldhub-net",
     "crates/goldhub-physics",
     "crates/goldhub-audio",
+    "crates/goldhub-engine-api",
+    "crates/goldhub-game-cstrike",
+    "crates/goldhub-server-cstrike",
     "crates/goldhub-app",
 ]
 
@@ -53,6 +56,13 @@ proc-safety = { git = "https://github.com/ulquiorracode/proc-safety-rs.git", bra
 wire-ring = { git = "https://github.com/ulquiorracode/wire-ring-rs.git", branch = "dev" }
 stitch-data-layout = { git = "https://github.com/ulquiorracode/stitch-rs.git", branch = "dev" }
 odd-int = { git = "https://github.com/ulquiorracode/odd-int-rs.git", branch = "dev" }
+
+# FlatFormats zero-allocation ecosystem
+flatasset-core = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-core" }
+flatasset-texture = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-texture" }
+flatasset-mesh = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-mesh" }
+flatasset-world = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-world" }
+flatasset-audio = { path = "../FlatFormats.rs/flat-formats-asset/crates/flatasset-audio" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
@@ -104,3 +114,6 @@ proc-safety = { path = "../proc-safety-rs" }
 
 [patch."https://github.com/ulquiorracode/odd-int-rs.git"]
 odd-int = { path = "../odd-int-rs" }
+
+[patch."https://github.com/flat-formats-rs/flat-formats-demo.git"]
+flatdemo-core = { path = "../FlatFormats.rs/flat-formats-demo/core/flatdemo-core" }

@@ -274,7 +274,8 @@ impl StudioMdlDecoder {
             self.decode_textures_internal(bytes, header, external_textures)?;
 
         // 3. Body parts & Submodels
-        let body_parts = self.decode_body_parts_internal(bytes, header, &textures)?;
+        let body_parts =
+            self.decode_body_parts_internal(bytes, header, &textures, &skin_families)?;
 
         Ok(StudioModel {
             name,
@@ -428,8 +429,9 @@ impl StudioMdlDecoder {
                             }
                         }
 
-                        // Sample animation bone matrices for each frame
-                        let bone_matrices = sample_sequence_bone_matrices(bytes, raw_bones, s);
+                        // Sample center blend plus full multi-blend grid (e.g. 9-way player aim pitch/yaw)
+                        let (bone_matrices, blend_bone_matrices) =
+                            sample_sequence_bone_matrices_with_blends(bytes, raw_bones, s);
 
                         sequences.push(SequenceData {
                             name: label,
@@ -441,7 +443,9 @@ impl StudioMdlDecoder {
                             events,
                             bbmin: s.bbmin,
                             bbmax: s.bbmax,
+                            blend_count: s.num_blends.clamp(0, i32::from(u8::MAX)) as u8,
                             bone_matrices,
+                            blend_bone_matrices,
                         });
                     }
                 }
@@ -501,8 +505,27 @@ impl StudioMdlDecoder {
             let tex_name = null_terminated_ascii(&t.name);
             let width = t.width.max(0) as usize;
             let height = t.height.max(0) as usize;
-            let pixel_count = width * height;
-            let pal_offset = t.index as usize + pixel_count;
+            if width > 4096 || height > 4096 {
+                return Err(FormatError::MalformedData {
+                    location: "mdl texture dimensions",
+                    reason: format!("dimensions {width}x{height} exceed limit of 4096"),
+                });
+            }
+            let pixel_count =
+                width
+                    .checked_mul(height)
+                    .ok_or_else(|| FormatError::MalformedData {
+                        location: "mdl texture dimensions",
+                        reason: "dimension overflow".into(),
+                    })?;
+            let tex_base = t.index.max(0) as usize;
+            let pal_offset =
+                tex_base
+                    .checked_add(pixel_count)
+                    .ok_or_else(|| FormatError::MalformedData {
+                        location: "mdl texture offset",
+                        reason: "palette offset overflow".into(),
+                    })?;
 
             if pal_offset + 768 > tex_bytes.len() {
                 return Err(FormatError::BufferTooSmall {
@@ -511,7 +534,7 @@ impl StudioMdlDecoder {
                 });
             }
 
-            let index_data = &tex_bytes[t.index as usize..pal_offset];
+            let index_data = &tex_bytes[tex_base..pal_offset];
             let palette = &tex_bytes[pal_offset..pal_offset + 768];
 
             let is_masked = (t.flags & STUDIO_NF_MASKED) != 0;
@@ -565,6 +588,7 @@ impl StudioMdlDecoder {
         bytes: &[u8],
         header: &MdlHeader,
         textures: &[StudioTexture],
+        skin_families: &[Vec<u16>],
     ) -> Result<Vec<StudioBodyPart>, FormatError> {
         let num_parts = header.num_body_parts as usize;
         if num_parts == 0 {
@@ -683,7 +707,11 @@ impl StudioMdlDecoder {
                 let mut meshes = Vec::with_capacity(num_mesh);
                 for mesh in raw_meshes {
                     let skin_ref = mesh.skin_ref.max(0) as usize;
-                    let (tex_w, tex_h) = textures.get(skin_ref).map_or((1.0, 1.0), |tex| {
+                    let tex_idx = skin_families
+                        .first()
+                        .and_then(|fam| fam.get(skin_ref).copied())
+                        .map_or(skin_ref, |idx| idx as usize);
+                    let (tex_w, tex_h) = textures.get(tex_idx).map_or((1.0, 1.0), |tex| {
                         (tex.width.max(1) as f32, tex.height.max(1) as f32)
                     });
 
@@ -827,19 +855,20 @@ fn multiply_4x4(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     out
 }
 
-/// Samples bone transform matrices for every frame of a sequence.
-fn sample_sequence_bone_matrices(
+/// Samples bone transform matrices for every frame of a single blend index.
+fn sample_blend_bone_matrices(
     bytes: &[u8],
     bones: &[MdlBone],
     seq: &MdlSequenceDesc,
+    blend_idx: usize,
 ) -> Vec<Vec<[f32; 16]>> {
     let num_frames = seq.num_frames.max(1) as usize;
     let num_bones = bones.len();
-    if seq.anim_index <= 0 || (seq.anim_index as usize) >= bytes.len() {
+    let blend_offset = blend_idx * num_bones * 12;
+    let anim_base = (seq.anim_index as usize) + blend_offset;
+    if seq.anim_index <= 0 || anim_base >= bytes.len() {
         return Vec::new();
     }
-
-    let anim_base = seq.anim_index as usize;
     let mut all_frame_matrices = Vec::with_capacity(num_frames);
 
     // Temp buffers for bone poses
@@ -868,6 +897,38 @@ fn sample_sequence_bone_matrices(
     }
 
     all_frame_matrices
+}
+
+/// Samples center blend matrices and, when `num_blends > 1`, all blend slots (`[blend][frame][bone]`).
+#[allow(clippy::type_complexity)]
+fn sample_sequence_bone_matrices_with_blends(
+    bytes: &[u8],
+    bones: &[MdlBone],
+    seq: &MdlSequenceDesc,
+) -> (Vec<Vec<[f32; 16]>>, Vec<Vec<Vec<[f32; 16]>>>) {
+    if seq.anim_index <= 0 || (seq.anim_index as usize) >= bytes.len() {
+        return (Vec::new(), Vec::new());
+    }
+    let num_blends = seq.num_blends.max(1) as usize;
+    let center_blend = if num_blends == 9 {
+        4
+    } else if num_blends > 1 {
+        num_blends / 2
+    } else {
+        0
+    };
+
+    if num_blends <= 1 {
+        let center = sample_blend_bone_matrices(bytes, bones, seq, 0);
+        return (center, Vec::new());
+    }
+
+    let mut blends = Vec::with_capacity(num_blends);
+    for b in 0..num_blends {
+        blends.push(sample_blend_bone_matrices(bytes, bones, seq, b));
+    }
+    let center = blends.get(center_blend).cloned().unwrap_or_default();
+    (center, blends)
 }
 
 /// Evaluates position `[x, y, z]` and angles `[xr, yr, zr]` for a single bone frame.
