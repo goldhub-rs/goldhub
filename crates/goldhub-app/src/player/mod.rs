@@ -323,7 +323,7 @@ fn player_flashlight_system(
     const FLASHLIGHT_DRAIN_SECS: f32 = 120.0;
     const FLASHLIGHT_RECHARGE_SECS: f32 = 20.0;
     const FLASHLIGHT_MAX_DIST: f32 = 2000.0;
-    const FLASHLIGHT_HIT_BASE_INTENSITY: f32 = 12_000.0;
+    const FLASHLIGHT_HIT_BASE_INTENSITY: f32 = 3_500.0;
 
     let dt = time.delta_secs();
     let Ok((camera_entity, cam_gt, mut flashlight)) = camera_query.get_single_mut() else {
@@ -362,7 +362,7 @@ fn player_flashlight_system(
                 .spawn((
                     SpotLight {
                         color: Color::srgb(1.0, 0.98, 0.94),
-                        intensity: 85_000.0,
+                        intensity: 18_000.0,
                         range: 2_000.0,
                         radius: 12.0,
                         inner_angle: 15.0f32.to_radians(),

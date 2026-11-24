@@ -2622,7 +2622,8 @@ pub fn handle_round_reset_entities_system(
     mut triggers_once: Query<&mut TriggerOnceEntity>,
     mut pickups: Query<&mut DefuseKitPickup>,
     mut scenario_map: Option<ResMut<ScenarioMapData>>,
-    decals_q: Query<Entity, With<crate::sprite::BulletHoleDecal>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    decals_q: Query<(Entity, &crate::sprite::BulletHoleDecal)>,
     gibs_q: Query<Entity, With<GibParticle>>,
     smoke_q: Query<Entity, With<crate::sprite::SmokeBillboardParticle>>,
     mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
@@ -2706,8 +2707,8 @@ pub fn handle_round_reset_entities_system(
     for mut p in &mut pickups {
         p.collected = false;
     }
-    for e in &decals_q {
-        commands.entity(e).despawn_recursive();
+    for (e, decal) in &decals_q {
+        crate::sprite::despawn_decal_entity(&mut commands, Some(&mut meshes), e, decal);
     }
     for e in &gibs_q {
         commands.entity(e).despawn_recursive();

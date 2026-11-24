@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
+use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::RenderLayers;
@@ -386,18 +387,11 @@ impl SpriteStore {
         );
         let img_handle = images.add(image);
 
-        let is_additive = key.starts_with("{break") || key.starts_with("{bproof");
-        let alpha_mode = if is_additive {
-            AlphaMode::Add
-        } else {
-            AlphaMode::Blend
-        };
-
         let mat = StandardMaterial {
             base_color_texture: Some(img_handle),
             cull_mode: None,
             unlit: true,
-            alpha_mode,
+            alpha_mode: AlphaMode::Blend,
             depth_bias: 1000.0,
             ..default()
         };
@@ -451,13 +445,44 @@ pub struct SmokeBillboardParticle {
     pub base_alpha: f32,
 }
 
-/// Component tagging world decals with position, surface normal, and fade-out timer.
+/// Component tagging world decals with position, surface normal, fade-out timer, and optional clipped mesh handle.
 #[derive(Component, Debug, Clone)]
 pub struct BulletHoleDecal {
     pub position: Vec3,
     pub normal: Vec3,
     pub lifetime: f32,
     pub max_lifetime: f32,
+    pub custom_mesh: Option<Handle<Mesh>>,
+}
+
+/// Convex BSP face polygon used for GoldSrc `R_DecalPoly` (Sutherland-Hodgman) decal clipping.
+#[derive(Debug, Clone)]
+pub struct BspDecalFace {
+    pub model_index: usize,
+    pub aabb_min: Vec3,
+    pub aabb_max: Vec3,
+    pub normal: Vec3,
+    pub plane_dist: f32,
+    pub vertices: Vec<Vec3>,
+}
+
+/// Level-wide spatial index of BSP surfaces for edge-clipped and corner-wrapping decals.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct LevelDecalSurfaceIndex {
+    pub faces: Vec<BspDecalFace>,
+}
+
+/// Despawns a decal entity and releases any custom edge-clipped `Mesh` handle from GPU assets.
+pub fn despawn_decal_entity(
+    commands: &mut Commands,
+    meshes: Option<&mut Assets<Mesh>>,
+    entity: Entity,
+    decal: &BulletHoleDecal,
+) {
+    if let (Some(mesh_assets), Some(mesh_handle)) = (meshes, decal.custom_mesh.as_ref()) {
+        mesh_assets.remove(mesh_handle);
+    }
+    commands.entity(entity).despawn();
 }
 
 /// Marker component for camera-facing billboard quad sprites (e.g. embers, static puffs, sparks).
@@ -1028,48 +1053,157 @@ pub fn spawn_scorch_decal(
             normal: surface_normal,
             lifetime: 0.0,
             max_lifetime: 90.0,
+            custom_mesh: None,
         },
     ));
 }
 
-/// Spawns a bullet or glass impact decal (`{shot1..5`, `{break1..3`, `{bproof1`),
-/// optionally attached in local space to a moving BSP submodel parent (e.g., `func_door`).
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_surface_decal(
+fn decal_plane_basis(normal: Vec3) -> (Vec3, Vec3) {
+    let up_ref = if normal.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let u_axis = normal.cross(up_ref).normalize_or_zero();
+    let v_axis = normal.cross(u_axis).normalize_or_zero();
+    (u_axis, v_axis)
+}
+
+fn sh_clip_uv_edge(verts: &[(Vec3, [f32; 2])], edge: usize) -> Vec<(Vec3, [f32; 2])> {
+    if verts.len() < 3 {
+        return Vec::new();
+    }
+    let inside = |uv: [f32; 2]| -> bool {
+        match edge {
+            0 => uv[0] >= 0.0,
+            1 => uv[0] <= 1.0,
+            2 => uv[1] >= 0.0,
+            _ => uv[1] <= 1.0,
+        }
+    };
+    let intersect = |a: &(Vec3, [f32; 2]), b: &(Vec3, [f32; 2])| -> (Vec3, [f32; 2]) {
+        let (val_a, val_b, target) = match edge {
+            0 => (a.1[0], b.1[0], 0.0),
+            1 => (a.1[0], b.1[0], 1.0),
+            2 => (a.1[1], b.1[1], 0.0),
+            _ => (a.1[1], b.1[1], 1.0),
+        };
+        let denom = val_a - val_b;
+        let t = if denom.abs() > 1e-6 {
+            ((val_a - target) / denom).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let pos = a.0.lerp(b.0, t);
+        let mut uv = [
+            a.1[0] + (b.1[0] - a.1[0]) * t,
+            a.1[1] + (b.1[1] - a.1[1]) * t,
+        ];
+        match edge {
+            0 | 1 => uv[0] = target,
+            _ => uv[1] = target,
+        }
+        (pos, uv)
+    };
+
+    let mut out = Vec::with_capacity(verts.len() + 2);
+    let mut s = &verts[verts.len() - 1];
+    for p in verts {
+        if inside(p.1) {
+            if !inside(s.1) {
+                out.push(intersect(s, p));
+            }
+            out.push(*p);
+        } else if inside(s.1) {
+            out.push(intersect(p, s));
+        }
+        s = p;
+    }
+    out
+}
+
+/// Clips a square decal `[0..1]^2` centered at `proj_center` against a convex BSP face polygon.
+/// Returns `(world_or_local_positions, uvs, uv_coverage_area)` when the decal intersects the face.
+#[must_use]
+pub fn clip_decal_polygon_to_face(
+    face: &BspDecalFace,
+    proj_center: Vec3,
+    size: f32,
+) -> Option<(Vec<Vec3>, Vec<[f32; 2]>, f32)> {
+    if face.vertices.len() < 3 || size <= 1e-4 {
+        return None;
+    }
+    let (u_axis, v_axis) = decal_plane_basis(face.normal);
+    if u_axis.length_squared() < 0.5 || v_axis.length_squared() < 0.5 {
+        return None;
+    }
+
+    let mut poly: Vec<(Vec3, [f32; 2])> = face
+        .vertices
+        .iter()
+        .map(|&v| {
+            let rel = v - proj_center;
+            let u = rel.dot(u_axis) / size + 0.5;
+            let w = rel.dot(v_axis) / size + 0.5;
+            (v, [u, w])
+        })
+        .collect();
+
+    for edge in 0..4 {
+        poly = sh_clip_uv_edge(&poly, edge);
+        if poly.len() < 3 {
+            return None;
+        }
+    }
+
+    let mut uv_area = 0.0f32;
+    for i in 0..poly.len() {
+        let j = (i + 1) % poly.len();
+        uv_area += poly[i].1[0] * poly[j].1[1] - poly[j].1[0] * poly[i].1[1];
+    }
+    uv_area = (uv_area * 0.5).abs();
+    if uv_area < 0.015 {
+        return None;
+    }
+
+    let positions = poly.iter().map(|(p, _)| *p).collect();
+    let uvs = poly.iter().map(|(_, uv)| *uv).collect();
+    Some((positions, uvs, uv_area))
+}
+
+fn build_clipped_decal_mesh(positions: &[Vec3], uvs: &[[f32; 2]], normal: Vec3) -> Mesh {
+    let offset_positions: Vec<[f32; 3]> = positions
+        .iter()
+        .map(|&p| (p + normal * 0.08).to_array())
+        .collect();
+    let normals: Vec<[f32; 3]> = vec![normal.to_array(); positions.len()];
+    let mut indices = Vec::with_capacity((positions.len().saturating_sub(2)) * 3);
+    for i in 1..(positions.len() - 1) {
+        indices.push(0);
+        indices.push(i as u32);
+        indices.push((i + 1) as u32);
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, offset_positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs.to_vec());
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn spawn_unclipped_decal_entity(
     commands: &mut Commands,
-    hit_pos: Vec3,
+    quad: Handle<Mesh>,
+    mat: Handle<StandardMaterial>,
+    decal_pos: Vec3,
     wall_normal: Vec3,
-    kind: ImpactDecalKind,
+    size: f32,
     attach_to: Option<(Entity, Vec3, Quat)>,
-    sprite_store: &mut SpriteStore,
-    search_paths: &GameSearchPaths,
-    images: &mut ResMut<Assets<Image>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-    meshes: &mut ResMut<Assets<Mesh>>,
 ) {
-    let decal_name = match kind {
-        ImpactDecalKind::BulletShot => {
-            let shot_num = ((hit_pos.x.abs() * 10.0 + hit_pos.y.abs()) as usize % 5) + 1;
-            format!("{{shot{shot_num}")
-        }
-        ImpactDecalKind::BreakableGlass => {
-            let break_num = ((hit_pos.x.abs() * 11.0 + hit_pos.z.abs() * 7.0) as usize % 3) + 1;
-            format!("{{break{break_num}")
-        }
-        ImpactDecalKind::UnbreakableGlass => "{bproof1".to_string(),
-    };
-
-    let Some(mat) = sprite_store.get_or_load_decal(&decal_name, search_paths, images, materials)
-    else {
-        return;
-    };
-
-    let size = match kind {
-        ImpactDecalKind::BreakableGlass | ImpactDecalKind::UnbreakableGlass => 28.0,
-        ImpactDecalKind::BulletShot => 7.5,
-    };
-    let quad = sprite_store.get_or_create_unit_quad(meshes);
-    let decal_pos = hit_pos + wall_normal * 0.08;
     let rot = if wall_normal.dot(Vec3::Z).abs() > 0.999 {
         if wall_normal.z > 0.0 {
             Quat::IDENTITY
@@ -1096,6 +1230,7 @@ pub fn spawn_surface_decal(
                     normal: wall_normal,
                     lifetime: 0.0,
                     max_lifetime: 60.0,
+                    custom_mesh: None,
                 },
             ))
             .id();
@@ -1112,9 +1247,175 @@ pub fn spawn_surface_decal(
                 normal: wall_normal,
                 lifetime: 0.0,
                 max_lifetime: 60.0,
+                custom_mesh: None,
             },
         ));
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_clipped_decal_on_index(
+    commands: &mut Commands,
+    hit_pos: Vec3,
+    wall_normal: Vec3,
+    size: f32,
+    mat: &Handle<StandardMaterial>,
+    attach_to: Option<(Entity, Vec3, Quat)>,
+    model_index: usize,
+    index: &LevelDecalSurfaceIndex,
+    sprite_store: &mut SpriteStore,
+    meshes: &mut Assets<Mesh>,
+) -> bool {
+    let half = size * 0.5;
+    let (local_hit, local_norm) = if let Some((_, parent_pos, parent_rot)) = attach_to {
+        let inv = parent_rot.inverse();
+        (
+            inv * (hit_pos - parent_pos),
+            (inv * wall_normal).normalize_or_zero(),
+        )
+    } else {
+        (hit_pos, wall_normal.normalize_or_zero())
+    };
+
+    let search_min = local_hit - Vec3::splat(half + 2.0);
+    let search_max = local_hit + Vec3::splat(half + 2.0);
+    let mut spawned_any = false;
+
+    for face in &index.faces {
+        if face.model_index != model_index
+            || face.aabb_max.x < search_min.x
+            || face.aabb_min.x > search_max.x
+            || face.aabb_max.y < search_min.y
+            || face.aabb_min.y > search_max.y
+            || face.aabb_max.z < search_min.z
+            || face.aabb_min.z > search_max.z
+        {
+            continue;
+        }
+
+        let ndot = face.normal.dot(local_norm);
+        if ndot < -0.05 {
+            continue;
+        }
+        let signed_dist = local_hit.dot(face.normal) - face.plane_dist;
+        let plane_delta = signed_dist.abs();
+        if (ndot > 0.7 && plane_delta > 1.5) || plane_delta >= half {
+            continue;
+        }
+
+        let proj_center = local_hit - face.normal * signed_dist;
+        let Some((positions, uvs, uv_area)) = clip_decal_polygon_to_face(face, proj_center, size)
+        else {
+            continue;
+        };
+
+        spawned_any = true;
+        let (world_pos, world_norm) = if let Some((_, parent_pos, parent_rot)) = attach_to {
+            (
+                parent_pos + parent_rot * (proj_center + face.normal * 0.08),
+                parent_rot * face.normal,
+            )
+        } else {
+            (proj_center + face.normal * 0.08, face.normal)
+        };
+
+        if uv_area >= 0.99 {
+            let quad = sprite_store.get_or_create_unit_quad(meshes);
+            spawn_unclipped_decal_entity(
+                commands,
+                quad,
+                mat.clone(),
+                world_pos,
+                world_norm,
+                size,
+                attach_to,
+            );
+            continue;
+        }
+
+        let mesh_handle = meshes.add(build_clipped_decal_mesh(&positions, &uvs, face.normal));
+        let bundle = (
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::IDENTITY,
+            BulletHoleDecal {
+                position: world_pos,
+                normal: world_norm,
+                lifetime: 0.0,
+                max_lifetime: 60.0,
+                custom_mesh: Some(mesh_handle),
+            },
+        );
+        if let Some((parent_ent, _, _)) = attach_to {
+            let child = commands.spawn(bundle).id();
+            commands.entity(parent_ent).add_child(child);
+        } else {
+            commands.spawn(bundle);
+        }
+    }
+    spawned_any
+}
+
+/// Spawns a clipped bullet or glass impact decal (`{shot1..5`, `{break1..3`, `{bproof1`).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_surface_decal(
+    commands: &mut Commands,
+    hit_pos: Vec3,
+    wall_normal: Vec3,
+    kind: ImpactDecalKind,
+    attach_to: Option<(Entity, Vec3, Quat)>,
+    model_index: usize,
+    decal_faces: Option<&LevelDecalSurfaceIndex>,
+    sprite_store: &mut SpriteStore,
+    search_paths: &GameSearchPaths,
+    images: &mut ResMut<Assets<Image>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+) {
+    let decal_name = match kind {
+        ImpactDecalKind::BulletShot => {
+            let shot_num = ((hit_pos.x.abs() * 10.0 + hit_pos.y.abs()) as usize % 5) + 1;
+            format!("{{shot{shot_num}")
+        }
+        ImpactDecalKind::BreakableGlass => {
+            let break_num = ((hit_pos.x.abs() * 11.0 + hit_pos.z.abs() * 7.0) as usize % 3) + 1;
+            format!("{{break{break_num}")
+        }
+        ImpactDecalKind::UnbreakableGlass => "{bproof1".to_string(),
+    };
+
+    let Some(mat) = sprite_store.get_or_load_decal(&decal_name, search_paths, images, materials)
+    else {
+        return;
+    };
+
+    // Native GoldSrc `decals.wad` texel proportions (1 texel = 1 world unit):
+    // `{shot1..5` (16x16), `{bproof1` (16x16), `{break1..3` (48x48, slightly scaled for panes).
+    let size = match kind {
+        ImpactDecalKind::BulletShot | ImpactDecalKind::UnbreakableGlass => 16.0,
+        ImpactDecalKind::BreakableGlass => 32.0,
+    };
+
+    if let Some(index) = decal_faces
+        && spawn_clipped_decal_on_index(
+            commands,
+            hit_pos,
+            wall_normal,
+            size,
+            &mat,
+            attach_to,
+            model_index,
+            index,
+            sprite_store,
+            meshes,
+        )
+    {
+        return;
+    }
+
+    let quad = sprite_store.get_or_create_unit_quad(meshes);
+    let decal_pos = hit_pos + wall_normal * 0.08;
+    spawn_unclipped_decal_entity(commands, quad, mat, decal_pos, wall_normal, size, attach_to);
 }
 
 /// Spawns an authentic bullet hole decal on a struck world wall (`{shot1..5`).
@@ -1134,6 +1435,8 @@ pub fn spawn_bullet_hole_decal(
         hit_pos,
         wall_normal,
         ImpactDecalKind::BulletShot,
+        None,
+        0,
         None,
         sprite_store,
         search_paths,
@@ -1673,6 +1976,7 @@ pub fn update_delayed_smokes_system(
 pub fn update_bullet_decals_system(
     mut commands: Commands,
     time: Res<Time>,
+    mut meshes: Option<ResMut<Assets<Mesh>>>,
     mut query: Query<(Entity, &mut BulletHoleDecal)>,
 ) {
     let dt = time.delta_secs();
@@ -1680,25 +1984,24 @@ pub fn update_bullet_decals_system(
         return;
     }
     let mut total_count = 0;
-    let mut oldest_entity = None;
+    let mut oldest_entity: Option<(Entity, BulletHoleDecal)> = None;
     let mut max_lifetime_so_far = -1.0f32;
 
     for (entity, mut decal) in &mut query {
         total_count += 1;
         decal.lifetime += dt;
-        if decal.lifetime > max_lifetime_so_far {
-            max_lifetime_so_far = decal.lifetime;
-            oldest_entity = Some(entity);
-        }
         if decal.lifetime >= decal.max_lifetime {
-            commands.entity(entity).despawn();
+            despawn_decal_entity(&mut commands, meshes.as_deref_mut(), entity, &decal);
+        } else if decal.lifetime > max_lifetime_so_far {
+            max_lifetime_so_far = decal.lifetime;
+            oldest_entity = Some((entity, decal.clone()));
         }
     }
 
     if total_count > 128
-        && let Some(oldest) = oldest_entity
+        && let Some((oldest, oldest_decal)) = oldest_entity
     {
-        commands.entity(oldest).despawn();
+        despawn_decal_entity(&mut commands, meshes.as_deref_mut(), oldest, &oldest_decal);
     }
 }
 
@@ -2232,6 +2535,7 @@ mod tests {
                 normal: Vec3::Z,
                 lifetime: i as f32 * 0.1, // oldest has largest lifetime
                 max_lifetime: 60.0,
+                custom_mesh: None,
             });
         }
 
@@ -2248,6 +2552,54 @@ mod tests {
             .iter(app.world())
             .count();
         assert_eq!(remaining, 128, "Active decals must be bounded to 128 max");
+    }
+
+    #[test]
+    fn test_sutherland_hodgman_edge_and_corner_clipping() {
+        // Wall face ending at X = 100.0 (facing +Z)
+        let front_face = BspDecalFace {
+            model_index: 0,
+            aabb_min: Vec3::new(0.0, 0.0, -0.5),
+            aabb_max: Vec3::new(100.0, 128.0, 0.5),
+            normal: Vec3::Z,
+            plane_dist: 0.0,
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(100.0, 0.0, 0.0),
+                Vec3::new(100.0, 128.0, 0.0),
+                Vec3::new(0.0, 128.0, 0.0),
+            ],
+        };
+        // Return L-corner face at X = 100.0 going back along -Z (facing +X)
+        let return_face = BspDecalFace {
+            model_index: 0,
+            aabb_min: Vec3::new(99.5, 0.0, -100.0),
+            aabb_max: Vec3::new(100.5, 128.0, 0.0),
+            normal: Vec3::X,
+            plane_dist: 100.0,
+            vertices: vec![
+                Vec3::new(100.0, 0.0, 0.0),
+                Vec3::new(100.0, 0.0, -100.0),
+                Vec3::new(100.0, 128.0, -100.0),
+                Vec3::new(100.0, 128.0, 0.0),
+            ],
+        };
+
+        // Shoot 2 units away from vertical corner edge X = 100 with a 16-unit decal (half = 8)
+        let hit_pos = Vec3::new(98.0, 64.0, 0.0);
+
+        let (front_pts, _, front_area) =
+            clip_decal_polygon_to_face(&front_face, hit_pos, 16.0).expect("clips front face");
+        // Must clip strictly at X = 100.0 without protruding past edge!
+        assert!(front_pts.iter().all(|p| p.x <= 100.0 + 1e-4));
+        assert!(front_area > 0.55 && front_area < 0.70);
+
+        // Project onto return face at X = 100.0
+        let proj_return = Vec3::new(100.0, 64.0, 0.0);
+        let (ret_pts, _, ret_area) =
+            clip_decal_polygon_to_face(&return_face, proj_return, 16.0).expect("wraps corner");
+        assert!(ret_pts.iter().all(|p| p.z <= 1e-4));
+        assert!(ret_area > 0.45 && ret_area < 0.55);
     }
 
     #[test]

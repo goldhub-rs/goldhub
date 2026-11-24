@@ -222,6 +222,14 @@ pub fn setup_level(
                 commands.insert_resource(crate::audio::LevelGroundMaterialIndex {
                     faces: ground_faces,
                 });
+
+                let decal_faces = build_bsp_decal_faces(&bsp, &textures);
+                tracing::info!(
+                    "Indexed {} BSP surface polygons for clipped corner-wrapping decals",
+                    decal_faces.len()
+                );
+                commands
+                    .insert_resource(crate::sprite::LevelDecalSurfaceIndex { faces: decal_faces });
             }
 
             // 0. Spawn GoldSrc 6-sided Skybox cube
@@ -378,7 +386,8 @@ pub fn setup_level(
                             render_mode,
                             render_amt: f32::from(part.render_amt),
                             flashlight_active: 0,
-                            flashlight_radius: 650.0,
+                            flashlight_radius: 92.0,
+                            flashlight_intensity: 0.0,
                             flashlight_pos: Vec3::ZERO,
                             flashlight_dir: Vec3::Z,
                             water_alpha: 0.65,
@@ -702,11 +711,101 @@ pub fn update_viewmodel_dynamic_lighting_system(
     }
 }
 
+fn build_bsp_decal_faces(
+    bsp: &goldhub_formats::codecs::legacy::bsp::BspLevel<'_>,
+    textures: &[goldhub_formats::ir::TextureDescriptor],
+) -> Vec<crate::sprite::BspDecalFace> {
+    let mut out = Vec::with_capacity(bsp.faces.len());
+    for (model_index, model) in bsp.models.iter().enumerate() {
+        let first_face = model.first_face as usize;
+        let num_faces = model.num_faces as usize;
+        if first_face + num_faces > bsp.faces.len() {
+            continue;
+        }
+        for face in &bsp.faces[first_face..first_face + num_faces] {
+            let tex_info_idx = face.texture_info_id as usize;
+            let skip = bsp.texture_infos.get(tex_info_idx).is_some_and(|ti| {
+                textures.get(ti.texture_id as usize).is_some_and(|t| {
+                    let n = t.name.to_ascii_lowercase();
+                    n == "sky"
+                        || n == "aaatrigger"
+                        || n == "clip"
+                        || n == "origin"
+                        || n == "{invisible"
+                        || n.starts_with('*')
+                        || n.starts_with('!')
+                })
+            });
+            if skip {
+                continue;
+            }
+            let Some(plane) = bsp.planes.get(face.plane_id as usize) else {
+                continue;
+            };
+            let sign = if face.side == 0 { 1.0 } else { -1.0 };
+            let normal = Vec3::new(
+                plane.normal[0] * sign,
+                plane.normal[2] * sign,
+                -plane.normal[1] * sign,
+            )
+            .normalize_or_zero();
+            if normal.length_squared() < 0.5 {
+                continue;
+            }
+
+            let first_edge = face.first_surfedge_id as usize;
+            let num_edges = face.surfedges_num as usize;
+            if first_edge + num_edges > bsp.surfedges.len() {
+                continue;
+            }
+
+            let mut vertices = Vec::with_capacity(num_edges);
+            let mut aabb_min = Vec3::splat(f32::INFINITY);
+            let mut aabb_max = Vec3::splat(f32::NEG_INFINITY);
+
+            for &surfedge in &bsp.surfedges[first_edge..first_edge + num_edges] {
+                let (edge_idx, reverse) = if surfedge >= 0 {
+                    (surfedge as usize, false)
+                } else {
+                    (surfedge.unsigned_abs() as usize, true)
+                };
+                if let Some(edge) = bsp.edges.get(edge_idx) {
+                    let v_idx = if reverse {
+                        edge.vertices[1] as usize
+                    } else {
+                        edge.vertices[0] as usize
+                    };
+                    if let Some(v) = bsp.vertices.get(v_idx) {
+                        let bv = Vec3::new(v[0], v[2], -v[1]);
+                        aabb_min = aabb_min.min(bv);
+                        aabb_max = aabb_max.max(bv);
+                        vertices.push(bv);
+                    }
+                }
+            }
+
+            if vertices.len() >= 3 {
+                let plane_dist = vertices[0].dot(normal);
+                out.push(crate::sprite::BspDecalFace {
+                    model_index,
+                    aabb_min,
+                    aabb_max,
+                    normal,
+                    plane_dist,
+                    vertices,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Updates dynamic shader parameters across active BSP world materials:
-/// - Real-time flashlight dynamic lighting (dlight_t spot cone on BSP geometry).
-/// - Real-time animated water sine ripples (r_wateralpha parity).
+/// - Real-time GoldSrc flashlight dynamic lighting (`CL_UpdateFlashlight` trace + `R_AddDynamicLights`).
+/// - Real-time animated water sine ripples (`r_wateralpha` parity).
 pub fn update_bsp_materials_dynamic_system(
     time: Res<Time>,
+    collision_res: Option<Res<crate::player::LevelCollisionResource>>,
     player_query: Query<
         (&GlobalTransform, &crate::player::PlayerFlashlight),
         With<crate::player::PlayerController>,
@@ -714,15 +813,46 @@ pub fn update_bsp_materials_dynamic_system(
     video_settings: Option<Res<crate::video_settings::VideoSettings>>,
     mut bsp_materials: ResMut<Assets<bsp_material::GoldSrcBspMaterial>>,
 ) {
+    const FLASHLIGHT_MAX_DIST: f32 = 2048.0;
+    const FLASHLIGHT_DLIGHT_RADIUS: f32 = 92.0;
+
     let t = time.elapsed_secs();
-    let (active, pos, dir) = if let Ok((gt, flash)) = player_query.get_single() {
-        if flash.is_on {
-            (1u32, gt.translation(), gt.forward().as_vec3())
+    let (active, pos, dir, intensity) = if let Ok((gt, flash)) = player_query.get_single()
+        && flash.is_on
+    {
+        let eye_pos = gt.translation();
+        let forward = gt.forward().as_vec3();
+        if let Some(col_res) = collision_res.as_ref()
+            && let Some(ref col) = col_res.model
+        {
+            use goldhub_physics::WorldTrace;
+            let bsp = goldhub_physics::BspWorldCollision::new(col);
+            let end = eye_pos + forward * FLASHLIGHT_MAX_DIST;
+            let tr = bsp.trace_player_hull(
+                [eye_pos.x, -eye_pos.z, eye_pos.y],
+                [end.x, -end.z, end.y],
+                0,
+            );
+            if tr.fraction < 1.0 && !tr.is_sky {
+                let hit_pos = Vec3::new(tr.endpos[0], tr.endpos[2], -tr.endpos[1]);
+                let norm = Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1])
+                    .normalize_or_zero();
+                let hit_dist = tr.fraction * FLASHLIGHT_MAX_DIST;
+                let falloff = if hit_dist < 500.0 {
+                    1.0
+                } else {
+                    let ratio = 500.0 / hit_dist;
+                    ratio * ratio
+                };
+                (1u32, hit_pos + norm * 3.0, forward, 0.72 * falloff)
+            } else {
+                (0u32, Vec3::ZERO, Vec3::Z, 0.0)
+            }
         } else {
-            (0u32, Vec3::ZERO, Vec3::Z)
+            (0u32, Vec3::ZERO, Vec3::Z, 0.0)
         }
     } else {
-        (0u32, Vec3::ZERO, Vec3::Z)
+        (0u32, Vec3::ZERO, Vec3::Z, 0.0)
     };
 
     let water_alpha = video_settings.map_or(0.65, |vs| vs.water_alpha);
@@ -734,7 +864,8 @@ pub fn update_bsp_materials_dynamic_system(
         if active == 1 {
             mat.uniform.flashlight_pos = pos;
             mat.uniform.flashlight_dir = dir;
-            mat.uniform.flashlight_radius = 650.0;
+            mat.uniform.flashlight_radius = FLASHLIGHT_DLIGHT_RADIUS;
+            mat.uniform.flashlight_intensity = intensity;
         }
     }
 }

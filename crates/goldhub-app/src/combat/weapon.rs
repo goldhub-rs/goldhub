@@ -2534,6 +2534,7 @@ pub struct CombatVfxAssets<'w> {
     pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
+    pub decal_faces: Option<Res<'w, crate::sprite::LevelDecalSurfaceIndex>>,
 }
 
 /// SystemParam bundling combat scene queries.
@@ -2720,6 +2721,7 @@ fn emit_surface_impact_fx(
     hit_normal: Vec3,
     material: Option<BreakableMaterial>,
     attach_to: Option<(Entity, Vec3, Quat)>,
+    model_index: usize,
     sprite_store: &mut SpriteStore,
     audio: &mut CombatAudio,
     vfx: &mut CombatVfxAssets,
@@ -2727,14 +2729,14 @@ fn emit_surface_impact_fx(
     existing_decals: &Query<(Entity, &'static BulletHoleDecal)>,
 ) {
     let half_size = match material {
-        Some(BreakableMaterial::Glass) => 7.0,
-        _ => 3.75,
+        Some(BreakableMaterial::Glass) => 16.0,
+        _ => 8.0,
     };
 
     // Only deduplicate exact point-blank overlap (< 1.5 units) so tight groupings layer naturally
     for (ent, decal) in existing_decals {
         if decal.position.distance_squared(hit_pos) < 2.25 && decal.normal.dot(hit_normal) > 0.85 {
-            commands.entity(ent).despawn();
+            crate::sprite::despawn_decal_entity(commands, Some(&mut vfx.meshes), ent, decal);
         }
     }
 
@@ -2766,8 +2768,7 @@ fn emit_surface_impact_fx(
         Some(BreakableMaterial::Metal | BreakableMaterial::Computer) => {
             let idx = ((time.elapsed_secs() * 100.0) as usize % 3) + 1;
             (
-                // GoldSrc ev_cs16.cpp: func_breakable (classnumber 1) receives {break1..3
-                ImpactDecalKind::BreakableGlass,
+                ImpactDecalKind::BulletShot,
                 format!("debris/metal{idx}.wav"),
                 true,
             )
@@ -2794,16 +2795,16 @@ fn emit_surface_impact_fx(
         ));
     }
 
-    // 1. Check for L-corner edge: if bullet struck near an edge, compute corner wrapping
-    let corner_adj = find_adjacent_corner_decal(hit_pos, hit_normal, half_size, collision);
-
-    // Spawn primary decal strictly at hit_pos (100% crosshair alignment)
+    // Spawn Sutherland-Hodgman BSP-clipped decal(s) (automatically wraps around L-corners cleanly).
+    let decal_faces_ref = vfx.decal_faces.as_deref();
     spawn_surface_decal(
         commands,
         hit_pos,
         hit_normal,
         decal_kind,
         attach_to,
+        model_index,
+        decal_faces_ref,
         sprite_store,
         &audio.search_paths,
         &mut vfx.images,
@@ -2811,13 +2812,16 @@ fn emit_surface_impact_fx(
         &mut vfx.meshes,
     );
 
-    // 2. Project wrapping decal onto adjacent face if near edge
-    if let Some((adj_pos, adj_normal)) = corner_adj {
+    // Fallback corner probe only when LevelDecalSurfaceIndex is absent (e.g. non-BSP arena)
+    if decal_faces_ref.is_none()
+        && let Some((adj_pos, adj_normal)) =
+            find_adjacent_corner_decal(hit_pos, hit_normal, half_size, collision)
+    {
         for (ent, decal) in existing_decals {
             if decal.position.distance_squared(adj_pos) < 2.25
                 && decal.normal.dot(adj_normal) > 0.85
             {
-                commands.entity(ent).despawn();
+                crate::sprite::despawn_decal_entity(commands, Some(&mut vfx.meshes), ent, decal);
             }
         }
         spawn_surface_decal(
@@ -2826,6 +2830,8 @@ fn emit_surface_impact_fx(
             adj_normal,
             decal_kind,
             attach_to,
+            model_index,
+            None,
             sprite_store,
             &audio.search_paths,
             &mut vfx.images,
@@ -3345,6 +3351,11 @@ fn fire_single_bullet_trace(
                         );
                     }
                 } else {
+                    let b_model_idx = breakable
+                        .model
+                        .strip_prefix('*')
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or_else(|| hit_brush.map_or(0, |b| b.model_index));
                     emit_surface_impact_fx(
                         commands,
                         time,
@@ -3352,6 +3363,7 @@ fn fire_single_bullet_trace(
                         impact_norm,
                         Some(mat),
                         attach_to,
+                        b_model_idx,
                         sprite_store,
                         audio,
                         vfx,
@@ -3454,6 +3466,7 @@ fn fire_single_bullet_trace(
             } else {
                 None
             };
+            let hit_model_idx = hit_brush.map_or(0, |b| b.model_index);
             emit_surface_impact_fx(
                 commands,
                 time,
@@ -3461,6 +3474,7 @@ fn fire_single_bullet_trace(
                 hit_wall_normal,
                 hit_mat,
                 attach_to,
+                hit_model_idx,
                 sprite_store,
                 audio,
                 vfx,
@@ -5009,6 +5023,7 @@ mod tests {
                 normal: hit_normal,
                 lifetime: 5.0,
                 max_lifetime: 60.0,
+                custom_mesh: None,
             })
             .id();
 

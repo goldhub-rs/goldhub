@@ -22,6 +22,7 @@ pub struct GoldSrcBspMaterialUniform {
     pub render_amt: f32,
     pub flashlight_active: u32,
     pub flashlight_radius: f32,
+    pub flashlight_intensity: f32,
     pub flashlight_pos: Vec3,
     pub flashlight_dir: Vec3,
     pub water_alpha: f32,
