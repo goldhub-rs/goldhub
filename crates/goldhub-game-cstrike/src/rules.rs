@@ -308,7 +308,7 @@ impl Default for CsGameRules {
             round_timer: 3.0,
             freeze_time: 3.0,
             round_time_limit: 105.0, // 1:45 competitive standard
-            buy_time: 15.0,
+            buy_time: 90.0,
             round_restart_delay: 5.0,
             t_score: 0,
             ct_score: 0,
@@ -332,7 +332,7 @@ impl CsGameRules {
             round_timer: freeze_time,
             freeze_time,
             round_time_limit,
-            buy_time: 15.0,
+            buy_time: 90.0,
             round_restart_delay: 5.0,
             t_score: 0,
             ct_score: 0,

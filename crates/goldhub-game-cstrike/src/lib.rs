@@ -8,12 +8,21 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod economy;
 pub mod hitbox;
 pub mod localization;
 pub mod recoil;
 pub mod rules;
 pub mod weapons;
 
+pub use economy::{
+    BuyItem, BuyMenuCategory, BuyRejectionReason, BuyTeamRequirement, COST_AMMO_PRIMARY,
+    COST_AMMO_SECONDARY, COST_DEFUSAL_KIT, COST_FLASHBANG, COST_HE_GRENADE, COST_HELMET_UPGRADE,
+    COST_KEVLAR, COST_KEVLAR_HELMET, COST_NIGHT_VISION, COST_SMOKE_GRENADE, MAX_MONEY,
+    PENALTY_TEAMKILL, PlayerAccount, REWARD_BOMB_DEFUSER, REWARD_BOMB_PLANTER,
+    REWARD_HOSTAGE_RESCUE_PLAYER, REWARD_HOSTAGE_RESCUE_TEAM, REWARD_HOSTAGE_TOUCH, REWARD_KILL,
+    START_MONEY, validate_purchase, weapon_price, weapon_team_requirement,
+};
 pub use hitbox::{HitboxGroup, calculate_damage};
 pub use localization::builtin_fallback;
 #[cfg(feature = "std")]
@@ -119,8 +128,8 @@ mod tests {
         assert_eq!(rules.state, RoundState::RoundLive);
         assert!(rules.can_player_buy(1));
 
-        // After buy time expires
-        rules.update_round(20.0);
+        // After buy time expires (90s canonical)
+        rules.update_round(95.0);
         assert!(!rules.can_player_buy(1));
     }
 

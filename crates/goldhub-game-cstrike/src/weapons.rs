@@ -257,6 +257,14 @@ impl WeaponId {
         )
     }
 
+    /// Returns `true` if this weapon draws the HUD crosshair on screen.
+    /// In Counter-Strike 1.6 (`ammo.cpp:1736`), only sniper rifles do NOT draw a normal crosshair.
+    /// Knives, grenades, and C4 all draw crosshairs.
+    #[must_use]
+    pub const fn has_crosshair(self) -> bool {
+        !matches!(self, Self::AWP | Self::Scout | Self::G3SG1 | Self::Sg550)
+    }
+
     /// Returns `true` if empty dryfire uses `"weapons/dryfire_rifle.wav"` (primary) vs `"weapons/dryfire_pistol.wav"`.
     #[must_use]
     pub const fn is_rifle_dryfire(self) -> bool {

@@ -13,10 +13,10 @@ pub struct LightmapAtlas {
 }
 
 impl LightmapAtlas {
-    /// Creates an empty lightmap atlas with default black (0, 0, 0, 255) pixels.
+    /// Creates an empty lightmap atlas with default neutral (128, 128, 128, 255) pixels.
     pub fn new(width: u32, height: u32) -> Self {
         let size = (width as usize) * (height as usize) * 4;
-        let mut rgba_bytes = vec![0; size];
+        let mut rgba_bytes = vec![128; size];
         // Set alpha channel to 255 for all texels
         for chunk in rgba_bytes.as_chunks_mut::<4>().0 {
             chunk[3] = 255;

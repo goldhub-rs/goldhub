@@ -27,6 +27,10 @@ pub struct TraceResult {
     pub plane_dist: f32,
     /// Optional hit entity identifier (None for world brush).
     pub hit_entity: Option<u32>,
+    /// True if the hit surface was a skybox plane (`CONTENTS_SKY = -6`).
+    pub is_sky: bool,
+    /// Content of the hit leaf (e.g. `CONTENTS_SOLID = -2`, `CONTENTS_SKY = -6`).
+    pub hit_contents: i16,
 }
 
 impl Default for TraceResult {
@@ -39,6 +43,8 @@ impl Default for TraceResult {
             plane_normal: [0.0, 0.0, 1.0],
             plane_dist: 0.0,
             hit_entity: None,
+            is_sky: false,
+            hit_contents: CONTENTS_EMPTY,
         }
     }
 }
@@ -151,8 +157,12 @@ impl<'a> BspWorldCollision<'a> {
         loop {
             // Leaf node reached
             if node_idx < 0 {
-                if node_idx == i32::from(CONTENTS_SOLID) {
+                if node_idx == i32::from(CONTENTS_SOLID) || node_idx == i32::from(CONTENTS_SKY) {
                     trace.startsolid = true;
+                    if node_idx == i32::from(CONTENTS_SKY) {
+                        trace.is_sky = true;
+                    }
+                    trace.hit_contents = node_idx as i16;
                 } else {
                     trace.allsolid = false;
                 }
@@ -220,10 +230,10 @@ impl<'a> BspWorldCollision<'a> {
             }
 
             let other_side = side ^ 1;
-            // If the other side is not solid, continue tracing past the plane
-            if self.hull_point_contents(hull, i32::from(node.children[other_side]), mid)
-                != CONTENTS_SOLID
-            {
+            let other_contents =
+                self.hull_point_contents(hull, i32::from(node.children[other_side]), mid);
+            // If the other side is not solid and not sky, continue tracing past the plane
+            if other_contents != CONTENTS_SOLID && other_contents != CONTENTS_SKY {
                 return self.recursive_hull_check(
                     hull,
                     root_node,
@@ -241,7 +251,14 @@ impl<'a> BspWorldCollision<'a> {
                 return false;
             }
 
-            // The other side is solid: this is the canonical collision impact point!
+            // The other side is solid or sky: this is the canonical collision impact point!
+            if other_contents == CONTENTS_SKY {
+                trace.is_sky = true;
+                trace.hit_contents = CONTENTS_SKY;
+            } else {
+                trace.hit_contents = CONTENTS_SOLID;
+            }
+
             if side == 0 {
                 trace.plane_normal = plane.normal;
                 trace.plane_dist = plane.distance;
@@ -250,9 +267,12 @@ impl<'a> BspWorldCollision<'a> {
                 trace.plane_dist = -plane.distance;
             }
 
-            // Step back if mid is still solid inside the root hull
+            // Step back if mid is still solid or sky inside the root hull
             let mut back_frac = frac;
-            while self.hull_point_contents(hull, root_node, mid) == CONTENTS_SOLID {
+            while matches!(
+                self.hull_point_contents(hull, root_node, mid),
+                CONTENTS_SOLID | CONTENTS_SKY
+            ) {
                 back_frac -= 0.1;
                 if back_frac.is_nan() || back_frac < 0.0 {
                     trace.fraction = midf;
@@ -346,6 +366,7 @@ impl WorldTrace for BspWorldCollision<'_> {
             plane_normal: [0.0, 0.0, 1.0],
             plane_dist: 0.0,
             hit_entity: None,
+            ..TraceResult::default()
         };
 
         let world_hull = self
@@ -449,6 +470,7 @@ impl WorldTrace for BspWorldCollision<'_> {
                 plane_normal: [0.0, 0.0, 1.0],
                 plane_dist: 0.0,
                 hit_entity: Some(ent.entity_id),
+                ..TraceResult::default()
             };
 
             if root_node < 0 {
@@ -601,6 +623,7 @@ impl WorldTrace for BspWorldCollision<'_> {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: Some(ent.entity_id),
+                    ..TraceResult::default()
                 };
 
                 let point_hull = self
@@ -974,6 +997,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             }
             fn test_player_position(&self, _p: [f32; 3], _h: u32) -> Option<u32> {

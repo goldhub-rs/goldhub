@@ -14,7 +14,7 @@ use goldhub_game_cstrike::{
 };
 
 use crate::audio::{GameSearchPaths, GoldSrcAudioBank};
-use crate::combat::weapon::{ActiveWeaponState, HudFastSwitch, PlantedC4};
+use crate::combat::weapon::{ActiveWeaponState, HudFastSwitch, PlantedC4, PlayerWeaponInventory};
 use crate::entity::{BombMapParams, RoundResetEvent, ScenarioMapData};
 use crate::player::PlayerController;
 use crate::sprite::resolve_file_path;
@@ -272,7 +272,10 @@ pub struct HudTalkLine(pub usize);
 pub struct HudNotifySlotText(pub usize);
 
 #[derive(Component)]
-pub struct HudNotifySlotBitmap(pub usize);
+pub struct HudNotifySlotBitmap {
+    pub slot: usize,
+    pub last_text: Option<String>,
+}
 
 #[derive(Component)]
 pub struct HudDeveloperText;
@@ -286,7 +289,14 @@ pub struct HudConsoleBodyText;
 #[derive(Component)]
 pub struct HudConsoleInputText;
 
+#[derive(Component)]
+pub struct HudBuyMenuRoot;
+
+#[derive(Component)]
+pub struct HudBuyMenuText;
+
 /// Spawns `HUD_PRINTTALK`, `HUD_PRINTNOTIFY`, `developer 1`, and `~` `HUD_PRINTCONSOLE` overlay nodes.
+#[allow(clippy::too_many_lines)]
 pub fn spawn_text_channel_nodes(commands: &mut Commands, font: Handle<Font>) {
     // 1. `HUD_PRINTTALK` bottom-left chat feed above Health bar
     commands
@@ -334,11 +344,14 @@ pub fn spawn_text_channel_nodes(commands: &mut Commands, font: Handle<Font>) {
                         font_size: 13.0,
                         ..default()
                     },
-                    TextColor(Color::srgba(1.0, 0.70, 0.15, 0.92)),
+                    TextColor(Color::srgba(1.0, 0.72, 0.0, 0.95)),
                     Visibility::Hidden,
                 ));
                 notify.spawn((
-                    HudNotifySlotBitmap(idx),
+                    HudNotifySlotBitmap {
+                        slot: idx,
+                        last_text: None,
+                    },
                     ImageNode::default(),
                     Node {
                         height: Val::Px(16.0),
@@ -371,7 +384,40 @@ pub fn spawn_text_channel_nodes(commands: &mut Commands, font: Handle<Font>) {
     ));
 
     // 4. `~` Half-screen `HUD_PRINTCONSOLE` drawer
-    spawn_console_drawer(commands, font);
+    spawn_console_drawer(commands, font.clone());
+
+    // 5. Authentic CS 1.6 VGUI/Text Buy Menu
+    commands
+        .spawn((
+            HudBuyMenuRoot,
+            BackgroundColor(Color::srgba(0.04, 0.05, 0.06, 0.88)),
+            BorderColor(Color::srgba(1.0, 0.65, 0.15, 0.40)),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(20.0),
+                left: Val::Px(24.0),
+                min_width: Val::Px(260.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(14.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            GlobalZIndex(85),
+            Visibility::Hidden,
+        ))
+        .with_children(|menu| {
+            menu.spawn((
+                HudBuyMenuText,
+                Text::new(""),
+                TextFont {
+                    font,
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(1.0, 0.70, 0.18, 0.96)),
+            ));
+        });
 }
 
 fn spawn_console_drawer(commands: &mut Commands, font: Handle<Font>) {
@@ -418,7 +464,11 @@ fn spawn_console_drawer(commands: &mut Commands, font: Handle<Font>) {
 }
 
 /// Dispatches `HudPrintEvent` messages into localized Center, Talk, Notify (`QFONT`), and Console feeds.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
 pub fn process_hud_print_events_system(
     time: Res<Time>,
     mut events: EventReader<HudPrintEvent>,
@@ -435,7 +485,7 @@ pub fn process_hud_print_events_system(
     >,
     mut notify_bmp_q: Query<
         (
-            &HudNotifySlotBitmap,
+            &mut HudNotifySlotBitmap,
             &mut ImageNode,
             &mut Node,
             &mut Visibility,
@@ -503,10 +553,33 @@ pub fn process_hud_print_events_system(
         }
     }
 
-    for (slot, mut img_node, mut ui_node, mut vis) in &mut notify_bmp_q {
-        if let Some((msg, _)) = feed.notify.get(slot.0)
-            && let Some((rgba, w, h)) = font_res.render_qfont_ascii_rgba(msg, [255, 180, 45])
-        {
+    for (mut slot, mut img_node, mut ui_node, mut vis) in &mut notify_bmp_q {
+        let current_msg = feed.notify.get(slot.slot).map(|(msg, _)| msg.as_str());
+        if current_msg.is_none() || !current_msg.is_some_and(str::is_ascii) {
+            if slot.last_text.is_some() {
+                if img_node.image != Handle::default() {
+                    images.remove(&img_node.image);
+                    img_node.image = Handle::default();
+                }
+                slot.last_text = None;
+            }
+            ui_node.display = Display::None;
+            *vis = Visibility::Hidden;
+            continue;
+        }
+
+        let msg = current_msg.unwrap();
+        if slot.last_text.as_deref() == Some(msg) {
+            ui_node.display = Display::Flex;
+            *vis = Visibility::Inherited;
+            continue;
+        }
+
+        if img_node.image != Handle::default() {
+            images.remove(&img_node.image);
+        }
+
+        if let Some((rgba, w, h)) = font_res.render_qfont_ascii_rgba(msg, [255, 180, 45]) {
             let img = Image::new(
                 Extent3d {
                     width: w,
@@ -523,9 +596,12 @@ pub fn process_hud_print_events_system(
             ui_node.width = Val::Px(w as f32);
             ui_node.height = Val::Px(h as f32);
             *vis = Visibility::Inherited;
+            slot.last_text = Some(msg.to_string());
         } else {
+            img_node.image = Handle::default();
             ui_node.display = Display::None;
             *vis = Visibility::Hidden;
+            slot.last_text = None;
         }
     }
 }
@@ -540,7 +616,11 @@ fn push_console_line(console: &mut ConsoleOverlayState, line: &str) {
 }
 
 /// Handles `~` (`Backquote`) console toggle & commands, plus `F8` `developer 1` HUD telemetry.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
 pub fn update_console_and_dev_hud_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut dev_mode: ResMut<DeveloperMode>,
@@ -549,7 +629,12 @@ pub fn update_console_and_dev_hud_system(
     mut reset_events: EventWriter<RoundResetEvent>,
     mut print_events: EventWriter<HudPrintEvent>,
     mut rules_state: ResMut<CsGameRulesState>,
-    player_query: Query<(&PlayerController, Option<&ActiveWeaponState>)>,
+    mut player_query: Query<(
+        &mut PlayerController,
+        Option<&mut PlayerWeaponInventory>,
+        Option<&ActiveWeaponState>,
+    )>,
+    loc: Res<CsLocalizationResource>,
     mut root_q: Query<&mut Visibility, (With<HudConsoleRoot>, Without<HudDeveloperText>)>,
     mut dev_q: Query<(&mut Text, &mut Visibility), With<HudDeveloperText>>,
     mut body_q: Query<
@@ -593,6 +678,9 @@ pub fn update_console_and_dev_hud_system(
                     console.input.clear();
                     if !cmd.is_empty() {
                         push_console_line(&mut console, &format!("] {cmd}"));
+                        let player_opt = player_query.get_single_mut().ok().map(|(p, inv, _)| {
+                            (p.into_inner(), inv.map(bevy::prelude::Mut::into_inner))
+                        });
                         execute_console_command(
                             &cmd,
                             &mut dev_mode,
@@ -600,6 +688,8 @@ pub fn update_console_and_dev_hud_system(
                             fast_switch.as_deref_mut(),
                             &mut rules_state,
                             &mut reset_events,
+                            player_opt,
+                            &loc,
                         );
                     }
                 }
@@ -639,7 +729,7 @@ pub fn update_console_and_dev_hud_system(
 
     for (mut txt, mut vis) in &mut dev_q {
         if dev_mode.0 {
-            if let Ok((player, weapon)) = player_query.get_single() {
+            if let Ok((player, _, weapon)) = player_query.get_single() {
                 let ori = player.sim.current.origin;
                 let w_name = weapon.map_or("Knife", |w| crate::combat::get_weapon_def(w.id).name);
                 **txt = format!(
@@ -669,28 +759,45 @@ const fn console_key_char(key: KeyCode) -> Option<char> {
         KeyCode::Minus => '_',
         KeyCode::Digit0 => '0',
         KeyCode::Digit1 => '1',
+        KeyCode::Digit2 => '2',
+        KeyCode::Digit3 => '3',
+        KeyCode::Digit4 => '4',
+        KeyCode::Digit5 => '5',
+        KeyCode::Digit6 => '6',
+        KeyCode::Digit7 => '7',
+        KeyCode::Digit8 => '8',
+        KeyCode::Digit9 => '9',
         KeyCode::KeyA => 'a',
+        KeyCode::KeyB => 'b',
         KeyCode::KeyC => 'c',
         KeyCode::KeyD => 'd',
         KeyCode::KeyE => 'e',
         KeyCode::KeyF => 'f',
+        KeyCode::KeyG => 'g',
         KeyCode::KeyH => 'h',
         KeyCode::KeyI => 'i',
+        KeyCode::KeyJ => 'j',
+        KeyCode::KeyK => 'k',
         KeyCode::KeyL => 'l',
         KeyCode::KeyM => 'm',
         KeyCode::KeyN => 'n',
         KeyCode::KeyO => 'o',
         KeyCode::KeyP => 'p',
+        KeyCode::KeyQ => 'q',
         KeyCode::KeyR => 'r',
         KeyCode::KeyS => 's',
         KeyCode::KeyT => 't',
         KeyCode::KeyU => 'u',
         KeyCode::KeyV => 'v',
         KeyCode::KeyW => 'w',
+        KeyCode::KeyX => 'x',
+        KeyCode::KeyY => 'y',
+        KeyCode::KeyZ => 'z',
         _ => return None,
     })
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn execute_console_command(
     cmd: &str,
     dev_mode: &mut DeveloperMode,
@@ -698,6 +805,8 @@ fn execute_console_command(
     fast_switch: Option<&mut HudFastSwitch>,
     rules_state: &mut CsGameRulesState,
     reset_events: &mut EventWriter<RoundResetEvent>,
+    mut player_opt: Option<(&mut PlayerController, Option<&mut PlayerWeaponInventory>)>,
+    loc: &CsLocalizationResource,
 ) {
     let mut parts = cmd.split_whitespace();
     let Some(head) = parts.next() else {
@@ -748,6 +857,116 @@ fn execute_console_command(
                     rules_state.rules.round_timer
                 ),
             );
+        }
+        "money" => {
+            if let Some(amt_str) = arg {
+                if let Ok(amt) = amt_str.parse::<i32>()
+                    && let Some((ref mut p, _)) = player_opt
+                {
+                    p.money = amt.clamp(0, 16000);
+                    push_console_line(console, &format!("Player money set to ${}", p.money));
+                }
+            } else if let Some((ref p, _)) = player_opt {
+                push_console_line(console, &format!("Current balance: ${}", p.money));
+            }
+        }
+        "buy" => {
+            if let Some(target) = arg {
+                if let Some(item) = crate::combat::parse_buy_alias(target) {
+                    if let Some((ref mut p, ref mut inv)) = player_opt {
+                        match crate::combat::execute_buy_transaction(
+                            p,
+                            inv.as_deref_mut(),
+                            &rules_state.rules,
+                            item,
+                        ) {
+                            Ok((cost, _)) => push_console_line(
+                                console,
+                                &format!("Bought {} for ${cost} (balance: ${})", target, p.money),
+                            ),
+                            Err(loc_key) => {
+                                let buy_sec = rules_state.rules.buy_time.round() as u32;
+                                let msg = loc.tr(loc_key).replace("%s1", &buy_sec.to_string());
+                                push_console_line(console, &msg);
+                            }
+                        }
+                    } else {
+                        push_console_line(console, "No active player found for transaction");
+                    }
+                } else {
+                    push_console_line(console, &format!("Unknown buy alias: '{target}'"));
+                }
+            } else {
+                push_console_line(
+                    console,
+                    "Usage: buy <item> (e.g. ak47, m4a1, awp, deagle, vest, vesthelm, defuser)",
+                );
+            }
+        }
+        "buyammo1" | "primammo" => {
+            if let Some((ref mut p, ref mut inv)) = player_opt {
+                match crate::combat::execute_buy_transaction(
+                    p,
+                    inv.as_deref_mut(),
+                    &rules_state.rules,
+                    goldhub_game_cstrike::BuyItem::PrimaryAmmo,
+                ) {
+                    Ok((cost, _)) => push_console_line(
+                        console,
+                        &format!("Bought primary ammunition for ${cost}"),
+                    ),
+                    Err(loc_key) => {
+                        let buy_sec = rules_state.rules.buy_time.round() as u32;
+                        let msg = loc.tr(loc_key).replace("%s1", &buy_sec.to_string());
+                        push_console_line(console, &msg);
+                    }
+                }
+            }
+        }
+        "buyammo2" | "secammo" => {
+            if let Some((ref mut p, ref mut inv)) = player_opt {
+                match crate::combat::execute_buy_transaction(
+                    p,
+                    inv.as_deref_mut(),
+                    &rules_state.rules,
+                    goldhub_game_cstrike::BuyItem::SecondaryAmmo,
+                ) {
+                    Ok((cost, _)) => push_console_line(
+                        console,
+                        &format!("Bought secondary ammunition for ${cost}"),
+                    ),
+                    Err(loc_key) => {
+                        let buy_sec = rules_state.rules.buy_time.round() as u32;
+                        let msg = loc.tr(loc_key).replace("%s1", &buy_sec.to_string());
+                        push_console_line(console, &msg);
+                    }
+                }
+            }
+        }
+        "autobuy" => {
+            if let Some((ref mut p, ref mut inv)) = player_opt {
+                let team = p.team;
+                let weapons_to_try: &[&str] = match team {
+                    goldhub_game_cstrike::CsTeam::CounterTerrorist => &[
+                        "m4a1", "famas", "mp5", "vesthelm", "defuser", "primammo", "secammo",
+                    ],
+                    _ => &["ak47", "galil", "mp5", "vesthelm", "primammo", "secammo"],
+                };
+                for alias in weapons_to_try {
+                    if let Some(item) = crate::combat::parse_buy_alias(alias) {
+                        let _ = crate::combat::execute_buy_transaction(
+                            p,
+                            inv.as_deref_mut(),
+                            &rules_state.rules,
+                            item,
+                        );
+                    }
+                }
+                push_console_line(
+                    console,
+                    &format!("Autobuy completed. Balance: ${}", p.money),
+                );
+            }
         }
         _ => push_console_line(console, &format!("Unknown command: {head}")),
     }
@@ -876,6 +1095,243 @@ pub fn update_cs_game_rules_system(
             rules_state.rules.round_timer = rules_state.rules.round_time_limit;
         }
         reset_events.send(RoundResetEvent);
+    }
+}
+
+/// Interactive CS 1.6 VGUI/Text Buy Menu controller system.
+/// Handles `KeyB` toggle, `Escape` back/close, and numeric digits `0..9` to navigate categories and buy items.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
+pub fn update_buy_menu_system(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut buy_menu: ResMut<crate::combat::BuyMenuState>,
+    rules_state: Res<CsGameRulesState>,
+    mut player_query: Query<(&mut PlayerController, Option<&mut PlayerWeaponInventory>)>,
+    console: Res<ConsoleOverlayState>,
+    search_paths: Option<Res<GameSearchPaths>>,
+    mut audio_bank: Option<ResMut<GoldSrcAudioBank>>,
+    mut audio_sources: Option<ResMut<Assets<AudioSource>>>,
+    mut root_q: Query<&mut Visibility, (With<HudBuyMenuRoot>, Without<HudBuyMenuText>)>,
+    mut text_q: Query<&mut Text, (With<HudBuyMenuText>, Without<HudBuyMenuRoot>)>,
+    mut print_events: EventWriter<HudPrintEvent>,
+    mut pickup_events: EventWriter<super::ItemPickupEvent>,
+    loc: Res<CsLocalizationResource>,
+) {
+    if console.open {
+        if buy_menu.is_open() {
+            buy_menu.close();
+        }
+        for mut vis in &mut root_q {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    }
+
+    let Ok((mut player, mut inv_opt)) = player_query.get_single_mut() else {
+        return;
+    };
+
+    let mut play_sound = |snd_path: &str| {
+        if let (Some(paths), Some(ref mut bank), Some(ref mut sources)) = (
+            search_paths.as_ref(),
+            audio_bank.as_mut(),
+            audio_sources.as_mut(),
+        ) && let Some(h) = bank.get_or_load_sound(snd_path, &paths.dirs, sources)
+        {
+            commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+        }
+    };
+
+    // Toggle with KeyB
+    if keyboard.just_pressed(KeyCode::KeyB) {
+        if buy_menu.is_open() {
+            buy_menu.close();
+            play_sound("common/wpn_hudoff.wav");
+        } else {
+            let can_buy = rules_state
+                .rules
+                .can_team_buy(player.team, player.in_buy_zone);
+            if !player.in_buy_zone {
+                play_sound("common/wpn_denyselect.wav");
+                print_events.send(HudPrintEvent {
+                    channel: HudPrintChannel::Notify,
+                    text: loc.tr("#Cannot_Buy_This").to_string(),
+                    duration: 3.0,
+                });
+            } else if !can_buy {
+                play_sound("common/wpn_denyselect.wav");
+                let buy_sec = rules_state.rules.buy_time.round() as u32;
+                let msg = loc.tr("#Cant_buy").replace("%s1", &buy_sec.to_string());
+                print_events.send(HudPrintEvent {
+                    channel: HudPrintChannel::Notify,
+                    text: msg,
+                    duration: 3.0,
+                });
+            } else {
+                buy_menu.category = crate::combat::BuyMenuCategory::Main;
+                play_sound("common/wpn_hudon.wav");
+            }
+        }
+    }
+
+    if buy_menu.is_open() {
+        if keyboard.just_pressed(KeyCode::Escape) {
+            buy_menu.close();
+            play_sound("common/wpn_hudoff.wav");
+        } else {
+            let pressed_digit = if keyboard.just_pressed(KeyCode::Digit0)
+                || keyboard.just_pressed(KeyCode::Numpad0)
+            {
+                Some(0)
+            } else if keyboard.just_pressed(KeyCode::Digit1)
+                || keyboard.just_pressed(KeyCode::Numpad1)
+            {
+                Some(1)
+            } else if keyboard.just_pressed(KeyCode::Digit2)
+                || keyboard.just_pressed(KeyCode::Numpad2)
+            {
+                Some(2)
+            } else if keyboard.just_pressed(KeyCode::Digit3)
+                || keyboard.just_pressed(KeyCode::Numpad3)
+            {
+                Some(3)
+            } else if keyboard.just_pressed(KeyCode::Digit4)
+                || keyboard.just_pressed(KeyCode::Numpad4)
+            {
+                Some(4)
+            } else if keyboard.just_pressed(KeyCode::Digit5)
+                || keyboard.just_pressed(KeyCode::Numpad5)
+            {
+                Some(5)
+            } else if keyboard.just_pressed(KeyCode::Digit6)
+                || keyboard.just_pressed(KeyCode::Numpad6)
+            {
+                Some(6)
+            } else if keyboard.just_pressed(KeyCode::Digit7)
+                || keyboard.just_pressed(KeyCode::Numpad7)
+            {
+                Some(7)
+            } else if keyboard.just_pressed(KeyCode::Digit8)
+                || keyboard.just_pressed(KeyCode::Numpad8)
+            {
+                Some(8)
+            } else if keyboard.just_pressed(KeyCode::Digit9)
+                || keyboard.just_pressed(KeyCode::Numpad9)
+            {
+                Some(9)
+            } else {
+                None
+            };
+
+            if let Some(digit) = pressed_digit {
+                let action = buy_menu.handle_key(digit, player.team);
+                match action {
+                    crate::combat::BuyMenuInputResult::Close => {
+                        play_sound("common/wpn_hudoff.wav");
+                    }
+                    crate::combat::BuyMenuInputResult::Navigated => {
+                        play_sound("common/wpn_hudon.wav");
+                    }
+                    crate::combat::BuyMenuInputResult::Purchase(item) => {
+                        match crate::combat::execute_buy_transaction(
+                            &mut player,
+                            inv_opt.as_deref_mut(),
+                            &rules_state.rules,
+                            item,
+                        ) {
+                            Ok((cost, _)) => {
+                                let snd = match item {
+                                    goldhub_game_cstrike::BuyItem::PrimaryAmmo
+                                    | goldhub_game_cstrike::BuyItem::SecondaryAmmo => {
+                                        "items/ammopickup1.wav"
+                                    }
+                                    goldhub_game_cstrike::BuyItem::Kevlar
+                                    | goldhub_game_cstrike::BuyItem::KevlarHelmet => {
+                                        "items/kevlar.wav"
+                                    }
+                                    _ => "items/gunpickup2.wav",
+                                };
+                                play_sound(snd);
+                                let (wid, cal, is_def) = match item {
+                                    goldhub_game_cstrike::BuyItem::Weapon(w) => {
+                                        (Some(w), None, false)
+                                    }
+                                    goldhub_game_cstrike::BuyItem::Flashbang => {
+                                        (Some(crate::combat::WeaponId::Flashbang), None, false)
+                                    }
+                                    goldhub_game_cstrike::BuyItem::HeGrenade => {
+                                        (Some(crate::combat::WeaponId::HeGrenade), None, false)
+                                    }
+                                    goldhub_game_cstrike::BuyItem::SmokeGrenade => {
+                                        (Some(crate::combat::WeaponId::SmokeGrenade), None, false)
+                                    }
+                                    goldhub_game_cstrike::BuyItem::DefusalKit => (None, None, true),
+                                    _ => (None, None, false),
+                                };
+                                if wid.is_some() || is_def {
+                                    pickup_events.send(super::ItemPickupEvent {
+                                        weapon_id: wid,
+                                        ammo_caliber: cal,
+                                        is_defuser: is_def,
+                                    });
+                                }
+                                print_events.send(HudPrintEvent {
+                                    channel: HudPrintChannel::Notify,
+                                    text: format!("Bought for ${cost}"),
+                                    duration: 2.0,
+                                });
+                                match item {
+                                    goldhub_game_cstrike::BuyItem::PrimaryAmmo
+                                    | goldhub_game_cstrike::BuyItem::SecondaryAmmo => {}
+                                    _ => {
+                                        buy_menu.close();
+                                    }
+                                }
+                            }
+                            Err(loc_key) => {
+                                play_sound("common/wpn_denyselect.wav");
+                                let buy_sec = rules_state.rules.buy_time.round() as u32;
+                                let msg = loc.tr(loc_key).replace("%s1", &buy_sec.to_string());
+                                print_events.send(HudPrintEvent {
+                                    channel: HudPrintChannel::Notify,
+                                    text: msg,
+                                    duration: 3.0,
+                                });
+                            }
+                        }
+                    }
+                    crate::combat::BuyMenuInputResult::None => {}
+                }
+            }
+        }
+    }
+
+    // Sync menu UI visibility and text
+    let is_open = buy_menu.is_open();
+    for mut vis in &mut root_q {
+        let target = if is_open {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != target {
+            *vis = target;
+        }
+    }
+
+    for mut txt in &mut text_q {
+        if is_open {
+            let rendered = buy_menu.render_text(player.team, player.money);
+            if rendered != **txt {
+                **txt = rendered;
+            }
+        } else if !txt.is_empty() {
+            txt.clear();
+        }
     }
 }
 
