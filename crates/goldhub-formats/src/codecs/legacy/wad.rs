@@ -178,7 +178,7 @@ impl<'a> WadArchive<'a> {
         for &idx in pixel_indices {
             if is_gradient_decal {
                 // Classic GoldSrc gradient decal:
-                // idx is alpha value (0 = transparent background), RGB is last palette entry
+                // idx is the direct alpha value (0 = transparent background), RGB is last palette entry.
                 let a = idx;
                 rgba.extend_from_slice(&[decal_r, decal_g, decal_b, a]);
             } else {

@@ -53,6 +53,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: floor_z,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             } else {
                 TraceResult {
@@ -63,6 +64,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             }
         }
@@ -250,6 +252,7 @@ mod tests {
                         plane_normal: [-1.0, 0.0, 0.0],
                         plane_dist: -50.0,
                         hit_entity: None,
+                        ..TraceResult::default()
                     };
                 }
                 let floor_z = if end[0] >= 50.0 { 12.0 } else { 0.0 };
@@ -271,6 +274,7 @@ mod tests {
                         plane_normal: [0.0, 0.0, 1.0],
                         plane_dist: floor_z,
                         hit_entity: None,
+                        ..TraceResult::default()
                     };
                 }
                 TraceResult {
@@ -281,6 +285,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             }
 
@@ -386,6 +391,7 @@ mod tests {
                         plane_normal: [0.0, 0.0, -1.0],
                         plane_dist: 40.0,
                         hit_entity: None,
+                        ..TraceResult::default()
                     };
                 }
                 TraceResult {
@@ -396,6 +402,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             }
 
@@ -447,6 +454,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             }
 
@@ -551,6 +559,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             }
 
@@ -689,6 +698,7 @@ mod tests {
                     plane_normal: [0.0, 0.0, 1.0],
                     plane_dist: 0.0,
                     hit_entity: None,
+                    ..TraceResult::default()
                 }
             }
 

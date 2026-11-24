@@ -30,15 +30,18 @@ pub struct VideoSettings {
     pub contrast: f32,
     /// Digital Vibrance / Saturation (default: 1.15, range: 0.0..3.0).
     pub vibrance: f32,
+    /// Water transparency `r_wateralpha` (default: 0.65 clear, 1.0 opaque muddy).
+    pub water_alpha: f32,
 }
 
 impl Default for VideoSettings {
     fn default() -> Self {
         Self {
-            gamma: 2.5,
+            gamma: 1.0,
             brightness: 1.0,
             contrast: 1.0,
-            vibrance: 1.15,
+            vibrance: 1.0,
+            water_alpha: 0.65,
         }
     }
 }
@@ -47,8 +50,8 @@ impl VideoSettings {
     /// Formats the active video settings into a concise window title string.
     pub fn format_title(&self) -> String {
         format!(
-            "GoldHub | Gamma: {:.2} ([/]) | Bright: {:.2} (-/=) | Contrast: {:.2} (;/') | Vibrance: {:.2} (,/.) | [Bksp: Reset]",
-            self.gamma, self.brightness, self.contrast, self.vibrance
+            "GoldHub | Gamma: {:.2} ([/]) | Bright: {:.2} (-/=) | Contrast: {:.2} (;/') | Water: {:.2} (\\) | [Bksp: Reset]",
+            self.gamma, self.brightness, self.contrast, self.water_alpha
         )
     }
 
@@ -126,6 +129,16 @@ fn handle_video_settings_input(
             settings.vibrance = (settings.vibrance + 0.1).clamp(0.0, 3.0);
             changed = true;
         }
+
+        // Water transparency toggle (r_wateralpha clear 0.65 <-> opaque 1.0): Backslash
+        if keyboard.just_pressed(KeyCode::Backslash) {
+            settings.water_alpha = if settings.water_alpha > 0.85 {
+                0.65
+            } else {
+                1.0
+            };
+            changed = true;
+        }
     }
 
     if changed {
@@ -161,16 +174,16 @@ mod tests {
     #[test]
     fn test_video_settings_defaults_and_clamping() {
         let settings = VideoSettings::default();
-        assert_eq!(settings.gamma, 2.5);
+        assert_eq!(settings.gamma, 1.0);
         assert_eq!(settings.brightness, 1.0);
         assert_eq!(settings.contrast, 1.0);
-        assert_eq!(settings.vibrance, 1.15);
+        assert_eq!(settings.vibrance, 1.0);
 
         let mut grading = ColorGrading::default();
         settings.apply_to_color_grading(&mut grading);
 
-        assert_eq!(grading.shadows.gamma, 2.5);
+        assert_eq!(grading.shadows.gamma, 1.0);
         assert_eq!(grading.global.exposure, 0.0);
-        assert_eq!(grading.global.post_saturation, 1.15);
+        assert_eq!(grading.global.post_saturation, 1.0);
     }
 }

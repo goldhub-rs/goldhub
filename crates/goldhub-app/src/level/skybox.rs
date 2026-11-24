@@ -179,7 +179,7 @@ pub fn spawn_skybox(
             base_color_texture: img_handle,
             unlit: true,
             cull_mode: None,
-            depth_bias: -10000.0,
+            depth_bias: 0.0,
             ..default()
         };
         let mat_handle = materials.add(mat);
