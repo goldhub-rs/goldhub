@@ -320,14 +320,14 @@ pub fn spawn_studio_entity(
         ))
         .id();
 
-    // Spawn child entities for each submesh via shared helper
+    // Spawn child entities for each submesh via shared helper (Layer 2 receives model lights)
     anim_component.mesh_entities = spawn_model_submesh_children(
         commands,
         parent_entity,
         &model_data,
         initial_seq,
         false,
-        None,
+        Some(2),
         meshes,
     );
     commands.entity(parent_entity).insert(anim_component);
@@ -393,7 +393,7 @@ pub fn hostage_interaction_and_ai_system(
         return;
     }
 
-    let Ok((player_ent, player_t, _)) = player_query.get_single() else {
+    let Ok((player_ent, player_t, player_ctrl)) = player_query.get_single() else {
         return;
     };
     let player_pos = player_t.translation;
@@ -405,14 +405,27 @@ pub fn hostage_interaction_and_ai_system(
             continue;
         }
 
+        // Leader death check: If leader died, hostage stops following
+        if hostage.state == HostageState::Follow
+            && hostage.leader == Some(player_ent)
+            && player_ctrl.health <= 0.0
+        {
+            hostage.state = HostageState::Stand;
+            hostage.leader = None;
+            hostage.velocity = Vec3::ZERO;
+        }
+
         let h_pos = h_t.translation;
         // Target hostage chest (~36u above feet) so looking straight ahead interacts cleanly even close up
         let h_chest = h_pos + Vec3::Y * 36.0;
         let chest_delta = h_chest - player_pos;
         let dist = chest_delta.length();
 
-        // 1. +use (E key) toggle between Stand and Follow
-        if use_pressed && dist <= 96.0 {
+        // 1. +use (E key) toggle between Stand and Follow (CS 1.6: Only CT can command hostages)
+        if use_pressed
+            && dist <= 96.0
+            && player_ctrl.team == goldhub_game_cstrike::CsTeam::CounterTerrorist
+        {
             let dir_to_hostage = chest_delta.normalize_or_zero();
             let dot = player_fwd.dot(dir_to_hostage);
             if dot >= 0.45 && hostage.next_use_time <= time.elapsed_secs() {

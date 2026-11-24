@@ -7,9 +7,13 @@
 //! - Reload cycle with animation timing.
 //! - Hitscan bullet ballistics with material penetration and damage dispatch.
 
+pub mod buy;
 pub mod recoil;
 pub mod weapon;
 
+pub use buy::{
+    BuyMenuCategory, BuyMenuInputResult, BuyMenuState, execute_buy_transaction, parse_buy_alias,
+};
 pub use recoil::{PlayerRecoil, decay_punchangle_system};
 pub use weapon::{
     ActiveWeaponState, CombatPlugin, PlayerWeaponInventory, WeaponDef, WeaponId, get_weapon_def,

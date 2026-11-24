@@ -25,7 +25,7 @@ pub use audio::{
     GameSearchPaths, GoldSrcAudioBank, GoldSrcAudioPlugin, GroundFace, LevelGroundMaterialIndex,
 };
 pub use camera::{SpectatorCamera, SpectatorCameraPlugin};
-pub use level::LevelPlugin;
+pub use level::{CurrentMapInfo, LevelPlugin};
 pub use mesh_bridge::{PartitionedMesh, to_bevy_mesh, to_bevy_submeshes};
 pub use player::{CameraControlMode, LevelCollisionResource, PlayerController, PlayerPlugin};
 pub use sprite::{SpritePlugin, SpriteStore};
@@ -38,10 +38,17 @@ pub use window::WindowControlPlugin;
 
 use bevy::prelude::*;
 use bevy::window::{WindowMode, WindowResolution};
+use bevy::winit::{UpdateMode, WinitSettings};
 
 /// Assembles the complete GoldHub Bevy application.
 pub fn build_goldhub_app() -> App {
     let mut app = App::new();
+
+    // Power-saving and CPU throttling: continuous in focus, low-power reactive when unfocused
+    app.insert_resource(WinitSettings {
+        focused_mode: UpdateMode::Continuous,
+        unfocused_mode: UpdateMode::reactive_low_power(std::time::Duration::from_millis(100)),
+    });
 
     app.add_plugins(
         DefaultPlugins

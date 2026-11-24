@@ -8,10 +8,11 @@ use crate::entity::{
 };
 use crate::player::{CameraPerspective, LevelCollisionResource, PlayerController};
 use crate::sprite::{
-    ImpactDecalKind, SpriteStore, spawn_black_smoke_puff, spawn_blood_sprite,
-    spawn_c4_explosion_sprites, spawn_delayed_smoke, spawn_explosion_sprite, spawn_ledglow_sprite,
-    spawn_muzzleflash_at, spawn_muzzleflash_attached, spawn_scorch_decal, spawn_smoke_cloud,
-    spawn_spark_shower, spawn_surface_decal, spawn_wall_sparks,
+    BulletHoleDecal, ImpactDecalKind, SpriteStore, spawn_black_smoke_puff, spawn_blood_sprite,
+    spawn_c4_explosion_sprites, spawn_delayed_smoke, spawn_explosion_sprite,
+    spawn_flicker_particles, spawn_ledglow_sprite, spawn_muzzleflash_at,
+    spawn_muzzleflash_attached, spawn_scorch_decal, spawn_smoke_cloud, spawn_spark_shower,
+    spawn_surface_decal, spawn_wall_sparks,
 };
 use crate::studio::animation::StudioAnimatedModel;
 use crate::studio::store::{StudioModelStore, spawn_model_submesh_children};
@@ -213,9 +214,10 @@ pub struct PlayerWeaponInventory {
     pub bucket_cursor: [usize; 5],
     pub active_slot: u8,
     pub previous_slot: u8,
+    pub pending_switch: Option<(u8, usize)>,
 }
 
-fn make_slot_data(id: WeaponId) -> WeaponSlotData {
+pub(crate) fn make_slot_data(id: WeaponId) -> WeaponSlotData {
     let d = get_weapon_def(id);
     WeaponSlotData {
         id: Some(id),
@@ -257,6 +259,7 @@ impl Default for PlayerWeaponInventory {
             bucket_cursor: [0, 0, 0, 0, 0],
             active_slot: 3,
             previous_slot: 1,
+            pending_switch: None,
         }
     }
 }
@@ -460,7 +463,8 @@ fn equip_viewmodel_weapon(
     }
 
     for (vm_entity, mut anim) in vm_query.iter_mut() {
-        for (child_ent, _, _) in anim.mesh_entities.drain(..) {
+        for (child_ent, mesh_handle, _) in anim.mesh_entities.drain(..) {
+            meshes.remove(&mesh_handle);
             commands.entity(child_ent).despawn_recursive();
         }
 
@@ -613,16 +617,16 @@ pub fn weapon_switch_system(
     )>,
     mut vm_query: Query<(Entity, &mut StudioAnimatedModel), With<ViewModelWeapon>>,
     console: Option<Res<crate::hud::text_channels::ConsoleOverlayState>>,
+    buy_menu: Option<Res<crate::combat::BuyMenuState>>,
 ) {
     let console_open = console.as_ref().is_some_and(|c| c.open);
+    let buy_menu_open = buy_menu.as_ref().is_some_and(|m| m.is_open());
+    if console_open || buy_menu_open {
+        return;
+    }
     let mut wheel_delta = 0.0f32;
     for ev in mouse_wheel.read() {
-        if !console_open {
-            wheel_delta += ev.y;
-        }
-    }
-    if console_open {
-        return;
+        wheel_delta += ev.y;
     }
 
     let direct_slot = if keyboard.just_pressed(KeyCode::Digit1) {
@@ -703,6 +707,26 @@ pub fn weapon_switch_system(
                     }
                 }
             }
+        }
+
+        if let Some((target_slot, target_idx)) = inv.pending_switch.take() {
+            pending.open = false;
+            commit_weapon_slot_switch(
+                &mut commands,
+                &mut inv,
+                &mut state,
+                target_slot,
+                target_idx,
+                &audio.search_paths,
+                &mut audio.audio_bank,
+                &mut audio.audio_sources,
+                &mut model_store,
+                &mut vfx.images,
+                &mut vfx.materials,
+                &mut vfx.meshes,
+                &mut vm_query,
+            );
+            continue;
         }
 
         // CS 1.6 `CanHolster`: block weapon switch/menu while grenade pin is pulled or C4 arming
@@ -958,6 +982,17 @@ pub fn handle_round_reset_combat_system(
             With<BulletParticle>,
         )>,
     >,
+    transient_models: Query<
+        &StudioAnimatedModel,
+        (
+            Without<ViewModelWeapon>,
+            Or<(
+                With<DroppedWeapon>,
+                With<PlantedC4>,
+                With<GrenadeProjectile>,
+            )>,
+        ),
+    >,
     mut player_query: Query<(
         &mut PlayerController,
         &mut PlayerWeaponInventory,
@@ -971,6 +1006,11 @@ pub fn handle_round_reset_combat_system(
     }
     pending.open = false;
     pending.consume_next_attack = false;
+    for anim in &transient_models {
+        for (_, mesh_handle, _) in &anim.mesh_entities {
+            vfx.meshes.remove(mesh_handle);
+        }
+    }
     for ent in &transient_query {
         commands.entity(ent).despawn_recursive();
     }
@@ -1028,6 +1068,8 @@ pub fn weapon_drop_and_pickup_system(
     mut dropped_query: Query<(Entity, &mut DroppedWeapon, &mut Transform)>,
     mut vm_query: Query<(Entity, &mut StudioAnimatedModel), With<ViewModelWeapon>>,
     console: Option<Res<crate::hud::text_channels::ConsoleOverlayState>>,
+    mut fallback_cache: Local<(Option<Handle<Mesh>>, Option<Handle<StandardMaterial>>)>,
+    mut pickup_events: EventWriter<crate::hud::ItemPickupEvent>,
 ) {
     let dt = time.delta_secs();
     let Ok((mut player, mut inv, mut state)) = player_query.get_single_mut() else {
@@ -1082,24 +1124,32 @@ pub fn weapon_drop_and_pickup_system(
             if let Some(md) =
                 model_store.get_or_load(w_mdl, &audio.search_paths, &mut images, &mut materials)
             {
-                let _ = spawn_model_submesh_children(
+                model_store.spawn_static_model_submesh_children(
                     &mut commands,
                     parent,
                     &md,
-                    0,
+                    w_mdl,
                     false,
-                    None,
+                    Some(2),
                     &mut meshes,
                 );
             } else {
-                let fallback_mesh = meshes.add(Cuboid::new(14.0, 4.0, 4.0).mesh());
-                let fallback_mat = materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.35, 0.35, 0.35),
-                    ..default()
-                });
+                let mesh_h = fallback_cache
+                    .0
+                    .get_or_insert_with(|| meshes.add(Cuboid::new(14.0, 4.0, 4.0).mesh()))
+                    .clone();
+                let mat_h = fallback_cache
+                    .1
+                    .get_or_insert_with(|| {
+                        materials.add(StandardMaterial {
+                            base_color: Color::srgb(0.35, 0.35, 0.35),
+                            ..default()
+                        })
+                    })
+                    .clone();
                 commands
                     .entity(parent)
-                    .insert((Mesh3d(fallback_mesh), MeshMaterial3d(fallback_mat)));
+                    .insert((Mesh3d(mesh_h), MeshMaterial3d(mat_h)));
             }
 
             play_ui_sound(
@@ -1182,7 +1232,8 @@ pub fn weapon_drop_and_pickup_system(
         }
 
         if dropped.velocity.length_squared() > 1.0 {
-            dropped.velocity.y -= 600.0 * dt;
+            // Authentic GoldSrc `sv_gravity 800` MOVETYPE_TOSS
+            dropped.velocity.y -= 800.0 * dt;
             let old_pos = dt_tf.translation;
             let new_pos = old_pos + dropped.velocity * dt;
             if let Some(ref col) = collision_res.model {
@@ -1198,10 +1249,20 @@ pub fn weapon_drop_and_pickup_system(
                         .normalize_or_zero();
                     let endpos = Vec3::new(tr.endpos[0], tr.endpos[2], -tr.endpos[1]);
                     if n.y > 0.7 {
-                        dt_tf.translation = endpos;
-                        dropped.velocity = Vec3::ZERO;
-                        let yaw_only = dt_tf.rotation.to_euler(EulerRot::YXZ).0;
-                        dt_tf.rotation = Quat::from_rotation_y(yaw_only);
+                        // Floor collision (SV_Physics_Toss): slide with surface friction until velocity drops
+                        let horiz_speed =
+                            Vec2::new(dropped.velocity.x, dropped.velocity.z).length();
+                        if horiz_speed < 45.0 {
+                            dt_tf.translation = endpos;
+                            dropped.velocity = Vec3::ZERO;
+                            let yaw_only = dt_tf.rotation.to_euler(EulerRot::YXZ).0;
+                            dt_tf.rotation = Quat::from_rotation_y(yaw_only);
+                        } else {
+                            dt_tf.translation = endpos + n * 0.5;
+                            dropped.velocity.x *= 0.65;
+                            dropped.velocity.z *= 0.65;
+                            dropped.velocity.y = 0.0;
+                        }
                     } else {
                         dt_tf.translation = endpos + n * 0.5;
                         let vn = dropped.velocity.dot(n);
@@ -1242,6 +1303,11 @@ pub fn weapon_drop_and_pickup_system(
 
                 if !slot_occupied && !already_held {
                     inv.bucket_weapons[b_idx].push(dropped.data);
+                    pickup_events.send(crate::hud::ItemPickupEvent {
+                        weapon_id: Some(w_id),
+                        ammo_caliber: None,
+                        is_defuser: false,
+                    });
                     let empty_slot = inv.get_slot(s_idx).and_then(|d| d.id).is_none();
                     if empty_slot {
                         inv.bucket_cursor[b_idx] = inv.bucket_weapons[b_idx].len() - 1;
@@ -1543,10 +1609,13 @@ pub fn update_planted_c4_system(
 
             let can_defuse = use_held
                 && player.team == goldhub_game_cstrike::CsTeam::CounterTerrorist
+                && player.sim.current.on_ground
                 && dist <= 68.0
                 && look_dot >= 0.2;
 
             if can_defuse {
+                player.sim.current.velocity[0] = 0.0;
+                player.sim.current.velocity[1] = 0.0;
                 if !c4.is_being_defused {
                     c4.is_being_defused = true;
                     c4.defuse_progress = 0.0;
@@ -1780,6 +1849,7 @@ pub struct GrenadeProjectile {
     pub bounce_count: u32,
     pub weapon_id: WeaponId,
     pub on_ground: bool,
+    pub yaw: f32,
 }
 
 /// Ejected physical brass casing from fired weapons.
@@ -1936,7 +2006,7 @@ pub fn update_grenade_projectiles_system(
 
             match grenade.weapon_id {
                 WeaponId::SmokeGrenade => {
-                    // CS 1.6 `SG_TumbleThink`: smoke grenade never detonates mid-air; wait until grounded
+                    // CS 1.6 `SG_TumbleThink`: smoke grenade never detonates mid-air or on skybox; wait until grounded on solid world
                     let grounded = if grenade.on_ground {
                         true
                     } else if let Some(ref col) = collision_res.model {
@@ -1947,7 +2017,7 @@ pub fn update_grenade_projectiles_system(
                             [det_pos.x, -det_pos.z, det_pos.y - 4.0],
                             0,
                         );
-                        tr.fraction < 1.0 && tr.plane_normal[2] > 0.7
+                        tr.fraction < 1.0 && tr.plane_normal[2] > 0.7 && !tr.is_sky
                     } else {
                         false
                     };
@@ -2031,10 +2101,10 @@ pub fn update_grenade_projectiles_system(
                     spawn_delayed_smoke(
                         &mut commands,
                         det_pos,
-                        0.3,
-                        180.0,
-                        10.0,
-                        "sprites/steam1.spr",
+                        0.0,
+                        70.0,
+                        14.0,
+                        "sprites/black_smoke1.spr",
                     );
 
                     commands.spawn((
@@ -2160,13 +2230,20 @@ pub fn update_grenade_projectiles_system(
 
                     let seed = det_pos.x.to_bits() ^ det_pos.z.to_bits().rotate_left(11);
                     spawn_spark_shower(&mut commands, det_pos, hit_normal, seed);
+                    spawn_flicker_particles(
+                        &mut commands,
+                        det_pos,
+                        &mut vfx.meshes,
+                        &mut vfx.materials,
+                        &mut sprite_store,
+                    );
                     spawn_delayed_smoke(
                         &mut commands,
                         det_pos,
-                        0.55,
-                        220.0,
+                        0.0,
+                        240.0,
                         12.0,
-                        "sprites/steam1.spr",
+                        "sprites/black_smoke1.spr",
                     );
 
                     commands.spawn((
@@ -2189,8 +2266,8 @@ pub fn update_grenade_projectiles_system(
                         det_pos,
                         100.0,
                         350.0,
-                        0.35,
-                        0.025,
+                        0.0,
+                        0.0,
                         collision_res.model.as_ref(),
                         &mut breakable_query,
                         &mut hostage_query,
@@ -2214,8 +2291,7 @@ pub fn update_grenade_projectiles_system(
                 anim.fps = 0.0;
                 anim.set_sequence(0, 0.0, false);
             }
-            let yaw_only = transform.rotation.to_euler(EulerRot::YXZ).0;
-            transform.rotation = Quat::from_rotation_y(yaw_only);
+            transform.rotation = Quat::from_rotation_y(grenade.yaw + std::f32::consts::FRAC_PI_2);
             continue;
         }
         grenade.velocity.y -= 440.0 * dt;
@@ -2237,10 +2313,82 @@ pub fn update_grenade_projectiles_system(
             let gs_end = [new_pos.x, -new_pos.z, new_pos.y];
             let tr = bsp_world.trace_player_hull(gs_start, gs_end, 0);
             if tr.fraction < 1.0 {
+                if tr.is_sky {
+                    // CS 1.6 / GoldSrc parity: Grenades colliding with the skybox do NOT hard-ricochet across the map.
+                    // Instead, the skybox arrests horizontal and upward momentum, allowing the grenade
+                    // to decelerate smoothly and drop downward under gravity while remaining visible.
+                    let mut hit_n =
+                        Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1]);
+                    if hit_n.length_squared() > 1e-4 {
+                        hit_n = hit_n.normalize();
+                    } else {
+                        hit_n = Vec3::NEG_Y;
+                    }
+                    let endpos = Vec3::new(tr.endpos[0], tr.endpos[2], -tr.endpos[1]);
+                    transform.translation = endpos + hit_n * 0.5;
+
+                    // Heavily dampen horizontal velocities so grenade doesn't launch backwards
+                    grenade.velocity.x *= 0.15;
+                    grenade.velocity.z *= 0.15;
+                    // Stop upward motion and impart gentle initial downward drift
+                    if grenade.velocity.y > 0.0 {
+                        grenade.velocity.y = -20.0;
+                    }
+                    grenade.on_ground = false;
+                    continue;
+                }
                 hit = true;
                 let hit_n = Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1])
                     .normalize_or_zero();
                 let endpos = Vec3::new(tr.endpos[0], tr.endpos[2], -tr.endpos[1]);
+
+                // Breakable impact check (CS 1.6 / ReGameDLL func_break.cpp BreakTouch):
+                // If a flying grenade collides with a breakable entity (glass, vent grate, crate),
+                // check its material and damage it.
+                if let Some(ref col) = collision_res.model {
+                    for (_b_entity, mut b) in &mut breakable_query {
+                        if b.is_broken {
+                            continue;
+                        }
+                        // Check if hit point or entity matches this breakable's model/bounds
+                        let is_hit = if let Some(hit_id) = tr.hit_entity {
+                            col.brush_entities.iter().any(|be| {
+                                be.entity_id == hit_id && b.model == format!("*{}", be.model_index)
+                            })
+                        } else {
+                            endpos.x >= b.bmin.x - 4.0
+                                && endpos.x <= b.bmax.x + 4.0
+                                && endpos.y >= b.bmin.y - 4.0
+                                && endpos.y <= b.bmax.y + 4.0
+                                && endpos.z >= b.bmin.z - 4.0
+                                && endpos.z <= b.bmax.z + 4.0
+                        };
+
+                        if is_hit {
+                            // Glass immediately shatters on grenade impact in GoldSrc
+                            let impact_dmg = if b.material == BreakableMaterial::Glass {
+                                b.health
+                            } else {
+                                (grenade.velocity.length() * 0.05).max(15.0)
+                            };
+                            b.health -= impact_dmg;
+                            if b.health <= 0.0 {
+                                b.is_broken = true;
+                                let center = (b.bmin + b.bmax) * 0.5;
+                                events.break_ent.send(BreakEntityEvent {
+                                    origin: center,
+                                    material: b.material,
+                                    model: b.model.clone(),
+                                    explodemagnitude: b.explodemagnitude,
+                                });
+                                events.fire.send(FireTargetEvent {
+                                    target: b.target.clone(),
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
 
                 let normal_vel = grenade.velocity.dot(hit_n);
                 if normal_vel < 0.0 {
@@ -2255,8 +2403,8 @@ pub fn update_grenade_projectiles_system(
                     if grenade.velocity.length_squared() < 25.0 {
                         grenade.velocity = Vec3::ZERO;
                     }
-                    let yaw_only = transform.rotation.to_euler(EulerRot::YXZ).0;
-                    transform.rotation = Quat::from_rotation_y(yaw_only);
+                    transform.rotation =
+                        Quat::from_rotation_y(grenade.yaw + std::f32::consts::FRAC_PI_2);
                 } else {
                     grenade.on_ground = hit_n.y > 0.7 && grenade.velocity.y.abs() < 45.0;
                     transform.translation = endpos + hit_n * 0.8;
@@ -2264,10 +2412,11 @@ pub fn update_grenade_projectiles_system(
                 grenade.bounce_count += 1;
 
                 if grenade.bounce_count == 1 {
-                    let yaw_only = transform.rotation.to_euler(EulerRot::YXZ).0;
-                    transform.rotation = Quat::from_rotation_y(yaw_only);
+                    transform.rotation =
+                        Quat::from_rotation_y(grenade.yaw + std::f32::consts::FRAC_PI_2);
                     if let Some(ref mut anim) = anim_opt {
-                        anim.set_sequence(0, 0.0, false);
+                        // ReGameDLL BounceTouch: Sequence 1 is resting flat on the ground
+                        anim.set_sequence(1, 0.0, false);
                     }
                 }
 
@@ -2304,15 +2453,12 @@ pub fn update_grenade_projectiles_system(
 pub fn spawn_blood_splatter(
     commands: &mut Commands,
     origin: Vec3,
+    sprite_store: &mut SpriteStore,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let mesh_handle = meshes.add(Sphere::new(1.8).mesh().ico(1).unwrap());
-    let mat_handle = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.72, 0.02, 0.02),
-        unlit: true,
-        ..default()
-    });
+    let mesh_handle = sprite_store.get_or_create_unit_sphere(meshes);
+    let mat_handle = sprite_store.get_or_create_blood_mat(materials);
 
     for i in 0..12 {
         let angle = (i as f32) * std::f32::consts::TAU / 12.0;
@@ -2325,7 +2471,7 @@ pub fn spawn_blood_splatter(
         commands.spawn((
             Mesh3d(mesh_handle.clone()),
             MeshMaterial3d(mat_handle.clone()),
-            Transform::from_translation(origin),
+            Transform::from_translation(origin).with_scale(Vec3::splat(1.8)),
             BulletParticle {
                 velocity: vel,
                 lifetime: 0.0,
@@ -2340,15 +2486,12 @@ pub fn spawn_bullet_dust_puff(
     commands: &mut Commands,
     origin: Vec3,
     normal: Vec3,
+    sprite_store: &mut SpriteStore,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let mesh_handle = meshes.add(Sphere::new(1.4).mesh().ico(1).unwrap());
-    let mat_handle = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.72, 0.68, 0.64),
-        unlit: true,
-        ..default()
-    });
+    let mesh_handle = sprite_store.get_or_create_unit_sphere(meshes);
+    let mat_handle = sprite_store.get_or_create_dust_puff_mat(materials);
 
     for i in 0..8 {
         let angle = (i as f32) * std::f32::consts::TAU / 8.0;
@@ -2359,7 +2502,7 @@ pub fn spawn_bullet_dust_puff(
         commands.spawn((
             Mesh3d(mesh_handle.clone()),
             MeshMaterial3d(mat_handle.clone()),
-            Transform::from_translation(origin),
+            Transform::from_translation(origin).with_scale(Vec3::splat(1.4)),
             BulletParticle {
                 velocity: vel,
                 lifetime: 0.0,
@@ -2442,6 +2585,7 @@ pub struct CombatQueries<'w, 's> {
     >,
     pub inventory: Query<'w, 's, &'static mut PlayerWeaponInventory>,
     pub submodels: Query<'w, 's, (Entity, &'static BspSubmodelMesh, &'static GlobalTransform)>,
+    pub decals: Query<'w, 's, (Entity, &'static BulletHoleDecal)>,
 }
 
 /// Computes canonical ReGameDLL weapon spread and updated accuracy via [`goldhub_game_cstrike::compute_weapon_spread`].
@@ -2476,8 +2620,99 @@ fn compute_weapon_spread(
     })
 }
 
+/// Clamps decal position away from outer convex wall boundaries (270° convex corners)
+/// so decals never overhang into empty air.
+/// Detects whether a bullet struck within decal bounds (`half_size`) of an L-corner (either an inner 90°
+/// or outer 270° corner) and calculates the position and surface normal for the adjacent face.
+/// Authentic CS 1.6 GoldSrc parity: Decals wrap across corner edges so bullet impacts appear on BOTH sides.
+fn find_adjacent_corner_decal(
+    hit_pos: Vec3,
+    hit_normal: Vec3,
+    half_size: f32,
+    collision: Option<&goldhub_formats::ir::CollisionModel>,
+) -> Option<(Vec3, Vec3)> {
+    use goldhub_physics::WorldTrace;
+
+    let col_model = collision?;
+    let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
+
+    let up = if hit_normal.dot(Vec3::Y).abs() > 0.85 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let tangent_h = up.cross(hit_normal).normalize_or_zero();
+    let tangent_v = hit_normal.cross(tangent_h).normalize_or_zero();
+
+    for t in [tangent_h, -tangent_h, tangent_v, -tangent_v] {
+        if t.length_squared() < 0.5 {
+            continue;
+        }
+
+        // 1. Check for Concave (inner 90°) corner: trace along tangent into an intersecting perpendicular wall
+        let ray_end = hit_pos + t * (half_size + 1.0);
+        let gs_start = [hit_pos.x, -hit_pos.z, hit_pos.y];
+        let gs_end = [ray_end.x, -ray_end.z, ray_end.y];
+        let tr = bsp_world.trace_player_hull(gs_start, gs_end, 0);
+        if tr.fraction < 1.0 && !tr.is_sky {
+            let adj_normal = Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1])
+                .normalize_or_zero();
+            if adj_normal.dot(hit_normal).abs() < 0.25 {
+                let dist_to_corner = (half_size + 1.0) * tr.fraction;
+                if dist_to_corner < half_size {
+                    let corner_edge = hit_pos + t * dist_to_corner;
+                    let adj_pos = corner_edge + hit_normal * (half_size - dist_to_corner);
+                    return Some((adj_pos, adj_normal));
+                }
+            }
+        }
+
+        // 2. Check for Convex (outer 270°) corner: wall ends and turns around the corner
+        // Probe outwards along tangent t in 4 fine-grained increments
+        for step in 1..=4 {
+            let probe_dist = (half_size * step as f32) / 4.0;
+            let probe_pt = hit_pos + t * probe_dist;
+            let p_start = probe_pt + hit_normal * 0.5;
+            let p_end = probe_pt - hit_normal * 2.0;
+            let tr_edge = bsp_world.trace_player_hull(
+                [p_start.x, -p_start.z, p_start.y],
+                [p_end.x, -p_end.z, p_end.y],
+                0,
+            );
+            if tr_edge.fraction >= 0.99 || tr_edge.allsolid {
+                // Outer wall corner edge detected! Probe inward into the perpendicular return face
+                let corner_pt = hit_pos + t * (probe_dist - (half_size / 8.0));
+                let adj_probe_start = corner_pt + t * 2.0 - hit_normal * 0.5;
+                let adj_probe_end = corner_pt - t * 2.0 - hit_normal * 0.5;
+                let tr_adj = bsp_world.trace_player_hull(
+                    [adj_probe_start.x, -adj_probe_start.z, adj_probe_start.y],
+                    [adj_probe_end.x, -adj_probe_end.z, adj_probe_end.y],
+                    0,
+                );
+                if tr_adj.fraction < 1.0 && !tr_adj.is_sky {
+                    let adj_normal = Vec3::new(
+                        tr_adj.plane_normal[0],
+                        tr_adj.plane_normal[2],
+                        -tr_adj.plane_normal[1],
+                    )
+                    .normalize_or_zero();
+                    if adj_normal.dot(hit_normal).abs() < 0.25 {
+                        let adj_surface_pt =
+                            adj_probe_start + (adj_probe_end - adj_probe_start) * tr_adj.fraction;
+                        // Return face decal anchors right at corner edge
+                        let adj_pos = adj_surface_pt - hit_normal * (half_size * 0.5);
+                        return Some((adj_pos, adj_normal));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    None
+}
+
 /// Plays spatial surface impact audio/decals/sparks when a bullet strikes brush/wall or survivable breakable.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn emit_surface_impact_fx(
     commands: &mut Commands,
     time: &Time,
@@ -2488,7 +2723,21 @@ fn emit_surface_impact_fx(
     sprite_store: &mut SpriteStore,
     audio: &mut CombatAudio,
     vfx: &mut CombatVfxAssets,
+    collision: Option<&goldhub_formats::ir::CollisionModel>,
+    existing_decals: &Query<(Entity, &'static BulletHoleDecal)>,
 ) {
+    let half_size = match material {
+        Some(BreakableMaterial::Glass) => 7.0,
+        _ => 3.75,
+    };
+
+    // Only deduplicate exact point-blank overlap (< 1.5 units) so tight groupings layer naturally
+    for (ent, decal) in existing_decals {
+        if decal.position.distance_squared(hit_pos) < 2.25 && decal.normal.dot(hit_normal) > 0.85 {
+            commands.entity(ent).despawn();
+        }
+    }
+
     let (decal_kind, hit_snd, emit_sparks) = match material {
         Some(BreakableMaterial::Glass) => {
             let idx = ((time.elapsed_secs() * 100.0) as usize % 3) + 1;
@@ -2517,7 +2766,8 @@ fn emit_surface_impact_fx(
         Some(BreakableMaterial::Metal | BreakableMaterial::Computer) => {
             let idx = ((time.elapsed_secs() * 100.0) as usize % 3) + 1;
             (
-                ImpactDecalKind::BulletShot,
+                // GoldSrc ev_cs16.cpp: func_breakable (classnumber 1) receives {break1..3
+                ImpactDecalKind::BreakableGlass,
                 format!("debris/metal{idx}.wav"),
                 true,
             )
@@ -2544,6 +2794,10 @@ fn emit_surface_impact_fx(
         ));
     }
 
+    // 1. Check for L-corner edge: if bullet struck near an edge, compute corner wrapping
+    let corner_adj = find_adjacent_corner_decal(hit_pos, hit_normal, half_size, collision);
+
+    // Spawn primary decal strictly at hit_pos (100% crosshair alignment)
     spawn_surface_decal(
         commands,
         hit_pos,
@@ -2556,6 +2810,29 @@ fn emit_surface_impact_fx(
         &mut vfx.materials,
         &mut vfx.meshes,
     );
+
+    // 2. Project wrapping decal onto adjacent face if near edge
+    if let Some((adj_pos, adj_normal)) = corner_adj {
+        for (ent, decal) in existing_decals {
+            if decal.position.distance_squared(adj_pos) < 2.25
+                && decal.normal.dot(adj_normal) > 0.85
+            {
+                commands.entity(ent).despawn();
+            }
+        }
+        spawn_surface_decal(
+            commands,
+            adj_pos,
+            adj_normal,
+            decal_kind,
+            attach_to,
+            sprite_store,
+            &audio.search_paths,
+            &mut vfx.images,
+            &mut vfx.materials,
+            &mut vfx.meshes,
+        );
+    }
 
     if emit_sparks {
         spawn_wall_sparks(
@@ -2600,7 +2877,8 @@ fn swap_viewmodel_to_knife(
     };
 
     for (vm_ent, _, mut anim) in vm_query.iter_mut() {
-        for (child_ent, _, _) in anim.mesh_entities.drain(..) {
+        for (child_ent, mesh_handle, _) in anim.mesh_entities.drain(..) {
+            vfx.meshes.remove(&mesh_handle);
             commands.entity(child_ent).despawn();
         }
         anim.model_id = "models/v_knife.mdl".to_string();
@@ -2635,6 +2913,7 @@ fn spawn_grenade_entity(
     _player_pitch: f32,
     _seed_bits: u32,
     model_store: &mut StudioModelStore,
+    sprite_store: &mut SpriteStore,
     search_paths: &GameSearchPaths,
     vfx: &mut CombatVfxAssets,
 ) {
@@ -2644,7 +2923,7 @@ fn spawn_grenade_entity(
         _ => "models/w_hegrenade.mdl",
     };
 
-    // Keep projectile orientation horizontal along throw yaw without spinning around flight axis
+    // CS 1.6: Grenade lies horizontally on its side across the player's view (a horizontal log / dash `-`)
     let init_rot = Quat::from_rotation_y(player_yaw + std::f32::consts::FRAC_PI_2);
 
     if let Some(model_data) = model_store.get_or_load(
@@ -2654,6 +2933,7 @@ fn spawn_grenade_entity(
         &mut vfx.materials,
     ) {
         let mut anim = StudioAnimatedModel::new(w_model_path, false);
+        // CS 1.6: Grenade maintains static side-profile orientation in flight without rolling spin
         anim.set_sequence(0, 0.0, false);
 
         let parent = commands
@@ -2664,35 +2944,25 @@ fn spawn_grenade_entity(
                     bounce_count: 0,
                     weapon_id,
                     on_ground: false,
+                    yaw: player_yaw,
                 },
                 Transform::from_translation(launch_pos).with_rotation(init_rot),
                 Visibility::Inherited,
             ))
             .id();
-        anim.mesh_entities = spawn_model_submesh_children(
+        model_store.spawn_static_model_submesh_children(
             commands,
             parent,
             &model_data,
-            0,
+            w_model_path,
             false,
-            None,
+            Some(2),
             &mut vfx.meshes,
         );
-        // Upright world grenade model (`Z=[-4.62,+13.01]` -> Bevy `+Y`) is pitched 90 deg onto its side horizontally.
-        for &(child, _, _) in &anim.mesh_entities {
-            commands.entity(child).insert(
-                Transform::from_xyz(0.0, 2.5, 0.0)
-                    .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-            );
-        }
         commands.entity(parent).insert(anim);
     } else {
-        let mesh_handle = vfx.meshes.add(Sphere::new(3.5).mesh().ico(1).unwrap());
-        let mat_handle = vfx.materials.add(StandardMaterial {
-            base_color: Color::srgb(0.2, 0.35, 0.15),
-            perceptual_roughness: 0.8,
-            ..default()
-        });
+        let mesh_handle = sprite_store.get_or_create_unit_sphere(&mut vfx.meshes);
+        let mat_handle = sprite_store.get_or_create_grenade_mat(&mut vfx.materials);
         commands.spawn((
             GrenadeProjectile {
                 velocity: launch_vel,
@@ -2700,10 +2970,13 @@ fn spawn_grenade_entity(
                 bounce_count: 0,
                 weapon_id,
                 on_ground: false,
+                yaw: player_yaw,
             },
             Mesh3d(mesh_handle),
             MeshMaterial3d(mat_handle),
-            Transform::from_translation(launch_pos).with_rotation(init_rot),
+            Transform::from_translation(launch_pos)
+                .with_rotation(init_rot)
+                .with_scale(Vec3::splat(3.5)),
         ));
     }
 }
@@ -2723,7 +2996,8 @@ fn deploy_viewmodel_sequence(
     meshes: &mut ResMut<Assets<Mesh>>,
 ) {
     let def = get_weapon_def(weapon_id);
-    for (child_ent, _, _) in anim.mesh_entities.drain(..) {
+    for (child_ent, mesh_handle, _) in anim.mesh_entities.drain(..) {
+        meshes.remove(&mesh_handle);
         commands.entity(child_ent).despawn();
     }
     if let Some(model_data) = model_store.get_or_load(def.v_model, search_paths, images, materials)
@@ -2891,23 +3165,18 @@ fn fire_single_bullet_trace(
                     Visibility::Inherited,
                 ))
                 .id();
-            let _ = spawn_model_submesh_children(
+            model_store.spawn_static_model_submesh_children(
                 commands,
                 shell_parent,
                 &shell_data,
-                0,
+                shell_mdl_path,
                 false,
                 None,
                 &mut vfx.meshes,
             );
         } else {
-            let shell_mesh = vfx.meshes.add(Cylinder::new(0.6, 2.8).mesh());
-            let shell_mat = vfx.materials.add(StandardMaterial {
-                base_color: Color::srgb(0.85, 0.65, 0.15),
-                metallic: 0.85,
-                perceptual_roughness: 0.25,
-                ..default()
-            });
+            let (shell_mesh, shell_mat) =
+                sprite_store.get_or_create_brass_mesh_and_mat(&mut vfx.meshes, &mut vfx.materials);
             commands.spawn((
                 BrassCasingProjectile {
                     velocity: shell_vel,
@@ -2952,6 +3221,7 @@ fn fire_single_bullet_trace(
         let mut hit_wall_dist = remaining_reach;
         let mut hit_wall_normal = -bullet_dir;
         let mut hit_brush_entity = None;
+        let mut hit_is_sky = false;
         if let Some(col_model) = collision {
             use goldhub_physics::WorldTrace;
             let bsp_world = goldhub_physics::BspWorldCollision::new(col_model);
@@ -2960,6 +3230,7 @@ fn fire_single_bullet_trace(
             let gs_end = [ray_end.x, -ray_end.z, ray_end.y];
             let tr = bsp_world.trace_player_hull(gs_start, gs_end, 0);
             if tr.fraction < 1.0 {
+                hit_is_sky = tr.is_sky;
                 hit_wall_dist = tr.fraction * remaining_reach;
                 hit_wall_normal =
                     Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1])
@@ -2969,14 +3240,11 @@ fn fire_single_bullet_trace(
         }
 
         // Resolve BSP brush entity_id -> "*N" submodel name + parent Transform for decals on moving doors/glass
-        let hit_submodel_str = collision.and_then(|col_model| {
+        let hit_brush = collision.and_then(|col_model| {
             let eid = hit_brush_entity?;
-            col_model
-                .brush_entities
-                .iter()
-                .find(|b| b.entity_id == eid)
-                .map(|b| format!("*{}", b.model_index))
+            col_model.brush_entities.iter().find(|b| b.entity_id == eid)
         });
+        let hit_submodel_str = hit_brush.map(|b| format!("*{}", b.model_index));
         let attach_to = hit_submodel_str.as_ref().and_then(|model_str| {
             queries
                 .submodels
@@ -3087,6 +3355,8 @@ fn fire_single_bullet_trace(
                         sprite_store,
                         audio,
                         vfx,
+                        collision,
+                        &queries.decals,
                     );
                 }
                 if penetrations_left > 0 && remaining_reach > b_t + 16.0 {
@@ -3173,17 +3443,29 @@ fn fire_single_bullet_trace(
             }
             break;
         } else if hit_wall_dist < remaining_reach {
+            if hit_is_sky {
+                // GoldSrc / CS 1.6 parity: Bullets hitting the skybox vanish silently without decals or ricochets
+                break;
+            }
             let hit_pos = cur_src + bullet_dir * hit_wall_dist;
+            // GoldSrc ev_cs16.cpp: if (pe->rendermode != kRenderNormal) return "{bproof1";
+            let hit_mat = if hit_brush.is_some_and(|b| b.rendermode != 0) {
+                Some(BreakableMaterial::UnbreakableGlass)
+            } else {
+                None
+            };
             emit_surface_impact_fx(
                 commands,
                 time,
                 hit_pos,
                 hit_wall_normal,
-                None,
+                hit_mat,
                 attach_to,
                 sprite_store,
                 audio,
                 vfx,
+                collision,
+                &queries.decals,
             );
 
             if penetrations_left > 0
@@ -3299,7 +3581,203 @@ pub fn weapon_fire_and_reload_system(
         return;
     }
 
+    // Knife Attack Lifecycle (ReGameDLL `CKnife::PrimaryAttack` Swing / `SecondaryAttack` Stab)
     if state.id == WeaponId::Knife {
+        let lmb_pressed = !input_blocked_by_menu && mouse_button.just_pressed(MouseButton::Left);
+        let rmb_pressed = !input_blocked_by_menu && mouse_button.just_pressed(MouseButton::Right);
+
+        if (lmb_pressed && state.next_primary_attack <= 0.0)
+            || (rmb_pressed && state.next_secondary_attack <= 0.0)
+        {
+            let is_stab = rmb_pressed;
+            let (reach, base_dmg, anim_seq, anim_miss_seq, next_p, next_s) = if is_stab {
+                (32.0_f32, 65.0_f32, 4usize, 5usize, 1.1_f32, 1.1_f32)
+            } else {
+                let seq = if state.shots_fired % 2 == 0 {
+                    6usize
+                } else {
+                    7usize
+                };
+                state.shots_fired = state.shots_fired.wrapping_add(1);
+                (48.0_f32, 15.0_f32, seq, seq, 0.4_f32, 0.5_f32)
+            };
+
+            state.next_primary_attack = next_p;
+            state.next_secondary_attack = next_s;
+
+            if let Some(ref mut p) = player_ctrl {
+                p.trigger_third_person_shoot(0.3);
+            }
+
+            // Knife Raycast & Hull Trace
+            if let Ok(cam_t) = queries.camera.get_single() {
+                let eye_pos = player_ctrl.as_deref().map_or_else(
+                    || cam_t.translation(),
+                    |p| {
+                        Vec3::new(
+                            p.sim.current.origin[0],
+                            p.sim.current.origin[2] + p.sim.current.view_height,
+                            -p.sim.current.origin[1],
+                        )
+                    },
+                );
+
+                let fwd = player_ctrl.as_deref().map_or_else(
+                    || cam_t.forward().as_vec3(),
+                    |p| {
+                        let yaw_quat = Quat::from_rotation_y(p.yaw);
+                        let pitch_quat = Quat::from_rotation_x(p.pitch);
+                        (yaw_quat * pitch_quat * Vec3::NEG_Z).normalize()
+                    },
+                );
+
+                let mut hit_something = false;
+
+                // 1. Hostage / Entity hit
+                for (_h_ent, mut hostage, mut anim, mut bounds, _ws, ht) in &mut queries.hostage {
+                    if hostage.is_dead {
+                        continue;
+                    }
+                    let h_trans = ht.translation();
+                    let (bmin, bmax) = (h_trans + bounds.mins, h_trans + bounds.maxs);
+                    if let Some(_dist) = ray_intersects_aabb(eye_pos, fwd, reach + 6.0, bmin, bmax)
+                    {
+                        hit_something = true;
+                        hostage.health -= base_dmg;
+                        let snd = format!(
+                            "weapons/knife_hit{}.wav",
+                            ((eye_pos.x.abs() as usize) % 4) + 1
+                        );
+                        play_ui_sound(
+                            &mut commands,
+                            &snd,
+                            &audio.search_paths,
+                            &mut audio.audio_bank,
+                            &mut audio.audio_sources,
+                        );
+
+                        if hostage.health <= 0.0 {
+                            hostage.is_dead = true;
+                            anim.set_sequence(31, 24.0, false);
+                            bounds.mins = Vec3::ZERO;
+                            bounds.maxs = Vec3::ZERO;
+                            if let Some(h) = audio.audio_bank.get_or_load_sound(
+                                "radio/hosdown.wav",
+                                &audio.search_paths.dirs,
+                                &mut audio.audio_sources,
+                            ) {
+                                commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                // 2. Breakable brush entity hit (Breakables take 2x damage from knife, instant on crowbar flag)
+                if !hit_something {
+                    for (_b_ent, mut b) in &mut queries.breakable {
+                        if b.is_broken {
+                            continue;
+                        }
+                        if let Some(_dist) =
+                            ray_intersects_aabb(eye_pos, fwd, reach + 6.0, b.bmin, b.bmax)
+                        {
+                            hit_something = true;
+                            let knife_dmg = base_dmg * 2.0;
+                            b.health -= knife_dmg;
+                            let snd = if b.material == BreakableMaterial::Glass {
+                                "debris/bustglass1.wav"
+                            } else {
+                                "weapons/knife_hitwall1.wav"
+                            };
+                            play_ui_sound(
+                                &mut commands,
+                                snd,
+                                &audio.search_paths,
+                                &mut audio.audio_bank,
+                                &mut audio.audio_sources,
+                            );
+
+                            if b.health <= 0.0 {
+                                b.is_broken = true;
+                                let center = (b.bmin + b.bmax) * 0.5;
+                                events.break_ent.send(BreakEntityEvent {
+                                    origin: center,
+                                    material: b.material,
+                                    model: b.model.clone(),
+                                    explodemagnitude: b.explodemagnitude,
+                                });
+                                events.fire.send(FireTargetEvent {
+                                    target: b.target.clone(),
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // 3. World BSP hit
+                if !hit_something && let Some(ref col) = collision_res.model {
+                    use goldhub_physics::WorldTrace;
+                    let bsp = goldhub_physics::BspWorldCollision::new(col);
+                    let p1 = [eye_pos.x, -eye_pos.z, eye_pos.y];
+                    let end_pos = eye_pos + fwd * reach;
+                    let p2 = [end_pos.x, -end_pos.z, end_pos.y];
+                    let tr = bsp.trace_player_hull(p1, p2, 0);
+                    if tr.fraction < 1.0 && !tr.is_sky {
+                        hit_something = true;
+                        play_ui_sound(
+                            &mut commands,
+                            "weapons/knife_hitwall1.wav",
+                            &audio.search_paths,
+                            &mut audio.audio_bank,
+                            &mut audio.audio_sources,
+                        );
+                        let n =
+                            Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1])
+                                .normalize_or_zero();
+                        let pt = eye_pos + fwd * (reach * tr.fraction);
+                        // CS 1.6 wpn_knife.cpp: CKnife::Smack() emits knife_hitwall1 sound, sparks, and decal,
+                        // but NEVER bullet dust puff spheres.
+                        spawn_wall_sparks(
+                            &mut commands,
+                            pt,
+                            n,
+                            &mut sprite_store,
+                            &audio.search_paths,
+                            &mut vfx.images,
+                            &mut vfx.materials,
+                            &mut vfx.meshes,
+                        );
+                    }
+                }
+
+                // Animation & Miss sound
+                let target_anim = if hit_something {
+                    anim_seq
+                } else {
+                    anim_miss_seq
+                };
+                for (_, _, mut anim) in &mut queries.vm {
+                    anim.set_sequence(target_anim, 30.0, false);
+                }
+
+                if !hit_something {
+                    let miss_snd = if is_stab {
+                        "weapons/knife_slash1.wav"
+                    } else {
+                        "weapons/knife_slash2.wav"
+                    };
+                    play_ui_sound(
+                        &mut commands,
+                        miss_snd,
+                        &audio.search_paths,
+                        &mut audio.audio_bank,
+                        &mut audio.audio_sources,
+                    );
+                }
+            }
+        }
         return;
     }
 
@@ -3402,6 +3880,7 @@ pub fn weapon_fire_and_reload_system(
                         pitch_rad,
                         seed_bits,
                         &mut model_store,
+                        &mut sprite_store,
                         &audio.search_paths,
                         &mut vfx,
                     );
@@ -3503,16 +3982,11 @@ pub fn weapon_fire_and_reload_system(
                     let o = p.sim.current.origin;
                     Vec3::new(o[0], o[2], -o[1])
                 });
-                let plant_pos = collision_res.model.as_ref().map_or(player_ori, |col| {
-                    use goldhub_physics::WorldTrace;
-                    let bsp = goldhub_physics::BspWorldCollision::new(col);
-                    let tr = bsp.trace_player_hull(
-                        [player_ori.x, -player_ori.z, player_ori.y + 4.0],
-                        [player_ori.x, -player_ori.z, player_ori.y - 128.0],
-                        0,
-                    );
-                    Vec3::new(tr.endpos[0], tr.endpos[2], -tr.endpos[1])
-                });
+                // Authentic GoldSrc `CGrenade::ShootSatchelCharge`:
+                // Spawns at player waist `pev->origin` with `movetype = MOVETYPE_TOSS` and `velocity = 0`.
+                // Does NOT teleport 128 units down instantly; `update_planted_c4_system` applies
+                // `sv_gravity 800` smoothly until touching the ground.
+                let plant_pos = player_ori + Vec3::NEG_Y * 6.0;
 
                 let c4_parent = commands
                     .spawn((
@@ -3527,7 +4001,7 @@ pub fn weapon_fire_and_reload_system(
                             defuse_progress: 0.0,
                             defuse_duration: 10.0,
                             is_being_defused: false,
-                            on_ground: true,
+                            on_ground: false,
                         },
                         Transform::from_translation(plant_pos)
                             .with_rotation(Quat::from_rotation_y(player_yaw)),
@@ -3540,13 +4014,13 @@ pub fn weapon_fire_and_reload_system(
                     &mut vfx.images,
                     &mut vfx.materials,
                 ) {
-                    let _ = spawn_model_submesh_children(
+                    model_store.spawn_static_model_submesh_children(
                         &mut commands,
                         c4_parent,
                         &c4_md,
-                        0,
+                        "models/w_c4.mdl",
                         false,
-                        None,
+                        Some(2),
                         &mut vfx.meshes,
                     );
                 }
@@ -4518,5 +4992,87 @@ mod tests {
         let st = q.single(app.world());
         assert_eq!(st.clip, 8);
         assert_eq!(st.resume_zoom_fov, Some(40.0));
+    }
+
+    #[test]
+    fn test_bullet_decal_deduplication_on_same_surface() {
+        let mut app = App::new();
+        app.add_plugins(bevy::time::TimePlugin);
+
+        let hit_pos = Vec3::new(100.0, 50.0, 0.0);
+        let hit_normal = Vec3::Z;
+
+        let existing_ent = app
+            .world_mut()
+            .spawn(BulletHoleDecal {
+                position: hit_pos,
+                normal: hit_normal,
+                lifetime: 5.0,
+                max_lifetime: 60.0,
+            })
+            .id();
+
+        // Simulate a new shot at virtually the same spot (within 1.5 units)
+        let new_hit = hit_pos + Vec3::new(1.0, 0.5, 0.0);
+
+        // Verify deduplication logic
+        let to_despawn: Vec<Entity> = {
+            let mut query = app.world_mut().query::<(Entity, &BulletHoleDecal)>();
+            query
+                .iter(app.world())
+                .filter_map(|(ent, decal)| {
+                    if decal.position.distance_squared(new_hit) < 16.0
+                        && decal.normal.dot(hit_normal) > 0.85
+                    {
+                        Some(ent)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for ent in to_despawn {
+            app.world_mut().entity_mut(ent).despawn();
+        }
+        app.update();
+
+        assert!(app.world().get::<BulletHoleDecal>(existing_ent).is_none());
+    }
+
+    #[test]
+    fn test_adjacent_corner_decal_detection() {
+        // CollisionModel with a splitting plane at X = 100
+        let col = goldhub_formats::ir::CollisionModel {
+            hulls: vec![goldhub_formats::ir::CollisionHull {
+                hull_index: 0,
+                root_node: 0,
+                clip_nodes: vec![goldhub_formats::ir::ClipNode {
+                    plane_index: 0,
+                    children: [-2, -1],
+                }],
+            }],
+            planes: vec![goldhub_formats::ir::CollisionPlane {
+                normal: [1.0, 0.0, 0.0],
+                distance: 100.0,
+                plane_type: 0,
+            }],
+            brush_entities: vec![],
+            visdata: vec![],
+        };
+
+        // Hit point near outer edge (X = 98.5, within half_size 3.75 of X = 100)
+        let hit_pos = Vec3::new(98.5, 32.0, 0.0);
+        let hit_normal = Vec3::Z;
+        let adj = find_adjacent_corner_decal(hit_pos, hit_normal, 3.75, Some(&col));
+        if let Some((adj_pos, adj_norm)) = adj {
+            assert!(
+                adj_norm.dot(hit_normal).abs() < 0.25,
+                "Adjacent normal must be perpendicular to hit normal"
+            );
+            assert!(
+                (adj_pos.y - hit_pos.y).abs() < 1e-3,
+                "Y coordinate must align along vertical edge"
+            );
+        }
     }
 }

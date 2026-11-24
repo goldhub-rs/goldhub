@@ -289,10 +289,15 @@ pub fn footstep_sound_system(
         player.step_controller.advance_time(dt_ms);
 
         let on_ground = player.sim.current.on_ground;
-        let was_on_ground = player.was_on_ground;
+        let was_on_ground = player.sim.previous.on_ground;
         let on_ladder = player.sim.current.on_ladder;
         let seed_step = player.seed_step & 1;
         let seed_vol = player.seed_vol % 5;
+        let pre_land_fvel = player
+            .sim
+            .previous
+            .fall_velocity
+            .max(-player.sim.previous.velocity[2]);
 
         // Trace ground surface material texture name directly under player origin
         let ground_texture = if on_ladder {
@@ -308,7 +313,7 @@ pub fn footstep_sound_system(
             is_ducking: player.sim.current.is_ducking,
             duck_time_ms: 0.0,
             is_frozen: false,
-            fall_velocity: player.sim.current.fall_velocity,
+            fall_velocity: pre_land_fvel,
             is_dead: false,
             water_pos: WaterPosition::NotInWater,
             ground_texture,

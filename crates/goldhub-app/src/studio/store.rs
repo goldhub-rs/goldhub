@@ -22,6 +22,7 @@ pub struct SubmeshTemplate {
     pub submodel_index: usize,
     pub skin_ref: usize,
     pub material: Handle<StandardMaterial>,
+    pub lit_material: Handle<StandardMaterial>,
     pub rest_vertices: Vec<StudioVertex>,
     pub indices: Vec<u32>,
 }
@@ -36,10 +37,64 @@ pub struct StudioModelData {
 #[derive(Resource, Default)]
 pub struct StudioModelStore {
     pub models: HashMap<String, Arc<StudioModelData>>,
+    pub static_meshes: HashMap<String, Vec<Handle<Mesh>>>,
 }
 
 impl StudioModelStore {
+    /// Spawns static child submesh entities under `parent_entity`, reusing cached `Handle<Mesh>` instances
+    /// to avoid continuous allocations on hot paths (e.g. bullet brass casings and static world drops).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_static_model_submesh_children(
+        &mut self,
+        commands: &mut Commands,
+        parent_entity: Entity,
+        model_data: &StudioModelData,
+        model_key: &str,
+        is_viewmodel: bool,
+        render_layer: Option<usize>,
+        meshes: &mut Assets<Mesh>,
+    ) {
+        let key = model_key.replace('\\', "/").to_lowercase();
+        let handles = self.static_meshes.entry(key).or_insert_with(|| {
+            model_data
+                .submeshes
+                .iter()
+                .map(|template| {
+                    let bevy_mesh =
+                        create_sequence_frame0_mesh(model_data, 0, template, is_viewmodel);
+                    meshes.add(bevy_mesh)
+                })
+                .collect()
+        });
+
+        for (sub_idx, template) in model_data.submeshes.iter().enumerate() {
+            let mesh_handle = handles[sub_idx].clone();
+            let initial_vis = if template.submodel_index == 0 {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            let mat = if is_viewmodel {
+                template.material.clone()
+            } else {
+                template.lit_material.clone()
+            };
+            let mut child_cmd = commands.spawn((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(mat),
+                Transform::IDENTITY,
+                initial_vis,
+                bevy::render::view::NoFrustumCulling,
+            ));
+            if let Some(layer) = render_layer {
+                child_cmd.insert(bevy::render::view::RenderLayers::layer(layer));
+            }
+            let child = child_cmd.id();
+            commands.entity(parent_entity).add_child(child);
+        }
+    }
     /// Loads or retrieves a cached StudioModel by logical relative path (e.g. "models/v_knife.mdl").
+    #[allow(clippy::too_many_lines)]
     pub fn get_or_load(
         &mut self,
         model_name: &str,
@@ -89,6 +144,7 @@ impl StudioModelStore {
 
         // 1. Upload textures to Bevy Image assets and create StandardMaterials
         let mut material_handles = Vec::with_capacity(model.textures.len());
+        let mut lit_material_handles = Vec::with_capacity(model.textures.len());
         for tex in &model.textures {
             let image = Image::new(
                 Extent3d {
@@ -104,18 +160,37 @@ impl StudioModelStore {
             let img_handle = images.add(image);
 
             let is_masked = (tex.flags & 0x0040) != 0;
-            let mat = StandardMaterial {
-                base_color_texture: Some(img_handle),
+            let alpha_mode = if is_masked {
+                AlphaMode::Mask(0.5)
+            } else {
+                AlphaMode::Opaque
+            };
+
+            // Material for first-person viewmodels (pure Lambertian diffuse without fake specular glare)
+            let vm_mat = StandardMaterial {
+                base_color_texture: Some(img_handle.clone()),
                 cull_mode: None, // Two-sided rendering
-                unlit: true,     // Authentic GoldSrc StudioModel fullbright texturing
-                alpha_mode: if is_masked {
-                    AlphaMode::Mask(0.5)
-                } else {
-                    AlphaMode::Opaque
-                },
+                unlit: false,
+                perceptual_roughness: 0.95,
+                metallic: 0.0,
+                reflectance: 0.0,
+                alpha_mode,
                 ..default()
             };
-            material_handles.push(materials.add(mat));
+            material_handles.push(materials.add(vm_mat));
+
+            // Lit material for world models (receives dynamic shadows and scene illumination)
+            let lit_mat = StandardMaterial {
+                base_color_texture: Some(img_handle),
+                cull_mode: None,
+                unlit: false,
+                perceptual_roughness: 0.95,
+                metallic: 0.0,
+                reflectance: 0.0,
+                alpha_mode,
+                ..default()
+            };
+            lit_material_handles.push(materials.add(lit_mat));
         }
 
         // 2. Extract submeshes from all bodyparts and their submodels (submodel 0 visible by default;
@@ -139,6 +214,11 @@ impl StudioModelStore {
                             ..default()
                         })
                     };
+                    let lit_mat_handle = if tex_idx < lit_material_handles.len() {
+                        lit_material_handles[tex_idx].clone()
+                    } else {
+                        mat_handle.clone()
+                    };
 
                     submeshes.push(SubmeshTemplate {
                         body_part_name: body_part.name.clone(),
@@ -146,6 +226,7 @@ impl StudioModelStore {
                         submodel_index,
                         skin_ref: mesh.skin_ref,
                         material: mat_handle,
+                        lit_material: lit_mat_handle,
                         rest_vertices: mesh.vertices.clone(),
                         indices: mesh.indices.clone(),
                     });
@@ -273,9 +354,14 @@ pub fn spawn_model_submesh_children(
         } else {
             Visibility::Hidden
         };
+        let mat = if is_viewmodel {
+            template.material.clone()
+        } else {
+            template.lit_material.clone()
+        };
         let mut child_cmd = commands.spawn((
             Mesh3d(mesh_handle.clone()),
-            MeshMaterial3d(template.material.clone()),
+            MeshMaterial3d(mat),
             Transform::IDENTITY,
             initial_vis,
             bevy::render::view::NoFrustumCulling,

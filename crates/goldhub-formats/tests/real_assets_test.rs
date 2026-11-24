@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
+use zerocopy::FromBytes;
 
 use goldhub_formats::codecs::AssetDecoder;
 use goldhub_formats::codecs::legacy::{Bsp30Decoder, StudioMdlDecoder, Wad3Decoder};
@@ -291,6 +292,19 @@ fn test_compile_bsp_collision_brush_entities() {
         !col.brush_entities.is_empty(),
         "de_inferno must have brush entities!"
     );
+    for e in col
+        .brush_entities
+        .iter()
+        .filter(|e| e.classname.starts_with("func_door"))
+    {
+        println!("INFERNO DOOR ENTITY: {e:?}");
+    }
+    let entities_str = std::str::from_utf8(bsp.entities).unwrap();
+    for ent_block in entities_str.split('}') {
+        if ent_block.contains("\"func_door_rotating\"") {
+            println!("INFERNO DOOR RAW ENTITY:\n{}", ent_block.trim());
+        }
+    }
     let solid_count = col
         .brush_entities
         .iter()
@@ -629,6 +643,18 @@ fn test_inspect_wine_and_chick() {
             max_z
         );
     }
+
+    let gren_path = Path::new("C:/Games/CS 1.6 GoldClient/cstrike/models/w_hegrenade.mdl");
+    if gren_path.exists() {
+        let bytes = fs::read(gren_path).unwrap();
+        let _mdl: StudioModel = StudioMdlDecoder
+            .decode(&bytes)
+            .expect("decode w_hegrenade.mdl");
+        let rig: SkeletalRig = StudioMdlDecoder
+            .decode(&bytes)
+            .expect("decode w_hegrenade.mdl rig");
+        assert!(!rig.sequences.is_empty());
+    }
 }
 
 #[test]
@@ -641,6 +667,27 @@ fn test_inspect_shot_decal() {
     let wad = Wad3Decoder.decode(&bytes).unwrap();
     let entry = wad.find_entry("{shot1").expect("find {shot1");
     let desc = wad.unpack_miptex(entry).expect("unpack {shot1");
+    if let Some(scorch_entry) = wad.find_entry("{scorch1") {
+        let bytes = wad.read_entry(scorch_entry).unwrap();
+        let hdr_len = core::mem::size_of::<goldhub_formats::codecs::legacy::wad::MiptexHeader>();
+        let header =
+            goldhub_formats::codecs::legacy::wad::MiptexHeader::read_from_bytes(&bytes[..hdr_len])
+                .unwrap();
+        let offset0 = header.offsets[0] as usize;
+        let pixel_count = (header.width * header.height) as usize;
+        let pixels = &bytes[offset0..offset0 + pixel_count];
+        let offset3 = header.offsets[3] as usize;
+        let mip3_len = ((header.width / 8) * (header.height / 8)) as usize;
+        let palette = &bytes[offset3 + mip3_len + 2..offset3 + mip3_len + 2 + 768];
+        println!("scorch1 palette entry 0: {:?}", &palette[0..3]);
+        println!(
+            "scorch1 palette entry 255: {:?}",
+            &palette[255 * 3..255 * 3 + 3]
+        );
+        println!("scorch1 pixel 0 (corner): {}", pixels[0]);
+        let center_idx = (header.height / 2 * header.width + header.width / 2) as usize;
+        println!("scorch1 center pixel: {}", pixels[center_idx]);
+    }
     assert_eq!(desc.width, 16);
     assert_eq!(desc.height, 16);
     // Background pixel (index 0) must be 100% transparent (alpha == 0)

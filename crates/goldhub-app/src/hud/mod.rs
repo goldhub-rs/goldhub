@@ -22,11 +22,36 @@ pub mod radar;
 pub mod text_channels;
 
 /// Classic CS 1.6 semi-transparent additive-feel glowing amber HUD tint.
-const CS_HUD_AMBER: Color = Color::srgba(1.0, 0.63, 0.0, 0.56);
+const CS_HUD_AMBER: Color = Color::srgba(1.0, 0.72, 0.12, 0.48);
 const CS_HUD_RED: Color = Color::srgba(1.0, 0.16, 0.12, 0.80);
 const CS_HUD_C4_GREEN: Color = Color::srgba(0.0, 165.0 / 255.0, 0.0, 0.82);
 const CS_HUD_BARTIME_ORANGE: Color = Color::srgb(1.0, 140.0 / 255.0, 0.0);
 const MAX_CARDS_PER_COL: usize = 6;
+
+/// Event fired when player acquires weapons, ammo, or defusal equipment (CHudHistoryResource parity).
+#[derive(Event, Debug, Clone)]
+pub struct ItemPickupEvent {
+    pub weapon_id: Option<WeaponId>,
+    pub ammo_caliber: Option<AmmoCaliber>,
+    pub is_defuser: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PickupHistoryEntry {
+    pub image: Handle<Image>,
+    pub lifetime: f32,
+}
+
+#[derive(Resource, Default)]
+pub struct HudHistoryResource {
+    pub entries: Vec<PickupHistoryEntry>,
+}
+
+#[derive(Component)]
+pub struct HudPickupHistoryRoot;
+
+#[derive(Component)]
+pub struct HudPickupSlot(pub usize);
 
 pub struct HudPlugin;
 
@@ -36,7 +61,10 @@ impl Plugin for HudPlugin {
         app.init_resource::<text_channels::ConsoleOverlayState>();
         app.init_resource::<text_channels::HudFeedState>();
         app.init_resource::<text_channels::CsGameRulesState>();
+        app.init_resource::<crate::combat::BuyMenuState>();
+        app.init_resource::<HudHistoryResource>();
         app.add_event::<text_channels::HudPrintEvent>();
+        app.add_event::<ItemPickupEvent>();
         app.add_plugins(radar::CsRadarPlugin);
         app.add_systems(Startup, setup_cs_hud);
         app.add_systems(
@@ -47,6 +75,7 @@ impl Plugin for HudPlugin {
                 text_channels::process_hud_print_events_system
                     .after(text_channels::update_cs_game_rules_system),
                 text_channels::update_console_and_dev_hud_system,
+                text_channels::update_buy_menu_system,
                 update_hud_health_armor_system,
                 update_hud_ammo_system,
                 update_hud_flashlight_system,
@@ -55,6 +84,7 @@ impl Plugin for HudPlugin {
                 update_hud_timer_system.after(text_channels::update_cs_game_rules_system),
                 update_hud_weapon_menu_system,
                 update_hud_bartime_and_flash_system,
+                update_hud_pickup_history_system,
                 update_dynamic_crosshair_system,
             ),
         );
@@ -169,6 +199,9 @@ pub struct HudSlotCardAmmoTrack(pub u8, pub usize);
 
 #[derive(Component)]
 pub struct HudSlotCardAmmoFill(pub u8, pub usize);
+
+#[derive(Component)]
+pub struct HudHealthCrossIcon;
 
 #[derive(Component)]
 pub struct HudHealthDigit(pub usize);
@@ -821,17 +854,21 @@ fn setup_cs_hud(
 
         // 1. Bottom-Left: Health Row (Cross + 3 digits, no leading zeros)
         commands
-            .spawn(Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(12.0),
-                left: Val::Px(32.0),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(2.0),
-                ..default()
-            })
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(12.0),
+                    left: Val::Px(32.0),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(2.0),
+                    ..default()
+                },
+                GlobalZIndex(25),
+            ))
             .with_children(|parent| {
                 parent.spawn((
+                    HudHealthCrossIcon,
                     ImageNode::new(atlas.cross.clone()).with_color(CS_HUD_AMBER),
                     Node {
                         width: Val::Px(24.0),
@@ -855,15 +892,18 @@ fn setup_cs_hud(
 
         // 2. Bottom-Left: Armor Row (Suit icon + 3 digits, driven by player.armor)
         commands
-            .spawn(Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(12.0),
-                left: Val::Px(150.0),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(2.0),
-                ..default()
-            })
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(12.0),
+                    left: Val::Px(150.0),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(2.0),
+                    ..default()
+                },
+                GlobalZIndex(25),
+            ))
             .with_children(|parent| {
                 parent.spawn((
                     ImageNode::new(atlas.suit_full.clone()).with_color(CS_HUD_AMBER),
@@ -889,16 +929,19 @@ fn setup_cs_hud(
 
         // 3. Bottom-Center: Round / C4 Countdown Timer (stopwatch + M:SS)
         commands
-            .spawn(Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(12.0),
-                width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(4.0),
-                ..default()
-            })
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(12.0),
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Row,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(4.0),
+                    ..default()
+                },
+                GlobalZIndex(25),
+            ))
             .with_children(|parent| {
                 parent.spawn((
                     HudTimerStopwatch,
@@ -980,6 +1023,7 @@ fn setup_cs_hud(
                     column_gap: Val::Px(3.0),
                     ..default()
                 },
+                GlobalZIndex(25),
             ))
             .with_children(|parent| {
                 parent.spawn((
@@ -1067,6 +1111,7 @@ fn setup_cs_hud(
                     align_items: AlignItems::Center,
                     ..default()
                 },
+                GlobalZIndex(25),
             ))
             .with_children(|parent| {
                 parent
@@ -1100,13 +1145,15 @@ fn setup_cs_hud(
                             },
                         ));
                     });
+                // CS 1.6: Flashlight light beam cone displayed to the right of the casing when active
                 parent.spawn((
                     HudFlashlightBeam,
-                    ImageNode::new(atlas.flash_beam.clone()).with_color(CS_HUD_AMBER),
+                    ImageNode::new(atlas.flash_beam.clone())
+                        .with_color(Color::srgba(1.0, 0.82, 0.05, 0.95)),
                     Node {
+                        display: Display::None,
                         width: Val::Px(16.0),
                         height: Val::Px(32.0),
-                        margin: UiRect::left(Val::Px(2.0)),
                         ..default()
                     },
                     Visibility::Hidden,
@@ -1125,6 +1172,7 @@ fn setup_cs_hud(
                     align_items: AlignItems::Center,
                     ..default()
                 },
+                GlobalZIndex(25),
             ))
             .with_children(|parent| {
                 parent.spawn((
@@ -1151,14 +1199,17 @@ fn setup_cs_hud(
 
         // 7. Left Mid-Screen (`left: 5px, bottom: 50%`, 37px upward step): CS 1.6 `CHudStatusIcons` stack
         commands
-            .spawn(Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(5.0),
-                bottom: Val::Percent(50.0),
-                flex_direction: FlexDirection::ColumnReverse,
-                row_gap: Val::Px(5.0),
-                ..default()
-            })
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(5.0),
+                    bottom: Val::Percent(50.0),
+                    flex_direction: FlexDirection::ColumnReverse,
+                    row_gap: Val::Px(5.0),
+                    ..default()
+                },
+                GlobalZIndex(25),
+            ))
             .with_children(|stack| {
                 for (kind, handle) in [
                     (StatusIconKind::BuyZone, atlas.buyzone_icon.clone()),
@@ -1196,7 +1247,7 @@ fn setup_cs_hud(
                     align_items: AlignItems::Stretch,
                     ..default()
                 },
-                GlobalZIndex(20),
+                GlobalZIndex(2),
                 Visibility::Hidden,
             ))
             .with_children(|scope| {
@@ -1223,29 +1274,6 @@ fn setup_cs_hud(
                                 left: Val::Px(0.0),
                                 top: Val::Px(0.0),
                                 width: Val::Percent(100.0),
-                                height: Val::Percent(100.0),
-                                ..default()
-                            },
-                        ));
-                        // 1px black crosshair lines across lens aperture
-                        lens.spawn((
-                            BackgroundColor(Color::BLACK),
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(0.0),
-                                top: Val::Percent(50.0),
-                                width: Val::Percent(100.0),
-                                height: Val::Px(1.5),
-                                ..default()
-                            },
-                        ));
-                        lens.spawn((
-                            BackgroundColor(Color::BLACK),
-                            Node {
-                                position_type: PositionType::Absolute,
-                                top: Val::Px(0.0),
-                                left: Val::Percent(50.0),
-                                width: Val::Px(1.5),
                                 height: Val::Percent(100.0),
                                 ..default()
                             },
@@ -1287,6 +1315,7 @@ fn setup_cs_hud(
                     column_gap: Val::Px(4.0),
                     ..default()
                 },
+                GlobalZIndex(25),
                 Visibility::Hidden,
             ))
             .with_children(|menu| {
@@ -1330,7 +1359,7 @@ fn setup_cs_hud(
                             for row in 0..MAX_CARDS_PER_COL {
                                 inactive_col.spawn((
                                     HudSlotInactiveBox(slot_idx, row),
-                                    BackgroundColor(Color::srgba(1.0, 0.65, 0.0, 0.38)),
+                                    BackgroundColor(Color::srgba(1.0, 0.65, 0.0, 0.20)),
                                     Node {
                                         width: Val::Px(20.0),
                                         height: Val::Px(20.0),
@@ -1354,7 +1383,7 @@ fn setup_cs_hud(
                                 active_col
                                     .spawn((
                                         HudSlotCard(slot_idx, row),
-                                        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+                                        BackgroundColor(Color::srgba(0.85, 0.55, 0.0, 0.28)),
                                         Node {
                                             width: Val::Px(170.0),
                                             height: Val::Px(45.0),
@@ -1484,7 +1513,7 @@ fn setup_cs_hud(
                     font_size: 20.0,
                     ..default()
                 },
-                TextColor(Color::srgba(0.95, 0.95, 0.95, 0.95)),
+                TextColor(Color::srgb(0.24, 0.91, 0.24)),
                 Visibility::Hidden,
             ));
         });
@@ -1504,6 +1533,36 @@ fn setup_cs_hud(
         GlobalZIndex(100),
         Visibility::Hidden,
     ));
+
+    // 12. Pickup history stack (CHudHistoryResource parity: right edge above ammo count)
+    commands
+        .spawn((
+            HudPickupHistoryRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(24.0),
+                bottom: Val::Px(75.0),
+                flex_direction: FlexDirection::ColumnReverse,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            GlobalZIndex(40),
+        ))
+        .with_children(|history_col| {
+            for slot_idx in 0..4 {
+                history_col.spawn((
+                    HudPickupSlot(slot_idx),
+                    ImageNode::default(),
+                    Node {
+                        width: Val::Auto,
+                        height: Val::Px(24.0),
+                        ..default()
+                    },
+                    Visibility::Hidden,
+                ));
+            }
+        });
 
     // 6. Dynamic Crosshair Root & 4 Lines
     // Fullscreen centered flexbox ensures crosshair is always at the true screen center
@@ -1608,6 +1667,14 @@ fn setup_cs_hud(
 fn update_hud_health_armor_system(
     atlas_opt: Option<Res<HudAtlas>>,
     player_query: Query<&PlayerController>,
+    mut hp_cross_query: Query<
+        &mut ImageNode,
+        (
+            With<HudHealthCrossIcon>,
+            Without<HudHealthDigit>,
+            Without<HudArmorDigit>,
+        ),
+    >,
     mut hp_digits: Query<
         (&HudHealthDigit, &mut ImageNode, &mut Visibility),
         Without<HudArmorDigit>,
@@ -1627,6 +1694,9 @@ fn update_hud_health_armor_system(
         } else {
             CS_HUD_AMBER
         };
+        for mut img in &mut hp_cross_query {
+            img.color = hp_color;
+        }
         for (digit, mut img, mut vis) in &mut hp_digits {
             let (d, show) = digit_at_and_visible(hp, digit.0, 3, true);
             img.image = atlas.digits[d].clone();
@@ -1671,7 +1741,7 @@ fn update_hud_flashlight_system(
         ),
     >,
     mut beam_query: Query<
-        (&mut ImageNode, &mut Visibility),
+        (&mut ImageNode, &mut Node, &mut Visibility),
         (
             With<HudFlashlightBeam>,
             Without<HudFlashlightFull>,
@@ -1684,41 +1754,38 @@ fn update_hud_flashlight_system(
     };
 
     let bat = fl.battery.clamp(0.0, 1.0);
-    // Color shifts smoothly amber -> orange-red -> red as flashlight drains below 25%
-    let bar_color = if bat < 0.25 {
-        Color::srgb(1.0, 0.16, 0.12)
-    } else if bat < 0.50 {
-        Color::srgb(1.0, 0.42, 0.05)
+    // Authentic CS 1.6 radiant gold-yellow HUD color, shifts to red below 20%
+    let bar_color = if bat < 0.20 {
+        Color::srgba(1.0, 0.16, 0.12, 0.95)
     } else {
-        Color::srgb(1.0, 0.68, 0.0)
+        Color::srgba(1.0, 0.82, 0.05, 0.95)
     };
 
-    for (mut beam_img, mut vis) in &mut beam_query {
-        beam_img.color = bar_color.with_alpha(0.85);
-        let target = if fl.is_on {
-            Visibility::Inherited
+    for (mut img, mut ui_node, mut vis) in &mut beam_query {
+        if fl.is_on {
+            *vis = Visibility::Inherited;
+            ui_node.display = Display::Flex;
+            img.color = bar_color.with_alpha(0.92);
         } else {
-            Visibility::Hidden
-        };
-        if *vis != target {
-            *vis = target;
+            *vis = Visibility::Hidden;
+            ui_node.display = Display::None;
         }
     }
 
-    let casing_alpha = if fl.is_on { 0.28 } else { 0.18 };
+    let casing_alpha = if fl.is_on { 0.92 } else { 0.28 };
     for mut node in &mut casing_query {
         node.color = bar_color.with_alpha(casing_alpha);
     }
 
-    let fill_alpha = if fl.is_on { 0.92 } else { 0.48 };
-    let offset = (2.0 + 27.0 * (1.0 - bat)).round();
+    let fill_alpha = if fl.is_on { 0.98 } else { 0.32 };
+    let offset = (32.0 * (1.0 - bat)).round();
     for (mut img, mut ui_node, mut vis) in &mut full_query {
-        if offset < 29.0 {
+        if offset < 32.0 {
             *vis = Visibility::Inherited;
             img.color = bar_color.with_alpha(fill_alpha);
-            img.rect = Some(Rect::new(offset, 0.0, 29.0, 32.0));
+            img.rect = Some(Rect::new(offset, 0.0, 32.0, 32.0));
             ui_node.left = Val::Px(offset);
-            ui_node.width = Val::Px((29.0 - offset).max(0.0));
+            ui_node.width = Val::Px((32.0 - offset).max(0.0));
         } else {
             *vis = Visibility::Hidden;
         }
@@ -1744,10 +1811,8 @@ fn update_hud_timer_system(
     } else {
         rules_state.rules.round_timer.max(0.0)
     };
-    let low_time = secs <= 20.0
-        && (planted_c4.iter().next().is_some()
-            || rules_state.rules.state == goldhub_game_cstrike::RoundState::RoundLive);
-    let color = if low_time {
+    let is_c4_planted = planted_c4.iter().next().is_some();
+    let color = if is_c4_planted && secs <= 15.0 {
         if ((time.elapsed_secs() * 4.0) as u32).is_multiple_of(2) {
             CS_HUD_RED
         } else {
@@ -2194,6 +2259,66 @@ fn update_hud_bartime_and_flash_system(
     }
 }
 
+/// Updates right-side weapon / ammo / equipment pickup history stack (`CHudHistoryResource` parity).
+#[allow(clippy::option_if_let_else)]
+pub fn update_hud_pickup_history_system(
+    time: Res<Time>,
+    atlas_opt: Option<Res<HudAtlas>>,
+    mut pickup_events: EventReader<ItemPickupEvent>,
+    mut history: ResMut<HudHistoryResource>,
+    mut slot_query: Query<(&HudPickupSlot, &mut ImageNode, &mut Visibility)>,
+) {
+    let dt = time.delta_secs();
+    if dt > 0.0 {
+        for entry in &mut history.entries {
+            entry.lifetime += dt;
+        }
+        history.entries.retain(|e| e.lifetime < 3.5);
+    }
+
+    if let Some(ref atlas) = atlas_opt {
+        for ev in pickup_events.read() {
+            let img_opt = if let Some(wid) = ev.weapon_id {
+                if wid == WeaponId::C4 {
+                    Some(atlas.c4_icon.clone())
+                } else {
+                    atlas.weapon_cards.get(&wid).map(|c| c.normal.clone())
+                }
+            } else if let Some(cal) = ev.ammo_caliber {
+                atlas.ammo_icons.get(&cal).cloned()
+            } else if ev.is_defuser {
+                Some(atlas.defuser_icon.clone())
+            } else {
+                None
+            };
+
+            if let Some(img) = img_opt {
+                history.entries.insert(
+                    0,
+                    PickupHistoryEntry {
+                        image: img,
+                        lifetime: 0.0,
+                    },
+                );
+                if history.entries.len() > 4 {
+                    history.entries.truncate(4);
+                }
+            }
+        }
+    }
+
+    for (slot, mut img_node, mut vis) in &mut slot_query {
+        if let Some(entry) = history.entries.get(slot.0) {
+            let fade = ((3.5 - entry.lifetime) / 0.8).clamp(0.0, 1.0);
+            img_node.image = entry.image.clone();
+            img_node.color = Color::srgba(1.0, 0.72, 0.12, 0.95 * fade);
+            *vis = Visibility::Inherited;
+        } else {
+            *vis = Visibility::Hidden;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_dynamic_crosshair_system(
     mode: Res<CameraControlMode>,
@@ -2264,7 +2389,7 @@ fn update_dynamic_crosshair_system(
         }
     }
 
-    if !first_person_player || is_sniper {
+    if !first_person_player || !state.id.has_crosshair() || scope_active {
         *root_vis = Visibility::Hidden;
         return;
     }
@@ -2340,5 +2465,147 @@ mod tests {
                 "Missing HUD card spec for {wid:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_hud_health_cross_and_digits_color_sync() {
+        let mut app = App::new();
+        app.add_plugins(bevy::time::TimePlugin);
+
+        let dummy_img = Handle::default();
+        let atlas = HudAtlas {
+            digits: std::array::from_fn(|_| dummy_img.clone()),
+            divider: dummy_img.clone(),
+            cross: dummy_img.clone(),
+            suit_full: dummy_img.clone(),
+            flash_empty: dummy_img.clone(),
+            flash_full: dummy_img.clone(),
+            flash_beam: dummy_img.clone(),
+            dollar: dummy_img.clone(),
+            c4_icon: dummy_img.clone(),
+            defuser_icon: dummy_img.clone(),
+            buyzone_icon: dummy_img.clone(),
+            rescue_icon: dummy_img.clone(),
+            escape_icon: dummy_img.clone(),
+            vipsafety_icon: dummy_img.clone(),
+            stopwatch: dummy_img.clone(),
+            buckets: std::array::from_fn(|_| dummy_img.clone()),
+            selection_frame: None,
+            sniper_scope: None,
+            scope_bezel: dummy_img.clone(),
+            ammo_icons: HashMap::new(),
+            weapon_cards: HashMap::new(),
+        };
+        app.insert_resource(atlas);
+
+        let cross_ent = app
+            .world_mut()
+            .spawn((
+                HudHealthCrossIcon,
+                ImageNode::new(dummy_img.clone()).with_color(CS_HUD_AMBER),
+            ))
+            .id();
+
+        let digit_ent = app
+            .world_mut()
+            .spawn((
+                HudHealthDigit(2),
+                ImageNode::new(dummy_img).with_color(CS_HUD_AMBER),
+                Visibility::Inherited,
+            ))
+            .id();
+
+        let player_ent = app
+            .world_mut()
+            .spawn(PlayerController {
+                health: 100.0,
+                ..default()
+            })
+            .id();
+
+        app.add_systems(Update, update_hud_health_armor_system);
+        app.update();
+
+        // Full HP -> amber cross and digits
+        assert_eq!(
+            app.world().get::<ImageNode>(cross_ent).unwrap().color,
+            CS_HUD_AMBER
+        );
+        assert_eq!(
+            app.world().get::<ImageNode>(digit_ent).unwrap().color,
+            CS_HUD_AMBER
+        );
+
+        // Low HP (<= 25) -> cross and digits turn red in sync
+        app.world_mut()
+            .get_mut::<PlayerController>(player_ent)
+            .unwrap()
+            .health = 20.0;
+        app.update();
+
+        assert_eq!(
+            app.world().get::<ImageNode>(cross_ent).unwrap().color,
+            CS_HUD_RED
+        );
+        assert_eq!(
+            app.world().get::<ImageNode>(digit_ent).unwrap().color,
+            CS_HUD_RED
+        );
+    }
+
+    #[test]
+    fn test_hud_pickup_history_stack_and_fade() {
+        let mut app = App::new();
+        app.add_plugins(bevy::time::TimePlugin);
+        app.init_resource::<HudHistoryResource>();
+        app.add_event::<ItemPickupEvent>();
+
+        let dummy_img = Handle::default();
+        let atlas = HudAtlas {
+            digits: std::array::from_fn(|_| dummy_img.clone()),
+            divider: dummy_img.clone(),
+            cross: dummy_img.clone(),
+            suit_full: dummy_img.clone(),
+            flash_empty: dummy_img.clone(),
+            flash_full: dummy_img.clone(),
+            flash_beam: dummy_img.clone(),
+            dollar: dummy_img.clone(),
+            c4_icon: dummy_img.clone(),
+            defuser_icon: dummy_img.clone(),
+            buyzone_icon: dummy_img.clone(),
+            rescue_icon: dummy_img.clone(),
+            escape_icon: dummy_img.clone(),
+            vipsafety_icon: dummy_img.clone(),
+            stopwatch: dummy_img.clone(),
+            buckets: std::array::from_fn(|_| dummy_img.clone()),
+            selection_frame: None,
+            sniper_scope: None,
+            scope_bezel: dummy_img,
+            ammo_icons: HashMap::new(),
+            weapon_cards: HashMap::new(),
+        };
+        app.insert_resource(atlas);
+
+        let slot0 = app
+            .world_mut()
+            .spawn((HudPickupSlot(0), ImageNode::default(), Visibility::Hidden))
+            .id();
+
+        app.add_systems(Update, update_hud_pickup_history_system);
+
+        app.world_mut().send_event(ItemPickupEvent {
+            weapon_id: Some(WeaponId::C4),
+            ammo_caliber: None,
+            is_defuser: false,
+        });
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(slot0).unwrap(),
+            Visibility::Inherited
+        );
+        let history = app.world().resource::<HudHistoryResource>();
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].lifetime, 0.0);
     }
 }

@@ -3,6 +3,10 @@ use goldhub_net::protocol::oob::OobMessage;
 use std::time::{Duration, Instant};
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "wire-ring virtual memory mapping not supported on macOS"
+)]
 fn test_loopback_oob_handshake() {
     let mut client = NetConnection::new(64 * 1024).expect("create client connection");
     let server = NetConnection::new(64 * 1024).expect("create server connection");
@@ -64,6 +68,10 @@ fn test_loopback_oob_handshake() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "wire-ring virtual memory mapping not supported on macOS"
+)]
 fn test_loopback_netchannel_packets_and_jitter_buffer() {
     let mut client = NetConnection::new(64 * 1024).expect("create client connection");
     let mut server = NetConnection::new(64 * 1024).expect("create server connection");

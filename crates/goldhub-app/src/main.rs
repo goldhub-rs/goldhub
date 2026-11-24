@@ -1,5 +1,7 @@
 //! GoldHub Process Entrypoint.
 
+#![windows_subsystem = "windows"]
+
 use goldhub_app::build_goldhub_app;
 use proc_safety::ProcessSafetyBuilder;
 
@@ -7,7 +9,6 @@ fn main() {
     // 1. Process Hardening & Zero-Trust Security Boundary
     if let Err(err) = ProcessSafetyBuilder::default()
         .hide_current_thread()
-        .disable_core_dumps()
         .best_effort(true)
         .commit()
     {

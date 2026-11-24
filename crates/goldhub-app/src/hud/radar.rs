@@ -294,6 +294,7 @@ fn setup_classic_radar_system(
                 height: Val::Px(RADAR_SIZE_PX),
                 ..default()
             },
+            GlobalZIndex(25),
         ))
         .with_children(|dial| {
             // Local player center marker (small subtle cross center pip)
