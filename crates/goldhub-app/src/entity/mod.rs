@@ -180,6 +180,9 @@ pub struct EnvRenderEntity {
     pub renderamt: u32,
 }
 
+const DOOR_AUDIO_SPATIAL_SCALE: f32 = 1.0 / 128.0;
+const DOOR_AUDIO_VOLUME: f32 = 1.35;
+
 /// Spatial or ambient audio entity (`ambient_generic`).
 #[derive(Component, Debug, Clone)]
 pub struct AmbientAudioEntity {
@@ -187,8 +190,40 @@ pub struct AmbientAudioEntity {
     pub message: String,
     pub is_looping: bool,
     pub is_playing: bool,
+    pub starts_active: bool,
+    /// `None` for map-wide (`everywhere`) playback, `Some(scale)` for spatial attenuation.
+    pub spatial_scale: Option<f32>,
+    pub volume: f32,
     pub player_entity: Option<Entity>,
     pub position: Vec3,
+}
+
+fn spawn_ambient_player(
+    commands: &mut Commands,
+    handle: Handle<AudioSource>,
+    is_looping: bool,
+    spatial_scale: Option<f32>,
+    volume: f32,
+    position: Vec3,
+) -> Entity {
+    let mut settings = if is_looping {
+        PlaybackSettings::LOOP
+    } else {
+        PlaybackSettings::DESPAWN
+    }
+    .with_volume(bevy::audio::Volume::new(volume));
+    if let Some(scale) = spatial_scale {
+        settings = settings
+            .with_spatial(true)
+            .with_spatial_scale(bevy::audio::SpatialScale::new(scale));
+    }
+    commands
+        .spawn((
+            AudioPlayer::new(handle),
+            settings,
+            Transform::from_translation(position),
+        ))
+        .id()
 }
 
 /// Gib and particle shooter entity (`env_shooter`).
@@ -386,7 +421,11 @@ impl Plugin for EntityRuntimePlugin {
 }
 
 /// Spawns interactive entities from the active BSP entity lump.
-#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    clippy::too_many_arguments
+)]
 pub fn spawn_bsp_interactive_entities(
     mut commands: Commands,
     entities_res: Option<Res<BspEntitiesLump>>,
@@ -395,6 +434,10 @@ pub fn spawn_bsp_interactive_entities(
     search_paths: Res<GameSearchPaths>,
     mut audio_bank: ResMut<GoldSrcAudioBank>,
     mut audio_sources: ResMut<Assets<AudioSource>>,
+    mut sprite_store: ResMut<crate::sprite::SpriteStore>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(ref entities_lump) = entities_res else {
         return;
@@ -415,6 +458,8 @@ pub fn spawn_bsp_interactive_entities(
         let mut material_str = "";
         let mut rendermode_str = "";
         let mut renderamt_str = "";
+        let mut rendercolor_str = "";
+        let mut scale_str = "";
         let mut shootmodel_str = "";
         let mut gibs_str = "";
         let mut variance_str = "";
@@ -447,6 +492,8 @@ pub fn spawn_bsp_interactive_entities(
                         "material" => material_str = parts[3],
                         "rendermode" => rendermode_str = parts[3],
                         "renderamt" => renderamt_str = parts[3],
+                        "rendercolor" => rendercolor_str = parts[3],
+                        "scale" => scale_str = parts[3],
                         "shootmodel" => shootmodel_str = parts[3],
                         "m_iGibs" => gibs_str = parts[3],
                         "m_flVariance" => variance_str = parts[3],
@@ -712,11 +759,18 @@ pub fn spawn_bsp_interactive_entities(
                     let is_not_looping = (spawnflags & 32) != 0;
                     let is_looping = !is_not_looping;
 
-                    // Initial volume (GoldSrc health 1..10 where 10 = 100%)
-                    let vol = (health_str.parse::<f32>().unwrap_or(10.0) / 10.0).clamp(0.05, 1.0);
-
-                    // If entity is marked not-looping or start-off, it must only play when triggered
+                    let vol = (health_str.parse::<f32>().unwrap_or(10.0) / 10.0).clamp(0.15, 1.0);
                     let starts_active = !is_start_off && !is_not_looping;
+                    // GoldSrc ATTN_IDLE (500u), ATTN_STATIC (800u), ATTN_NORM (1250u)
+                    let spatial_scale = if is_everywhere {
+                        None
+                    } else if is_small_radius {
+                        Some(1.0 / 32.0)
+                    } else if is_large_radius {
+                        Some(1.0 / 96.0)
+                    } else {
+                        Some(1.0 / 56.0)
+                    };
 
                     let mut player_entity = None;
                     let is_playing = starts_active;
@@ -728,34 +782,14 @@ pub fn spawn_bsp_interactive_entities(
                             &mut audio_sources,
                         )
                     {
-                        let mut settings = if is_looping {
-                            PlaybackSettings::LOOP
-                        } else {
-                            PlaybackSettings::DESPAWN
-                        };
-                        if is_everywhere {
-                            settings = settings.with_volume(bevy::audio::Volume::new(vol));
-                        } else {
-                            let scale = if is_small_radius {
-                                1.0 / 4.0 // Drops off rapidly within ~150u (e.g. sheep.wav)
-                            } else if is_large_radius {
-                                1.0 / 64.0 // Audible throughout building (e.g. Opera.wav)
-                            } else {
-                                1.0 / 16.0 // Medium / static default
-                            };
-                            settings = settings
-                                .with_spatial(true)
-                                .with_spatial_scale(bevy::audio::SpatialScale::new(scale))
-                                .with_volume(bevy::audio::Volume::new(vol));
-                        }
-
-                        let p = commands
-                            .spawn((
-                                AudioPlayer::new(handle),
-                                settings,
-                                Transform::from_translation(bevy_origin),
-                            ))
-                            .id();
+                        let p = spawn_ambient_player(
+                            &mut commands,
+                            handle,
+                            is_looping,
+                            spatial_scale,
+                            vol,
+                            bevy_origin,
+                        );
                         player_entity = Some(p);
                         tracing::info!(
                             message = message_str,
@@ -770,10 +804,41 @@ pub fn spawn_bsp_interactive_entities(
                         message: message_str.to_string(),
                         is_looping,
                         is_playing,
+                        starts_active,
+                        spatial_scale,
+                        volume: vol,
                         player_entity,
                         position: bevy_origin,
                     });
                 }
+            }
+            "env_glow" => {
+                let mut rgb = [255u8; 3];
+                if !rendercolor_str.is_empty() {
+                    let mut parts = rendercolor_str.split_whitespace();
+                    if let (Some(rs), Some(gs), Some(bs)) =
+                        (parts.next(), parts.next(), parts.next())
+                    {
+                        rgb[0] = rs.parse::<u8>().unwrap_or(255);
+                        rgb[1] = gs.parse::<u8>().unwrap_or(255);
+                        rgb[2] = bs.parse::<u8>().unwrap_or(255);
+                    }
+                }
+                let amt = renderamt_str.parse::<u8>().unwrap_or(150);
+                let glow_scale = scale_str.parse::<f32>().unwrap_or(1.0);
+                crate::sprite::spawn_env_glow_sprite(
+                    &mut commands,
+                    bevy_origin,
+                    model_str,
+                    rgb,
+                    amt,
+                    glow_scale,
+                    &mut sprite_store,
+                    &search_paths,
+                    &mut images,
+                    &mut materials,
+                    &mut meshes,
+                );
             }
             "env_shooter" => {
                 let gibs = gibs_str.parse::<u32>().unwrap_or(10).max(1);
@@ -1005,7 +1070,11 @@ fn get_submodel_bounds_or_fallback(model_str: &str, fallback_origin: Vec3) -> (V
 }
 
 /// Handles trigger dispatch when a target name is fired.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::type_complexity
+)]
 pub fn handle_fire_target_events(
     mut commands: Commands,
     mut events: EventReader<FireTargetEvent>,
@@ -1025,6 +1094,7 @@ pub fn handle_fire_target_events(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut door_query: Query<&mut DoorEntity>,
+    mut sinks: Query<&mut AudioSink>,
 ) {
     for ev in events.read() {
         if ev.target.is_empty() {
@@ -1058,29 +1128,34 @@ pub fn handle_fire_target_events(
                 if ambient.is_playing {
                     // Turn off looping sound (e.g. Radio opera music)
                     if let Some(player_ent) = ambient.player_entity.take() {
-                        commands.entity(player_ent).despawn();
+                        if let Ok(sink) = sinks.get_mut(player_ent) {
+                            sink.stop();
+                        }
+                        commands.entity(player_ent).despawn_recursive();
                     }
                     ambient.is_playing = false;
                     tracing::info!(
                         sound = ambient.message,
                         "Stopped ambient_generic looping playback"
                     );
-                } else {
-                    // One-shot triggered playback (e.g. chicken death sound)
-                    if let Some(handle) = audio_bank.get_or_load_sound(
-                        &ambient.message,
-                        &search_paths.dirs,
-                        &mut audio_sources,
-                    ) {
-                        commands.spawn((
-                            AudioPlayer::new(handle),
-                            PlaybackSettings::DESPAWN
-                                .with_spatial(true)
-                                .with_spatial_scale(bevy::audio::SpatialScale::new(1.0 / 64.0)),
-                            Transform::from_translation(ambient.position),
-                        ));
-                        tracing::info!(sound = ambient.message, "Triggered one-shot ambient sound");
+                } else if let Some(handle) = audio_bank.get_or_load_sound(
+                    &ambient.message,
+                    &search_paths.dirs,
+                    &mut audio_sources,
+                ) {
+                    let spawned = spawn_ambient_player(
+                        &mut commands,
+                        handle,
+                        ambient.is_looping,
+                        ambient.spatial_scale,
+                        ambient.volume,
+                        ambient.position,
+                    );
+                    if ambient.is_looping {
+                        ambient.player_entity = Some(spawned);
+                        ambient.is_playing = true;
                     }
+                    tracing::info!(sound = ambient.message, "Triggered ambient_generic sound");
                 }
             }
         }
@@ -1116,7 +1191,12 @@ pub fn handle_fire_target_events(
                         {
                             commands.spawn((
                                 AudioPlayer::new(h),
-                                PlaybackSettings::DESPAWN.with_spatial(true),
+                                PlaybackSettings::DESPAWN
+                                    .with_spatial(true)
+                                    .with_spatial_scale(bevy::audio::SpatialScale::new(
+                                        DOOR_AUDIO_SPATIAL_SCALE,
+                                    ))
+                                    .with_volume(bevy::audio::Volume::new(DOOR_AUDIO_VOLUME)),
                                 Transform::from_translation(center),
                             ));
                         }
@@ -1146,29 +1226,13 @@ pub fn handle_break_entity_events(
     mut submodel_query: Query<(&BspSubmodelMesh, &mut Visibility)>,
     mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
     mut model_store: ResMut<StudioModelStore>,
+    mut sprite_store: ResMut<crate::sprite::SpriteStore>,
     search_paths: Res<GameSearchPaths>,
     mut audio_bank: ResMut<GoldSrcAudioBank>,
     mut audio_sources: ResMut<Assets<AudioSource>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut player_query: Query<(
-        &Transform,
-        &mut crate::player::PlayerController,
-        Option<&mut crate::combat::PlayerRecoil>,
-    )>,
-    mut hostage_query: Query<
-        (
-            &mut crate::studio::world_entity::HostageEntity,
-            &mut crate::studio::animation::StudioAnimatedModel,
-            &mut crate::studio::world_entity::EntityCollisionBounds,
-            &GlobalTransform,
-        ),
-        (
-            Without<crate::studio::viewmodel::ViewModelWeapon>,
-            Without<crate::player::PlayerController>,
-        ),
-    >,
 ) {
     for ev in events.read() {
         if !ev.model.is_empty() {
@@ -1260,55 +1324,30 @@ pub fn handle_break_entity_events(
                 },
             ));
 
-            // Explosion flash point light and genuine zerogxplode.spr sprite provide authentic GoldSrc visual
-            let _ = &mut meshes;
+            // 3. GoldSrc zerogxplode.spr explosion flash (without player/hostage damage or camera kick)
+            crate::sprite::spawn_breakable_explosion_sprite(
+                &mut commands,
+                ev.origin,
+                &mut sprite_store,
+                &search_paths,
+                &mut images,
+                &mut materials,
+                &mut meshes,
+            );
 
-            // 5. Blast camera kick on player (no physical knockback on breakables matching CS 1.6)
-            for (p_trans, _p_ctrl, recoil_opt) in &mut player_query {
-                let p_pos = p_trans.translation;
-                let dist = ev.origin.distance(p_pos);
-                let blast_radius = 240.0_f32;
-                if dist < blast_radius {
-                    let frac = (1.0 - (dist / blast_radius)).clamp(0.0, 1.0);
-                    if let Some(mut recoil) = recoil_opt {
-                        recoil.punch_pitch -= 3.0 * frac;
-                        let yaw_kick = if ((dist * 10.0) as usize).is_multiple_of(2) {
-                            1.5
-                        } else {
-                            -1.5
-                        };
-                        recoil.punch_yaw += yaw_kick * frac;
-                    }
-                }
+            // 4. High-velocity bursting gibs (blast impulse 320 u/s)
+            if ev.material == BreakableMaterial::Flesh {
+                crate::sprite::spawn_blood_sprite(
+                    &mut commands,
+                    ev.origin + Vec3::Y * 8.0,
+                    &mut sprite_store,
+                    &search_paths,
+                    &mut images,
+                    &mut materials,
+                    &mut meshes,
+                );
             }
 
-            // 6. Blast damage on hostages
-            for (mut hostage, mut h_anim, mut bounds, h_trans) in &mut hostage_query {
-                let h_pos = h_trans.translation();
-                let dist = ev.origin.distance(h_pos);
-                let blast_radius = 320.0_f32;
-                if dist < blast_radius && !hostage.is_dead {
-                    let frac = (1.0 - (dist / blast_radius)).clamp(0.0, 1.0);
-                    hostage.health -= 120.0 * frac;
-                    if hostage.health > 0.0 {
-                        h_anim.set_sequence(7, 30.0, false);
-                    } else {
-                        hostage.is_dead = true;
-                        h_anim.set_sequence(31, 24.0, false);
-                        bounds.mins = Vec3::ZERO;
-                        bounds.maxs = Vec3::ZERO;
-                        if let Some(h) = audio_bank.get_or_load_sound(
-                            "radio/hosdown.wav",
-                            &search_paths.dirs,
-                            &mut audio_sources,
-                        ) {
-                            commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
-                        }
-                    }
-                }
-            }
-
-            // 7. High-velocity bursting gibs (blast impulse 320 u/s)
             let shooter = EnvShooterEntity {
                 targetname: String::new(),
                 shootmodel: gib_model.to_string(),
@@ -1365,6 +1404,18 @@ pub fn handle_break_entity_events(
                         .with_volume(bevy::audio::Volume::new(1.0)),
                     Transform::from_translation(ev.origin),
                 ));
+            }
+
+            if ev.material == BreakableMaterial::Flesh {
+                crate::sprite::spawn_blood_sprite(
+                    &mut commands,
+                    ev.origin + Vec3::Y * 8.0,
+                    &mut sprite_store,
+                    &search_paths,
+                    &mut images,
+                    &mut materials,
+                    &mut meshes,
+                );
             }
 
             let shooter = EnvShooterEntity {
@@ -1453,7 +1504,7 @@ fn spawn_gibs(
                     on_ground: false,
                 },
                 Transform::from_translation(spawn_pos)
-                    .with_scale(Vec3::splat(rng.range_f32(0.08, 0.14))),
+                    .with_scale(Vec3::splat(rng.range_f32(0.85, 1.15))),
                 Visibility::default(),
             ))
             .id();
@@ -2092,7 +2143,12 @@ pub fn update_doors_system(
                     {
                         commands.spawn((
                             AudioPlayer::new(h),
-                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            PlaybackSettings::DESPAWN
+                                .with_spatial(true)
+                                .with_spatial_scale(bevy::audio::SpatialScale::new(
+                                    DOOR_AUDIO_SPATIAL_SCALE,
+                                ))
+                                .with_volume(bevy::audio::Volume::new(DOOR_AUDIO_VOLUME)),
                             Transform::from_translation((door.bmin + door.bmax) * 0.5),
                         ));
                     }
@@ -2112,7 +2168,12 @@ pub fn update_doors_system(
                         {
                             commands.spawn((
                                 AudioPlayer::new(h),
-                                PlaybackSettings::DESPAWN.with_spatial(true),
+                                PlaybackSettings::DESPAWN
+                                    .with_spatial(true)
+                                    .with_spatial_scale(bevy::audio::SpatialScale::new(
+                                        DOOR_AUDIO_SPATIAL_SCALE,
+                                    ))
+                                    .with_volume(bevy::audio::Volume::new(DOOR_AUDIO_VOLUME)),
                                 Transform::from_translation((door.bmin + door.bmax) * 0.5),
                             ));
                         }
@@ -2167,7 +2228,12 @@ pub fn update_doors_system(
                     {
                         commands.spawn((
                             AudioPlayer::new(h),
-                            PlaybackSettings::DESPAWN.with_spatial(true),
+                            PlaybackSettings::DESPAWN
+                                .with_spatial(true)
+                                .with_spatial_scale(bevy::audio::SpatialScale::new(
+                                    DOOR_AUDIO_SPATIAL_SCALE,
+                                ))
+                                .with_volume(bevy::audio::Volume::new(DOOR_AUDIO_VOLUME)),
                             Transform::from_translation((door.bmin + door.bmax) * 0.5),
                         ));
                     }
@@ -2304,7 +2370,12 @@ pub fn interact_door_system(
                         {
                             commands.spawn((
                                 AudioPlayer::new(h),
-                                PlaybackSettings::DESPAWN.with_spatial(true),
+                                PlaybackSettings::DESPAWN
+                                    .with_spatial(true)
+                                    .with_spatial_scale(bevy::audio::SpatialScale::new(
+                                        DOOR_AUDIO_SPATIAL_SCALE,
+                                    ))
+                                    .with_volume(bevy::audio::Volume::new(DOOR_AUDIO_VOLUME)),
                                 Transform::from_translation(center),
                             ));
                         }
@@ -2605,8 +2676,56 @@ pub fn update_defuse_kit_pickups_system(
     }
 }
 
+/// SystemParam bundle grouping round-reset queries and asset stores to respect Bevy's 16-param cap.
+#[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)]
+pub struct RoundResetEntityParams<'w, 's> {
+    pub scenario_map: Option<ResMut<'w, ScenarioMapData>>,
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub materials: ResMut<'w, Assets<StandardMaterial>>,
+    pub decals_q: Query<'w, 's, (Entity, &'static crate::sprite::BulletHoleDecal)>,
+    pub gibs_q: Query<'w, 's, Entity, With<GibParticle>>,
+    pub smoke_q: Query<
+        'w,
+        's,
+        (
+            Entity,
+            Option<&'static crate::sprite::OwnedParticleMaterial>,
+        ),
+        With<crate::sprite::SmokeBillboardParticle>,
+    >,
+    pub studio_props_q: Query<
+        'w,
+        's,
+        (
+            &'static WorldStudioEntity,
+            &'static mut Visibility,
+            &'static mut crate::studio::world_entity::EntityCollisionBounds,
+        ),
+        (
+            Without<BspSubmodelMesh>,
+            Without<crate::studio::world_entity::HostageEntity>,
+        ),
+    >,
+}
+
+/// SystemParam bundle grouping round-reset ambient audio queries and assets.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct RoundResetAudioParams<'w, 's> {
+    pub ambient_q: Query<'w, 's, &'static mut AmbientAudioEntity>,
+    pub sinks: Query<'w, 's, &'static mut AudioSink>,
+    pub search_paths: Option<Res<'w, GameSearchPaths>>,
+    pub audio_bank: Option<ResMut<'w, GoldSrcAudioBank>>,
+    pub audio_sources: Option<ResMut<'w, Assets<AudioSource>>>,
+    pub collision_res: Option<ResMut<'w, crate::player::LevelCollisionResource>>,
+}
+
 /// Executes ReGameDLL `CleanUpMap` for breakables, doors, decals, gibs, smoke, and triggers on `RoundResetEvent`.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::type_complexity
+)]
 pub fn handle_round_reset_entities_system(
     mut commands: Commands,
     mut events: EventReader<RoundResetEvent>,
@@ -2621,12 +2740,8 @@ pub fn handle_round_reset_entities_system(
     mut doors: Query<&mut DoorEntity>,
     mut triggers_once: Query<&mut TriggerOnceEntity>,
     mut pickups: Query<&mut DefuseKitPickup>,
-    mut scenario_map: Option<ResMut<ScenarioMapData>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    decals_q: Query<(Entity, &crate::sprite::BulletHoleDecal)>,
-    gibs_q: Query<Entity, With<GibParticle>>,
-    smoke_q: Query<Entity, With<crate::sprite::SmokeBillboardParticle>>,
-    mut collision_res: Option<ResMut<crate::player::LevelCollisionResource>>,
+    mut p_fx: RoundResetEntityParams,
+    mut p_audio: RoundResetAudioParams,
 ) {
     let mut triggered = false;
     for _ in events.read() {
@@ -2635,7 +2750,7 @@ pub fn handle_round_reset_entities_system(
     if !triggered {
         return;
     }
-    if let Some(ref mut map_data) = scenario_map {
+    if let Some(ref mut map_data) = p_fx.scenario_map {
         map_data.hostages_rescued = 0;
         map_data.bomb_defused = false;
         map_data.bomb_exploded = false;
@@ -2651,7 +2766,7 @@ pub fn handle_round_reset_entities_system(
                     *vis = Visibility::Inherited;
                 }
             }
-            if let Some(ref mut col_res) = collision_res
+            if let Some(ref mut col_res) = p_audio.collision_res
                 && let Some(ref mut col_model) = col_res.model
                 && let Some(sub_idx_str) = b.model.strip_prefix('*')
                 && let Ok(sub_idx) = sub_idx_str.parse::<usize>()
@@ -2679,7 +2794,7 @@ pub fn handle_round_reset_entities_system(
                 tf.rotation = vis_rot;
             }
         }
-        if let Some(ref mut col_res) = collision_res
+        if let Some(ref mut col_res) = p_audio.collision_res
             && let Some(ref mut col_model) = col_res.model
             && let Some(sub_idx_str) = door.model.strip_prefix('*')
             && let Ok(sub_idx) = sub_idx_str.parse::<usize>()
@@ -2707,14 +2822,55 @@ pub fn handle_round_reset_entities_system(
     for mut p in &mut pickups {
         p.collected = false;
     }
-    for (e, decal) in &decals_q {
-        crate::sprite::despawn_decal_entity(&mut commands, Some(&mut meshes), e, decal);
+    for (e, decal) in &p_fx.decals_q {
+        crate::sprite::despawn_decal_entity(&mut commands, Some(&mut p_fx.meshes), e, decal);
     }
-    for e in &gibs_q {
+    for e in &p_fx.gibs_q {
         commands.entity(e).despawn_recursive();
     }
-    for e in &smoke_q {
+    for (e, owned_mat) in &p_fx.smoke_q {
+        if let Some(owned) = owned_mat {
+            p_fx.materials.remove(&owned.0);
+        }
         commands.entity(e).despawn_recursive();
+    }
+
+    // 4. Restore env_render-hidden studio props (e.g. cs_italy chickens, bottles) and looping ambient audio
+    for (studio_ent, mut vis, mut bounds) in &mut p_fx.studio_props_q {
+        *vis = Visibility::Inherited;
+        bounds.mins = studio_ent.home_mins;
+        bounds.maxs = studio_ent.home_maxs;
+    }
+    for mut ambient in &mut p_audio.ambient_q {
+        if ambient.is_playing && !ambient.starts_active {
+            if let Some(pe) = ambient.player_entity.take() {
+                if let Ok(sink) = p_audio.sinks.get_mut(pe) {
+                    sink.stop();
+                }
+                commands.entity(pe).despawn_recursive();
+            }
+            ambient.is_playing = false;
+        } else if !ambient.is_playing
+            && ambient.starts_active
+            && ambient.is_looping
+            && let (Some(paths), Some(bank), Some(sources)) = (
+                p_audio.search_paths.as_deref(),
+                p_audio.audio_bank.as_deref_mut(),
+                p_audio.audio_sources.as_deref_mut(),
+            )
+            && let Some(h) = bank.get_or_load_sound(&ambient.message, &paths.dirs, sources)
+        {
+            let pe = spawn_ambient_player(
+                &mut commands,
+                h,
+                true,
+                ambient.spatial_scale,
+                ambient.volume,
+                ambient.position,
+            );
+            ambient.player_entity = Some(pe);
+            ambient.is_playing = true;
+        }
     }
 }
 
@@ -2806,5 +2962,139 @@ mod tests {
         let push_v = push.expect("Rotating door leaf must push overlapping player");
         assert!(push_v.length() > 0.5);
         assert_eq!(push_v.y, 0.0);
+    }
+
+    #[test]
+    fn test_round_reset_restores_studio_props_and_frees_smoke_materials() {
+        let mut app = App::new();
+        app.add_event::<RoundResetEvent>();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.add_systems(Update, handle_round_reset_entities_system);
+
+        let mat_handle = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+
+        let prop_ent = app
+            .world_mut()
+            .spawn((
+                WorldStudioEntity {
+                    classname: "cycler_sprite".into(),
+                    model_path: "models/chick.mdl".into(),
+                    targetname: "chicken1".into(),
+                    is_solid: false,
+                    home_mins: Vec3::new(-8.0, 0.0, -8.0),
+                    home_maxs: Vec3::new(8.0, 16.0, 8.0),
+                },
+                crate::studio::world_entity::EntityCollisionBounds {
+                    mins: Vec3::ZERO,
+                    maxs: Vec3::ZERO,
+                },
+                Visibility::Hidden,
+            ))
+            .id();
+
+        let smoke_ent = app
+            .world_mut()
+            .spawn((
+                crate::sprite::SmokeBillboardParticle {
+                    velocity: Vec3::ZERO,
+                    lifetime: 1.0,
+                    max_lifetime: 10.0,
+                    hold_fade_at: 5.0,
+                    start_scale: 1.0,
+                    end_scale: 2.0,
+                    grow_duration: 1.0,
+                    base_rgb: [1.0; 3],
+                    base_alpha: 0.9,
+                },
+                crate::sprite::OwnedParticleMaterial(mat_handle.clone()),
+            ))
+            .id();
+
+        app.world_mut().send_event(RoundResetEvent);
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(prop_ent).unwrap(),
+            Visibility::Inherited
+        );
+        let restored_bounds = app
+            .world()
+            .get::<crate::studio::world_entity::EntityCollisionBounds>(prop_ent)
+            .unwrap();
+        assert_eq!(restored_bounds.maxs, Vec3::new(8.0, 16.0, 8.0));
+        assert!(app.world().get_entity(smoke_ent).is_err());
+        assert!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&mat_handle)
+                .is_none(),
+            "Owned smoke material must be removed on round reset"
+        );
+    }
+
+    #[test]
+    fn test_break_entity_explosion_causes_no_hostage_damage_or_recoil() {
+        let mut app = App::new();
+        app.add_event::<BreakEntityEvent>();
+        app.init_resource::<StudioModelStore>();
+        app.init_resource::<crate::sprite::SpriteStore>();
+        app.init_resource::<GameSearchPaths>();
+        app.init_resource::<GoldSrcAudioBank>();
+        app.init_resource::<Assets<AudioSource>>();
+        app.init_resource::<Assets<Image>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Mesh>>();
+        app.add_systems(Update, handle_break_entity_events);
+
+        let hostage_ent = app
+            .world_mut()
+            .spawn(crate::studio::world_entity::HostageEntity {
+                health: 100.0,
+                max_health: 100.0,
+                is_dead: false,
+                touched: false,
+                pain_cooldown: 0.0,
+                state: crate::studio::world_entity::HostageState::Stand,
+                leader: None,
+                velocity: Vec3::ZERO,
+                next_use_time: 0.0,
+                home_pos: Vec3::ZERO,
+                home_rot: Quat::IDENTITY,
+            })
+            .id();
+
+        let player_ent = app
+            .world_mut()
+            .spawn((
+                crate::player::PlayerController::default(),
+                crate::combat::PlayerRecoil::default(),
+                Transform::from_translation(Vec3::ZERO),
+            ))
+            .id();
+
+        app.world_mut().send_event(BreakEntityEvent {
+            origin: Vec3::new(10.0, 0.0, 0.0),
+            material: BreakableMaterial::Computer,
+            model: "*65".into(),
+            explodemagnitude: 1,
+        });
+        app.update();
+
+        let hostage = app
+            .world()
+            .get::<crate::studio::world_entity::HostageEntity>(hostage_ent)
+            .unwrap();
+        assert!((hostage.health - 100.0).abs() < 1e-6);
+        assert!(!hostage.is_dead);
+        let recoil = app
+            .world()
+            .get::<crate::combat::PlayerRecoil>(player_ent)
+            .unwrap();
+        assert_eq!(recoil.punch_pitch, 0.0);
+        assert_eq!(recoil.punch_yaw, 0.0);
     }
 }

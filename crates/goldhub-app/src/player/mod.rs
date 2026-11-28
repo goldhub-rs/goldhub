@@ -126,6 +126,25 @@ impl PlayerController {
         self.center_hud_timer = duration;
     }
 
+    /// Applies CS 1.6 hostage injury/kill cash penalty and center HUD warning (`CHostage::TakeDamage`).
+    pub fn apply_hostage_penalty(&mut self, actual_damage: f32, fatal: bool) {
+        let dmg_i32 = (actual_damage.round() as i32).max(1);
+        let penalty = if fatal {
+            20 * (25 + dmg_i32)
+        } else {
+            20 * dmg_i32
+        };
+        self.money = (self.money - penalty).max(0);
+        self.set_center_message(
+            if fatal {
+                "#Killed_Hostage"
+            } else {
+                "#Injured_Hostage"
+            },
+            3.0,
+        );
+    }
+
     /// Applies flashbang `ScreenFade` parameters matching `CBasePlayer::RadiusFlash` / `PlayerBlind`.
     pub fn apply_flash(&mut self, alpha: f32, fade_time: f32, mut hold_time: f32) {
         let already_holding = self.flash_hold_remaining > 0.0;
@@ -531,12 +550,18 @@ fn setup_speedometer_hud(mut commands: Commands) {
 
 fn update_speedometer_system(
     player_query: Query<&PlayerController>,
-    mut text_query: Query<&mut Text, With<SpeedometerText>>,
+    mut text_query: Query<(&mut Text, &InheritedVisibility), With<SpeedometerText>>,
 ) {
     if let Ok(player) = player_query.get_single() {
         let spd = player.sim.current.horizontal_speed();
-        for mut text in &mut text_query {
-            **text = format!("spd: {spd:.2} u/s");
+        for (mut text, vis) in &mut text_query {
+            if !vis.get() {
+                continue;
+            }
+            let next = format!("spd: {spd:.2} u/s");
+            if **text != next {
+                **text = next;
+            }
         }
     }
 }
@@ -1664,5 +1689,24 @@ mod tests {
             player_model_for_team(goldhub_game_cstrike::CsTeam::CounterTerrorist),
             "models/player/urban/urban.mdl"
         );
+    }
+
+    #[test]
+    fn test_hostage_penalty_math_and_center_message() {
+        let mut pc = PlayerController {
+            money: 10000,
+            ..default()
+        };
+        pc.apply_hostage_penalty(25.0, false);
+        assert_eq!(pc.money, 9500);
+        assert_eq!(pc.center_hud_msg, "#Injured_Hostage");
+
+        pc.apply_hostage_penalty(35.0, true);
+        assert_eq!(pc.money, 8300);
+        assert_eq!(pc.center_hud_msg, "#Killed_Hostage");
+
+        pc.money = 100;
+        pc.apply_hostage_penalty(50.0, true);
+        assert_eq!(pc.money, 0);
     }
 }

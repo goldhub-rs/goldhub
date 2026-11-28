@@ -1404,8 +1404,14 @@ fn apply_explosion_radius_damage(
             if hostage.health <= 0.0 {
                 hostage.is_dead = true;
                 anim.set_sequence(31, 24.0, false);
+                if let Ok(mut pc) = player_query.get_single_mut() {
+                    pc.apply_hostage_penalty(dmg, true);
+                }
             } else {
                 anim.set_sequence(7, 30.0, false);
+                if let Ok(mut pc) = player_query.get_single_mut() {
+                    pc.apply_hostage_penalty(dmg, false);
+                }
             }
         }
     }
@@ -2760,7 +2766,7 @@ fn emit_surface_impact_fx(
         Some(BreakableMaterial::Wood) => {
             let idx = ((time.elapsed_secs() * 100.0) as usize % 3) + 1;
             (
-                ImpactDecalKind::BulletShot,
+                ImpactDecalKind::BreakableGlass,
                 format!("debris/wood{idx}.wav"),
                 false,
             )
@@ -2768,12 +2774,20 @@ fn emit_surface_impact_fx(
         Some(BreakableMaterial::Metal | BreakableMaterial::Computer) => {
             let idx = ((time.elapsed_secs() * 100.0) as usize % 3) + 1;
             (
-                ImpactDecalKind::BulletShot,
+                ImpactDecalKind::BreakableGlass,
                 format!("debris/metal{idx}.wav"),
                 true,
             )
         }
-        _ => {
+        Some(_) => {
+            let ric_idx = ((time.elapsed_secs() * 100.0) as usize % 5) + 1;
+            (
+                ImpactDecalKind::BreakableGlass,
+                format!("weapons/ric{ric_idx}.wav"),
+                true,
+            )
+        }
+        None => {
             let ric_idx = ((time.elapsed_secs() * 100.0) as usize % 5) + 1;
             (
                 ImpactDecalKind::BulletShot,
@@ -2885,7 +2899,7 @@ fn swap_viewmodel_to_knife(
     for (vm_ent, _, mut anim) in vm_query.iter_mut() {
         for (child_ent, mesh_handle, _) in anim.mesh_entities.drain(..) {
             vfx.meshes.remove(&mesh_handle);
-            commands.entity(child_ent).despawn();
+            commands.entity(child_ent).despawn_recursive();
         }
         anim.model_id = "models/v_knife.mdl".to_string();
         anim.idle_sequence_index = 0;
@@ -3004,7 +3018,7 @@ fn deploy_viewmodel_sequence(
     let def = get_weapon_def(weapon_id);
     for (child_ent, mesh_handle, _) in anim.mesh_entities.drain(..) {
         meshes.remove(&mesh_handle);
-        commands.entity(child_ent).despawn();
+        commands.entity(child_ent).despawn_recursive();
     }
     if let Some(model_data) = model_store.get_or_load(def.v_model, search_paths, images, materials)
     {
@@ -3075,6 +3089,7 @@ fn fire_single_bullet_trace(
     player_pitch: f32,
     player_yaw: f32,
     recoil: &PlayerRecoil,
+    mut player_ctrl: Option<&mut PlayerController>,
     collision: Option<&goldhub_formats::ir::CollisionModel>,
     model_store: &mut StudioModelStore,
     sprite_store: &mut SpriteStore,
@@ -3339,17 +3354,6 @@ fn fire_single_bullet_trace(
                     events.fire.send(FireTargetEvent {
                         target: breakable.target.clone(),
                     });
-                    if exp_mag > 0 {
-                        spawn_explosion_sprite(
-                            commands,
-                            center,
-                            sprite_store,
-                            &audio.search_paths,
-                            &mut vfx.images,
-                            &mut vfx.materials,
-                            &mut vfx.meshes,
-                        );
-                    }
                 } else {
                     let b_model_idx = breakable
                         .model
@@ -3387,6 +3391,7 @@ fn fire_single_bullet_trace(
             if let Ok((_, mut hostage, mut h_anim, mut bounds, mut studio_ent, ht)) =
                 queries.hostage.get_mut(h_ent)
             {
+                let was_dead = hostage.is_dead;
                 hostage.health -= dist_damage;
                 let hit_pos = cur_src + bullet_dir * h_t;
                 let flesh_snd = if ((time.elapsed_secs() * 100.0) as usize).is_multiple_of(2) {
@@ -3416,6 +3421,9 @@ fn fire_single_bullet_trace(
                 );
 
                 if hostage.health > 0.0 {
+                    if !was_dead && let Some(ref mut pc) = player_ctrl {
+                        pc.apply_hostage_penalty(dist_damage, false);
+                    }
                     h_anim.set_sequence(7, 30.0, false);
                     let pain_idx = ((time.elapsed_secs() * 100.0) as usize % 6) + 1;
                     let snd = format!("hostage/hpain/hpain{pain_idx}.wav");
@@ -3430,8 +3438,11 @@ fn fire_single_bullet_trace(
                             Transform::from_translation(ht.translation()),
                         ));
                     }
-                } else if !hostage.is_dead {
+                } else if !was_dead {
                     hostage.is_dead = true;
+                    if let Some(ref mut pc) = player_ctrl {
+                        pc.apply_hostage_penalty(dist_damage, true);
+                    }
                     h_anim.set_sequence(31, 24.0, false);
                     studio_ent.is_solid = false;
                     bounds.mins = Vec3::ZERO;
@@ -3672,6 +3683,9 @@ pub fn weapon_fire_and_reload_system(
 
                         if hostage.health <= 0.0 {
                             hostage.is_dead = true;
+                            if let Some(ref mut pc) = player_ctrl {
+                                pc.apply_hostage_penalty(base_dmg, true);
+                            }
                             anim.set_sequence(31, 24.0, false);
                             bounds.mins = Vec3::ZERO;
                             bounds.maxs = Vec3::ZERO;
@@ -3682,6 +3696,8 @@ pub fn weapon_fire_and_reload_system(
                             ) {
                                 commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
                             }
+                        } else if let Some(ref mut pc) = player_ctrl {
+                            pc.apply_hostage_penalty(base_dmg, false);
                         }
                         break;
                     }
@@ -3747,22 +3763,7 @@ pub fn weapon_fire_and_reload_system(
                             &mut audio.audio_bank,
                             &mut audio.audio_sources,
                         );
-                        let n =
-                            Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1])
-                                .normalize_or_zero();
-                        let pt = eye_pos + fwd * (reach * tr.fraction);
-                        // CS 1.6 wpn_knife.cpp: CKnife::Smack() emits knife_hitwall1 sound, sparks, and decal,
-                        // but NEVER bullet dust puff spheres.
-                        spawn_wall_sparks(
-                            &mut commands,
-                            pt,
-                            n,
-                            &mut sprite_store,
-                            &audio.search_paths,
-                            &mut vfx.images,
-                            &mut vfx.materials,
-                            &mut vfx.meshes,
-                        );
+                        // Knife hits on walls produce impact audio only (no bullet sparks or smoke puffs).
                     }
                 }
 
@@ -4126,6 +4127,7 @@ pub fn weapon_fire_and_reload_system(
                         player_pitch,
                         player_yaw,
                         &recoil,
+                        player_ctrl.as_deref_mut(),
                         collision_res.model.as_ref(),
                         &mut model_store,
                         &mut sprite_store,
@@ -4673,6 +4675,7 @@ fn fire_weapon_round(
             player_pitch,
             player_yaw,
             recoil,
+            player_ctrl.as_deref_mut(),
             collision,
             model_store,
             sprite_store,

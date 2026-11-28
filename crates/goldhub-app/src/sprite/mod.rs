@@ -411,6 +411,10 @@ pub struct AnimatedSprite {
     pub is_looping: bool,
 }
 
+/// Tracks an unshared per-particle `StandardMaterial` so GPU memory is released on despawn.
+#[derive(Component, Debug, Clone)]
+pub struct OwnedParticleMaterial(pub Handle<StandardMaterial>);
+
 /// Marker component for viewmodel-attached sprites whose local orientation already faces the overlay camera.
 #[derive(Component, Debug)]
 pub struct StickyViewModelSprite;
@@ -482,7 +486,7 @@ pub fn despawn_decal_entity(
     if let (Some(mesh_assets), Some(mesh_handle)) = (meshes, decal.custom_mesh.as_ref()) {
         mesh_assets.remove(mesh_handle);
     }
-    commands.entity(entity).despawn();
+    commands.entity(entity).despawn_recursive();
 }
 
 /// Marker component for camera-facing billboard quad sprites (e.g. embers, static puffs, sparks).
@@ -754,6 +758,108 @@ pub fn spawn_explosion_sprite(
     }
 }
 
+/// Spawns an authentic `zerogxplode.spr` explosion burst for `func_breakable` (`explodemagnitude > 0`).
+pub fn spawn_breakable_explosion_sprite(
+    commands: &mut Commands,
+    origin: Vec3,
+    sprite_store: &mut SpriteStore,
+    search_paths: &GameSearchPaths,
+    images: &mut ResMut<Assets<Image>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+) {
+    if let Some(sprite) = sprite_store
+        .get_or_load_sprite("sprites/zerogxplode.spr", search_paths, images, materials)
+        .or_else(|| {
+            sprite_store.get_or_load_sprite("sprites/fexplo.spr", search_paths, images, materials)
+        })
+        && let Some(first_mat) = sprite.materials.first().cloned()
+    {
+        let quad = sprite_store.get_or_create_unit_quad(meshes);
+        commands.spawn((
+            Mesh3d(quad),
+            MeshMaterial3d(first_mat),
+            Transform::from_translation(origin + Vec3::Y * 8.0).with_scale(Vec3::splat(96.0)),
+            bevy::render::view::NoFrustumCulling,
+            AnimatedSprite {
+                materials: sprite.materials,
+                current_frame: 0,
+                timer: 0.0,
+                frame_duration: 1.0 / 24.0,
+                is_looping: false,
+            },
+        ));
+    }
+}
+
+/// Spawns a stationary additive glowing billboard halo for BSP `env_glow` entities (e.g. `sprites/flare1.spr`).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_env_glow_sprite(
+    commands: &mut Commands,
+    origin: Vec3,
+    model_path: &str,
+    rgb: [u8; 3],
+    renderamt: u8,
+    scale: f32,
+    sprite_store: &mut SpriteStore,
+    search_paths: &GameSearchPaths,
+    images: &mut ResMut<Assets<Image>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+) {
+    let spr_path = if model_path.is_empty() {
+        "sprites/flare1.spr"
+    } else {
+        model_path
+    };
+    let Some(sprite) = sprite_store.get_or_load_sprite(spr_path, search_paths, images, materials)
+    else {
+        return;
+    };
+    let Some(base_tex) = sprite
+        .materials
+        .first()
+        .and_then(|h| materials.get(h).and_then(|m| m.base_color_texture.clone()))
+    else {
+        return;
+    };
+
+    let amt = (f32::from(renderamt) / 255.0).clamp(0.15, 1.0);
+    let r = (f32::from(rgb[0]) / 255.0) * amt;
+    let g = (f32::from(rgb[1]) / 255.0) * amt;
+    let b = (f32::from(rgb[2]) / 255.0) * amt;
+
+    let glow_key = format!(
+        "__glow:{spr_path}:{}:{}:{}:{renderamt}",
+        rgb[0], rgb[1], rgb[2]
+    );
+    let mat_handle = if let Some(cached) = sprite_store.decals.get(&glow_key) {
+        cached.clone()
+    } else {
+        let h = materials.add(StandardMaterial {
+            base_color: Color::srgb(r, g, b),
+            base_color_texture: Some(base_tex),
+            emissive: LinearRgba::new(r, g, b, 1.0),
+            alpha_mode: AlphaMode::Add,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+        sprite_store.decals.insert(glow_key, h.clone());
+        h
+    };
+
+    let world_size = sprite.width.max(32) as f32 * scale.clamp(0.25, 4.0) * 0.85;
+    let quad = sprite_store.get_or_create_unit_quad(meshes);
+    commands.spawn((
+        Mesh3d(quad),
+        MeshMaterial3d(mat_handle),
+        Transform::from_translation(origin).with_scale(Vec3::splat(world_size)),
+        bevy::render::view::NoFrustumCulling,
+        BillboardSprite,
+    ));
+}
+
 /// Spawns 20 billowing CS 1.6 smoke cloud billboards when a smoke grenade deploys (`sprites/gas_puff_01.spr`, 22s).
 pub fn spawn_smoke_cloud(
     commands: &mut Commands,
@@ -813,15 +919,10 @@ pub fn spawn_smoke_cloud(
             ..default()
         });
 
-        let anim_mats = if template_mats.len() > 1 {
-            template_mats.clone()
-        } else {
-            vec![cloud_mat.clone()]
-        };
-
         commands.spawn((
             Mesh3d(mesh.clone()),
-            MeshMaterial3d(cloud_mat),
+            MeshMaterial3d(cloud_mat.clone()),
+            OwnedParticleMaterial(cloud_mat.clone()),
             Transform::from_translation(origin + offset).with_scale(Vec3::splat(0.65)),
             bevy::render::view::NoFrustumCulling,
             SmokeBillboardParticle {
@@ -836,10 +937,10 @@ pub fn spawn_smoke_cloud(
                 base_alpha: 0.92,
             },
             AnimatedSprite {
-                materials: anim_mats,
-                current_frame: (i * 3) % template_mats.len().max(1),
+                materials: vec![cloud_mat],
+                current_frame: 0,
                 timer: 0.0,
-                frame_duration: 1.0 / 18.0,
+                frame_duration: 1.0,
                 is_looping: true,
             },
         ));
@@ -1464,15 +1565,17 @@ pub fn update_animated_sprites_system(
         return;
     }
 
-    let Ok(cam_t) = camera_query.get_single() else {
-        return;
-    };
-    let cam_forward = cam_t.forward().as_vec3();
+    let cam_forward = camera_query
+        .get_single()
+        .ok()
+        .map(|cam_t| cam_t.forward().as_vec3());
 
     for (entity, mut sprite, mut transform, mut mat, sticky) in &mut query {
         // World billboards face camera; viewmodel-attached muzzle flashes stay aligned with the barrel
-        if sticky.is_none() {
-            transform.rotation = Quat::from_rotation_arc(Vec3::Z, -cam_forward);
+        if sticky.is_none()
+            && let Some(fwd) = cam_forward
+        {
+            transform.rotation = Quat::from_rotation_arc(Vec3::Z, -fwd);
         }
 
         sprite.timer += dt;
@@ -1484,7 +1587,7 @@ pub fn update_animated_sprites_system(
                 if sprite.is_looping {
                     sprite.current_frame = 0;
                 } else {
-                    commands.entity(entity).despawn();
+                    commands.entity(entity).despawn_recursive();
                     continue;
                 }
             }
@@ -1724,6 +1827,7 @@ pub fn spawn_black_smoke_puff(
         commands.spawn((
             Mesh3d(quad),
             MeshMaterial3d(puff_mat.clone()),
+            OwnedParticleMaterial(puff_mat.clone()),
             Transform::from_translation(origin + dir * 6.0).with_scale(Vec3::splat(72.0 * 0.32)),
             bevy::render::view::NoFrustumCulling,
             SmokeBillboardParticle {
@@ -1760,6 +1864,7 @@ pub fn update_smoke_particles_system(
         &mut SmokeBillboardParticle,
         &mut Transform,
         &MeshMaterial3d<StandardMaterial>,
+        Option<&OwnedParticleMaterial>,
     )>,
 ) {
     let dt = time.delta_secs();
@@ -1772,9 +1877,12 @@ pub fn update_smoke_particles_system(
         .map_or(Vec3::NEG_Z, |c| c.forward().as_vec3());
     let facing = Quat::from_rotation_arc(Vec3::Z, -cam_forward);
 
-    for (entity, mut p, mut tf, mat_h) in &mut query {
+    for (entity, mut p, mut tf, mat_h, owned_mat) in &mut query {
         p.lifetime += dt;
         if p.lifetime >= p.max_lifetime {
+            if let Some(owned) = owned_mat {
+                materials.remove(&owned.0);
+            }
             commands.entity(entity).despawn_recursive();
             continue;
         }
@@ -1983,25 +2091,23 @@ pub fn update_bullet_decals_system(
     if dt <= 0.0 {
         return;
     }
-    let mut total_count = 0;
-    let mut oldest_entity: Option<(Entity, BulletHoleDecal)> = None;
-    let mut max_lifetime_so_far = -1.0f32;
+    let mut surviving: Vec<(Entity, BulletHoleDecal)> = Vec::new();
 
     for (entity, mut decal) in &mut query {
-        total_count += 1;
         decal.lifetime += dt;
         if decal.lifetime >= decal.max_lifetime {
             despawn_decal_entity(&mut commands, meshes.as_deref_mut(), entity, &decal);
-        } else if decal.lifetime > max_lifetime_so_far {
-            max_lifetime_so_far = decal.lifetime;
-            oldest_entity = Some((entity, decal.clone()));
+        } else {
+            surviving.push((entity, decal.clone()));
         }
     }
 
-    if total_count > 128
-        && let Some((oldest, oldest_decal)) = oldest_entity
-    {
-        despawn_decal_entity(&mut commands, meshes.as_deref_mut(), oldest, &oldest_decal);
+    if surviving.len() > 128 {
+        surviving.sort_by(|a, b| b.1.lifetime.total_cmp(&a.1.lifetime));
+        let excess = surviving.len() - 128;
+        for (ent, decal) in surviving.into_iter().take(excess) {
+            despawn_decal_entity(&mut commands, meshes.as_deref_mut(), ent, &decal);
+        }
     }
 }
 

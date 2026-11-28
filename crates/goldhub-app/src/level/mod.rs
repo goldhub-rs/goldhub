@@ -33,10 +33,18 @@ pub struct CurrentMapInfo {
     pub is_aztec: bool,
 }
 
+/// Cached handles to spawned BSP world materials partitioned by dynamic update needs.
+#[derive(Resource, Debug, Default)]
+pub struct BspDynamicMaterials {
+    pub all: Vec<Handle<bsp_material::GoldSrcBspMaterial>>,
+    pub water: Vec<Handle<bsp_material::GoldSrcBspMaterial>>,
+}
+
 pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<BspDynamicMaterials>();
         app.add_plugins(bsp_material::GoldSrcBspMaterialPlugin);
         app.add_systems(
             Startup,
@@ -65,8 +73,11 @@ pub fn setup_level(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut bsp_materials: ResMut<Assets<bsp_material::GoldSrcBspMaterial>>,
+    mut dyn_mats: ResMut<BspDynamicMaterials>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    dyn_mats.all.clear();
+    dyn_mats.water.clear();
     // 1. Illumination: Soft sky ambient fill matching CS 1.6 radiosity bounce floor
     // Provides baseline ambient illumination for viewmodels and models so unlit sides
     // never drop to pitch black. (World map geometry uses GoldSrcBspMaterial and is unaffected).
@@ -377,7 +388,7 @@ pub fn setup_level(
                         part.render_mode
                     };
 
-                    bsp_materials.add(bsp_material::GoldSrcBspMaterial {
+                    let handle = bsp_materials.add(bsp_material::GoldSrcBspMaterial {
                         diffuse_texture: img_handle,
                         lightmap_texture: lm_handle.clone(),
                         uniform: bsp_material::GoldSrcBspMaterialUniform {
@@ -399,7 +410,12 @@ pub fn setup_level(
                             Some(bevy::render::render_resource::Face::Back)
                         },
                         alpha_mode,
-                    })
+                    });
+                    dyn_mats.all.push(handle.clone());
+                    if render_mode == 5 {
+                        dyn_mats.water.push(handle.clone());
+                    }
+                    handle
                 });
 
                 let mut entity_cmds = commands.spawn((
@@ -800,9 +816,20 @@ fn build_bsp_decal_faces(
     out
 }
 
+#[derive(Default)]
+pub struct BspShaderSyncCache {
+    initialized: bool,
+    active: u32,
+    pos: Vec3,
+    dir: Vec3,
+    intensity: f32,
+    water_alpha: f32,
+}
+
 /// Updates dynamic shader parameters across active BSP world materials:
 /// - Real-time GoldSrc flashlight dynamic lighting (`CL_UpdateFlashlight` trace + `R_AddDynamicLights`).
 /// - Real-time animated water sine ripples (`r_wateralpha` parity).
+#[allow(clippy::too_many_arguments)]
 pub fn update_bsp_materials_dynamic_system(
     time: Res<Time>,
     collision_res: Option<Res<crate::player::LevelCollisionResource>>,
@@ -811,6 +838,8 @@ pub fn update_bsp_materials_dynamic_system(
         With<crate::player::PlayerController>,
     >,
     video_settings: Option<Res<crate::video_settings::VideoSettings>>,
+    dyn_mats: Res<BspDynamicMaterials>,
+    mut cache: Local<BspShaderSyncCache>,
     mut bsp_materials: ResMut<Assets<bsp_material::GoldSrcBspMaterial>>,
 ) {
     const FLASHLIGHT_MAX_DIST: f32 = 2048.0;
@@ -856,16 +885,41 @@ pub fn update_bsp_materials_dynamic_system(
     };
 
     let water_alpha = video_settings.map_or(0.65, |vs| vs.water_alpha);
+    let global_changed = !cache.initialized
+        || cache.active != active
+        || (cache.water_alpha - water_alpha).abs() > 1e-4
+        || (active == 1
+            && (cache.pos.distance_squared(pos) > 0.01
+                || cache.dir.distance_squared(dir) > 1e-5
+                || (cache.intensity - intensity).abs() > 1e-3));
 
-    for (_, mat) in bsp_materials.iter_mut() {
-        mat.uniform.time = t;
-        mat.uniform.flashlight_active = active;
-        mat.uniform.water_alpha = water_alpha;
-        if active == 1 {
-            mat.uniform.flashlight_pos = pos;
-            mat.uniform.flashlight_dir = dir;
-            mat.uniform.flashlight_radius = FLASHLIGHT_DLIGHT_RADIUS;
-            mat.uniform.flashlight_intensity = intensity;
+    if global_changed {
+        cache.initialized = true;
+        cache.active = active;
+        cache.pos = pos;
+        cache.dir = dir;
+        cache.intensity = intensity;
+        cache.water_alpha = water_alpha;
+
+        for handle in &dyn_mats.all {
+            if let Some(mat) = bsp_materials.get_mut(handle) {
+                mat.uniform.time = t;
+                mat.uniform.flashlight_active = active;
+                mat.uniform.water_alpha = water_alpha;
+                if active == 1 {
+                    mat.uniform.flashlight_pos = pos;
+                    mat.uniform.flashlight_dir = dir;
+                    mat.uniform.flashlight_radius = FLASHLIGHT_DLIGHT_RADIUS;
+                    mat.uniform.flashlight_intensity = intensity;
+                }
+            }
+        }
+    } else {
+        // Only water materials need per-frame ripple `time` updates when flashlight & settings are idle.
+        for handle in &dyn_mats.water {
+            if let Some(mat) = bsp_materials.get_mut(handle) {
+                mat.uniform.time = t;
+            }
         }
     }
 }

@@ -7,6 +7,16 @@ use goldhub_formats::ir::{BoneData, SequenceData};
 
 use super::store::StudioModelStore;
 
+/// Snapshot of the last skeletal pose committed to GPU vertex buffers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkinnedPoseKey {
+    pub sequence_index: usize,
+    pub frame_progress: f32,
+    pub gait_sequence_index: Option<usize>,
+    pub gait_frame_progress: f32,
+    pub blending: [u8; 2],
+}
+
 /// Component attached to entities playing a StudioModel skeletal animation.
 #[derive(Component, Debug, Clone)]
 pub struct StudioAnimatedModel {
@@ -35,6 +45,8 @@ pub struct StudioAnimatedModel {
     pub prev_bone_transforms: Vec<Mat4>,
     /// Remaining duration (`0.0..=0.2s`) of cross-sequence bone SLERP blend.
     pub blend_timer: f32,
+    /// Last pose state committed to GPU meshes (`None` before first skin pass).
+    pub last_skinned_pose: Option<SkinnedPoseKey>,
 }
 
 impl StudioAnimatedModel {
@@ -62,6 +74,7 @@ impl StudioAnimatedModel {
             current_bone_transforms: Vec::new(),
             prev_bone_transforms: Vec::new(),
             blend_timer: 0.0,
+            last_skinned_pose: None,
         }
     }
 
@@ -292,7 +305,11 @@ pub fn studio_animation_system(
     search_paths: Option<Res<crate::audio::GameSearchPaths>>,
     mut audio_bank: Option<ResMut<crate::audio::GoldSrcAudioBank>>,
     mut audio_sources: Option<ResMut<Assets<AudioSource>>>,
-    mut query: Query<&mut StudioAnimatedModel>,
+    mut query: Query<(
+        &mut StudioAnimatedModel,
+        Option<&Visibility>,
+        Option<&InheritedVisibility>,
+    )>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let dt = time.delta_secs();
@@ -303,7 +320,11 @@ pub fn studio_animation_system(
     let mut interp_bones = Vec::with_capacity(64);
     let mut gait_bones = Vec::with_capacity(64);
 
-    for mut anim in &mut query {
+    for (mut anim, vis_opt, inherited_vis_opt) in &mut query {
+        // Hidden entities (e.g. 3rd-person player mesh in 1st person or dead chickens) still advance
+        // timers below if needed, or skip vertex mesh buffer uploads completely until visible.
+        let is_hidden = vis_opt.is_some_and(|v| *v == Visibility::Hidden)
+            || inherited_vis_opt.is_some_and(|iv| !iv.get());
         let normalized_id = anim.model_id.replace('\\', "/").to_lowercase();
         let Some(model_data) = model_store.models.get(&normalized_id) else {
             continue;
@@ -378,7 +399,24 @@ pub fn studio_animation_system(
             anim.last_event_frame = cur_frame_i32;
         }
 
-        // 3. Evaluate primary sequence bones and optionally split with gait lower-body sequence
+        // 3. Skip GPU mesh mutation when hidden or frozen at an identical pose
+        let pose_unchanged = anim.blend_timer <= 0.0
+            && anim.last_skinned_pose.is_some_and(|prev| {
+                prev.sequence_index == anim.sequence_index
+                    && (prev.frame_progress - anim.frame_progress).abs() < 1e-4
+                    && prev.gait_sequence_index == anim.gait_sequence_index
+                    && prev.blending == anim.blending
+                    && (anim.gait_sequence_index.is_none()
+                        || (prev.gait_frame_progress - anim.gait_frame_progress).abs() < 1e-4)
+            });
+        if is_hidden || pose_unchanged {
+            if anim.blend_timer > 0.0 {
+                anim.blend_timer = (anim.blend_timer - dt).max(0.0);
+            }
+            continue;
+        }
+
+        // Evaluate primary sequence bones and optionally split with gait lower-body sequence
         sample_interpolated_bones(
             seq,
             anim.frame_progress,
@@ -411,6 +449,13 @@ pub fn studio_animation_system(
         }
 
         anim.current_bone_transforms.clone_from(&interp_bones);
+        anim.last_skinned_pose = Some(SkinnedPoseKey {
+            sequence_index: anim.sequence_index,
+            frame_progress: anim.frame_progress,
+            gait_sequence_index: anim.gait_sequence_index,
+            gait_frame_progress: anim.gait_frame_progress,
+            blending: anim.blending,
+        });
 
         // 4. Deform each submesh's vertices and normals in-place
         let is_vm = anim.is_viewmodel;

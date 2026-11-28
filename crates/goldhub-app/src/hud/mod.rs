@@ -21,9 +21,10 @@ use crate::sprite::resolve_file_path;
 pub mod radar;
 pub mod text_channels;
 
-/// Classic CS 1.6 semi-transparent additive-feel glowing amber HUD tint.
-const CS_HUD_AMBER: Color = Color::srgba(1.0, 0.72, 0.12, 0.48);
-const CS_HUD_RED: Color = Color::srgba(1.0, 0.16, 0.12, 0.80);
+/// Classic CS 1.6 semi-transparent additive-feel glowing amber HUD tint (`RGB_YELLOWISH = 255, 160, 0`).
+const CS_HUD_AMBER: Color = Color::srgba(1.0, 160.0 / 255.0, 0.0, 0.62);
+const CS_HUD_RED: Color = Color::srgba(1.0, 16.0 / 255.0, 16.0 / 255.0, 0.90);
+const CS_HUD_GREEN: Color = Color::srgba(0.0, 160.0 / 255.0, 0.0, 0.90);
 const CS_HUD_C4_GREEN: Color = Color::srgba(0.0, 165.0 / 255.0, 0.0, 0.82);
 const CS_HUD_BARTIME_ORANGE: Color = Color::srgb(1.0, 140.0 / 255.0, 0.0);
 const MAX_CARDS_PER_COL: usize = 6;
@@ -122,6 +123,8 @@ pub struct HudAtlas {
     pub flash_full: Handle<Image>,
     pub flash_beam: Handle<Image>,
     pub dollar: Handle<Image>,
+    pub minus: Handle<Image>,
+    pub plus: Handle<Image>,
     pub c4_icon: Handle<Image>,
     pub defuser_icon: Handle<Image>,
     pub buyzone_icon: Handle<Image>,
@@ -153,7 +156,19 @@ pub struct HudFlashlightBeam;
 pub struct HudMoneyRoot;
 
 #[derive(Component)]
+pub struct HudMoneyDollar;
+
+#[derive(Component)]
 pub struct HudMoneyDigit(pub usize);
+
+#[derive(Component)]
+pub struct HudMoneyDeltaRoot;
+
+#[derive(Component)]
+pub struct HudMoneyDeltaSign;
+
+#[derive(Component)]
+pub struct HudMoneyDeltaDigit(pub usize);
 
 #[derive(Component)]
 pub struct HudStatusIcon(pub StatusIconKind);
@@ -311,11 +326,7 @@ fn load_hud_mask_rgba(
     let mut mask_rgba = Vec::with_capacity(f0.rgba_pixels.len());
     for chunk in f0.rgba_pixels.as_chunks::<4>().0 {
         let lum = chunk[0].max(chunk[1]).max(chunk[2]);
-        let a = if lum > 8 {
-            ((f32::from(lum) / 255.0).powf(0.8) * 255.0).round() as u8
-        } else {
-            0
-        };
+        let a = if lum > 6 { lum } else { 0 };
         mask_rgba.extend_from_slice(&[255, 255, 255, a]);
     }
     let entry = (mask_rgba, f0.width, f0.height);
@@ -751,6 +762,8 @@ fn setup_cs_hud(
         let flash_full = images.add(extract_sub_image(&mask_rgba, hud7_w, 160, 25, 32, 32));
         let flash_beam = images.add(extract_sub_image(&mask_rgba, hud7_w, 144, 25, 16, 32));
         let dollar = images.add(extract_sub_image(&mask_rgba, hud7_w, 192, 25, 18, 25));
+        let minus = images.add(extract_sub_image(&mask_rgba, hud7_w, 210, 25, 13, 23));
+        let plus = images.add(extract_sub_image(&mask_rgba, hud7_w, 223, 25, 17, 23));
         let c4_icon = images.add(extract_sub_image(&mask_rgba, hud7_w, 0, 148, 32, 32));
         let defuser_icon = images.add(extract_sub_image(&mask_rgba, hud7_w, 32, 148, 32, 32));
         let rescue_icon = images.add(extract_sub_image(&mask_rgba, hud7_w, 64, 148, 32, 32));
@@ -833,6 +846,8 @@ fn setup_cs_hud(
             flash_full,
             flash_beam,
             dollar,
+            minus,
+            plus,
             c4_icon,
             defuser_icon,
             buyzone_icon,
@@ -1099,16 +1114,16 @@ fn setup_cs_hud(
                 ));
             });
 
-        // 5. Top-Right: Flashlight Indicator
+        // 5. Top-Right: Flashlight Indicator (fixed 48x32 box so beam never shifts casing)
         commands
             .spawn((
                 HudFlashlightRoot,
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Px(24.0),
-                    right: Val::Px(24.0),
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
+                    top: Val::Px(16.0),
+                    right: Val::Px(12.0),
+                    width: Val::Px(48.0),
+                    height: Val::Px(32.0),
                     ..default()
                 },
                 GlobalZIndex(25),
@@ -1116,18 +1131,26 @@ fn setup_cs_hud(
             .with_children(|parent| {
                 parent
                     .spawn(Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        top: Val::Px(0.0),
                         width: Val::Px(32.0),
                         height: Val::Px(32.0),
-                        position_type: PositionType::Relative,
                         ..default()
                     })
                     .with_children(|casing_box| {
                         casing_box.spawn((
                             HudFlashlightCasing,
-                            ImageNode::new(atlas.flash_empty.clone())
-                                .with_color(Color::srgba(1.0, 0.65, 0.0, 0.25)),
+                            ImageNode::new(atlas.flash_empty.clone()).with_color(Color::srgba(
+                                1.0,
+                                160.0 / 255.0,
+                                0.0,
+                                0.20,
+                            )),
                             Node {
                                 position_type: PositionType::Absolute,
+                                left: Val::Px(0.0),
+                                top: Val::Px(0.0),
                                 width: Val::Px(32.0),
                                 height: Val::Px(32.0),
                                 ..default()
@@ -1135,22 +1158,35 @@ fn setup_cs_hud(
                         ));
                         casing_box.spawn((
                             HudFlashlightFull,
-                            ImageNode::new(atlas.flash_full.clone())
-                                .with_color(Color::srgba(1.0, 0.65, 0.0, 0.90)),
+                            ImageNode::new(atlas.flash_full.clone()).with_color(Color::srgba(
+                                1.0,
+                                160.0 / 255.0,
+                                0.0,
+                                0.32,
+                            )),
                             Node {
                                 position_type: PositionType::Absolute,
+                                left: Val::Px(0.0),
+                                top: Val::Px(0.0),
                                 width: Val::Px(32.0),
                                 height: Val::Px(32.0),
                                 ..default()
                             },
                         ));
                     });
-                // CS 1.6: Flashlight light beam cone displayed to the right of the casing when active
+                // CS 1.6: Flashlight light beam cone anchored strictly to right of casing (`x + 32px`)
                 parent.spawn((
                     HudFlashlightBeam,
-                    ImageNode::new(atlas.flash_beam.clone())
-                        .with_color(Color::srgba(1.0, 0.82, 0.05, 0.95)),
+                    ImageNode::new(atlas.flash_beam.clone()).with_color(Color::srgba(
+                        1.0,
+                        160.0 / 255.0,
+                        0.0,
+                        0.88,
+                    )),
                     Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(32.0),
+                        top: Val::Px(0.0),
                         display: Display::None,
                         width: Val::Px(16.0),
                         height: Val::Px(32.0),
@@ -1160,7 +1196,7 @@ fn setup_cs_hud(
                 ));
             });
 
-        // 6. Bottom-Right: Money Counter ($ + digits) cleanly spaced above ammo display
+        // 6. Bottom-Right: Money Counter ($ + digits) + ± Delta Row cleanly spaced above ammo display
         commands
             .spawn((
                 HudMoneyRoot,
@@ -1176,6 +1212,7 @@ fn setup_cs_hud(
             ))
             .with_children(|parent| {
                 parent.spawn((
+                    HudMoneyDollar,
                     ImageNode::new(atlas.dollar.clone()).with_color(CS_HUD_AMBER),
                     Node {
                         width: Val::Px(18.0),
@@ -1188,6 +1225,44 @@ fn setup_cs_hud(
                     parent.spawn((
                         HudMoneyDigit(i),
                         ImageNode::new(atlas.digits[0].clone()).with_color(CS_HUD_AMBER),
+                        Node {
+                            width: Val::Px(20.0),
+                            height: Val::Px(25.0),
+                            ..default()
+                        },
+                    ));
+                }
+            });
+
+        commands
+            .spawn((
+                HudMoneyDeltaRoot,
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(88.0),
+                    right: Val::Px(32.0),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                Visibility::Hidden,
+                GlobalZIndex(25),
+            ))
+            .with_children(|parent| {
+                parent.spawn((
+                    HudMoneyDeltaSign,
+                    ImageNode::new(atlas.minus.clone()).with_color(CS_HUD_RED),
+                    Node {
+                        width: Val::Px(13.0),
+                        height: Val::Px(23.0),
+                        margin: UiRect::right(Val::Px(9.0)),
+                        ..default()
+                    },
+                ));
+                for i in 0..5 {
+                    parent.spawn((
+                        HudMoneyDeltaDigit(i),
+                        ImageNode::new(atlas.digits[0].clone()).with_color(CS_HUD_RED),
                         Node {
                             width: Val::Px(20.0),
                             height: Val::Px(25.0),
@@ -1534,17 +1609,17 @@ fn setup_cs_hud(
         Visibility::Hidden,
     ));
 
-    // 12. Pickup history stack (CHudHistoryResource parity: right edge above ammo count)
+    // 12. Pickup history stack (CHudHistoryResource parity: right edge well above $ MONEY and ± DELTA)
     commands
         .spawn((
             HudPickupHistoryRoot,
             Node {
                 position_type: PositionType::Absolute,
                 right: Val::Px(24.0),
-                bottom: Val::Px(75.0),
+                bottom: Val::Px(135.0),
                 flex_direction: FlexDirection::ColumnReverse,
                 align_items: AlignItems::FlexEnd,
-                row_gap: Val::Px(4.0),
+                row_gap: Val::Px(5.0),
                 ..default()
             },
             GlobalZIndex(40),
@@ -1754,30 +1829,31 @@ fn update_hud_flashlight_system(
     };
 
     let bat = fl.battery.clamp(0.0, 1.0);
-    // Authentic CS 1.6 radiant gold-yellow HUD color, shifts to red below 20%
-    let bar_color = if bat < 0.20 {
-        Color::srgba(1.0, 0.16, 0.12, 0.95)
+    // Authentic CS 1.6 RGB_YELLOWISH (255, 160, 0) / RGB_REDISH (255, 16, 16)
+    let (r, g, b) = if bat < 0.20 {
+        (1.0, 16.0 / 255.0, 16.0 / 255.0)
     } else {
-        Color::srgba(1.0, 0.82, 0.05, 0.95)
+        (1.0, 160.0 / 255.0, 0.0)
     };
+    let bar_color = Color::srgb(r, g, b);
 
     for (mut img, mut ui_node, mut vis) in &mut beam_query {
         if fl.is_on {
             *vis = Visibility::Inherited;
             ui_node.display = Display::Flex;
-            img.color = bar_color.with_alpha(0.92);
+            img.color = bar_color.with_alpha(225.0 / 255.0);
         } else {
             *vis = Visibility::Hidden;
             ui_node.display = Display::None;
         }
     }
 
-    let casing_alpha = if fl.is_on { 0.92 } else { 0.28 };
+    let casing_alpha = if fl.is_on { 0.45 } else { 0.20 };
     for mut node in &mut casing_query {
         node.color = bar_color.with_alpha(casing_alpha);
     }
 
-    let fill_alpha = if fl.is_on { 0.98 } else { 0.32 };
+    let fill_alpha = if fl.is_on { 0.85 } else { 0.30 };
     let offset = (32.0 * (1.0 - bat)).round();
     for (mut img, mut ui_node, mut vis) in &mut full_query {
         if offset < 32.0 {
@@ -2009,10 +2085,59 @@ fn update_hud_weapon_menu_system(
     }
 }
 
+#[derive(Default)]
+struct HudMoneyAnimState {
+    prev_money: Option<i32>,
+    delta: i32,
+    fade_timer: f32,
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_hud_money_system(
+    time: Res<Time>,
     atlas_opt: Option<Res<HudAtlas>>,
     player_query: Query<&PlayerController>,
-    mut money_digits: Query<(&HudMoneyDigit, &mut ImageNode, &mut Visibility)>,
+    mut anim_state: Local<HudMoneyAnimState>,
+    mut dollar_q: Query<
+        &mut ImageNode,
+        (
+            With<HudMoneyDollar>,
+            Without<HudMoneyDigit>,
+            Without<HudMoneyDeltaSign>,
+            Without<HudMoneyDeltaDigit>,
+        ),
+    >,
+    mut money_digits: Query<
+        (&HudMoneyDigit, &mut ImageNode, &mut Visibility),
+        (Without<HudMoneyDeltaDigit>, Without<HudMoneyDeltaRoot>),
+    >,
+    mut delta_root: Query<
+        &mut Visibility,
+        (
+            With<HudMoneyDeltaRoot>,
+            Without<HudMoneyDigit>,
+            Without<HudMoneyDeltaSign>,
+            Without<HudMoneyDeltaDigit>,
+        ),
+    >,
+    mut delta_sign: Query<
+        (&mut ImageNode, &mut Node),
+        (
+            With<HudMoneyDeltaSign>,
+            Without<HudMoneyDigit>,
+            Without<HudMoneyDollar>,
+            Without<HudMoneyDeltaDigit>,
+        ),
+    >,
+    mut delta_digits: Query<
+        (&HudMoneyDeltaDigit, &mut ImageNode, &mut Visibility),
+        (
+            Without<HudMoneyDigit>,
+            Without<HudMoneyDeltaRoot>,
+            Without<HudMoneyDollar>,
+            Without<HudMoneyDeltaSign>,
+        ),
+    >,
 ) {
     let Some(atlas) = atlas_opt else {
         return;
@@ -2021,15 +2146,95 @@ fn update_hud_money_system(
         return;
     };
 
-    let money = player.money.clamp(0, 16000) as usize;
+    let clamped = player.money.clamp(0, 16000);
+    if let Some(prev) = anim_state.prev_money {
+        if clamped != prev {
+            anim_state.delta = clamped - prev;
+            anim_state.fade_timer = 5.0;
+            anim_state.prev_money = Some(clamped);
+        }
+    } else {
+        anim_state.prev_money = Some(clamped);
+    }
+
+    let dt = time.delta_secs();
+    if dt > 0.0 && anim_state.fade_timer > 0.0 {
+        anim_state.fade_timer -= dt;
+        if anim_state.fade_timer <= 0.0 {
+            anim_state.fade_timer = 0.0;
+            anim_state.delta = 0;
+        }
+    }
+
+    // CS 1.6 CHudMoney::Draw color & alpha fade over 5.0s
+    let (bal_color, delta_color_opt) = if anim_state.delta != 0 && anim_state.fade_timer > 0.0 {
+        let interp = ((5.0 - anim_state.fade_timer) / 5.0).clamp(0.0, 1.0);
+        let bal_alpha = 0.90 - interp * (0.90 - 0.62);
+        let delta_alpha = (1.0 - interp) * 0.90;
+
+        let default_g = 160.0 / 255.0;
+        if anim_state.delta > 0 {
+            let bal = Color::srgba(interp, default_g, 0.0, bal_alpha);
+            let del = CS_HUD_GREEN.with_alpha(delta_alpha);
+            (bal, Some((del, true)))
+        } else {
+            let g_col = (16.0 / 255.0) + interp * (default_g - 16.0 / 255.0);
+            let b_col = (16.0 / 255.0) * (1.0 - interp);
+            let bal = Color::srgba(1.0, g_col, b_col, bal_alpha);
+            let del = CS_HUD_RED.with_alpha(delta_alpha);
+            (bal, Some((del, false)))
+        }
+    } else {
+        (CS_HUD_AMBER, None)
+    };
+
+    for mut img in &mut dollar_q {
+        img.color = bal_color;
+    }
+
+    let money = clamped as usize;
     for (digit, mut img, mut vis) in &mut money_digits {
         let (d, show) = digit_at_and_visible(money, digit.0, 5, true);
         img.image = atlas.digits[d].clone();
+        img.color = bal_color;
         *vis = if show {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
+    }
+
+    if let Some((d_color, is_gain)) = delta_color_opt {
+        for mut vis in &mut delta_root {
+            *vis = Visibility::Inherited;
+        }
+        for (mut sign_img, mut sign_node) in &mut delta_sign {
+            if is_gain {
+                sign_img.image = atlas.plus.clone();
+                sign_node.width = Val::Px(17.0);
+                sign_node.margin = UiRect::right(Val::Px(5.0));
+            } else {
+                sign_img.image = atlas.minus.clone();
+                sign_node.width = Val::Px(13.0);
+                sign_node.margin = UiRect::right(Val::Px(9.0));
+            }
+            sign_img.color = d_color;
+        }
+        let abs_delta = anim_state.delta.unsigned_abs() as usize;
+        for (digit, mut img, mut vis) in &mut delta_digits {
+            let (d, show) = digit_at_and_visible(abs_delta, digit.0, 5, true);
+            img.image = atlas.digits[d].clone();
+            img.color = d_color;
+            *vis = if show {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+    } else {
+        for mut vis in &mut delta_root {
+            *vis = Visibility::Hidden;
+        }
     }
 }
 
@@ -2273,7 +2478,7 @@ pub fn update_hud_pickup_history_system(
         for entry in &mut history.entries {
             entry.lifetime += dt;
         }
-        history.entries.retain(|e| e.lifetime < 3.5);
+        history.entries.retain(|e| e.lifetime < 5.0);
     }
 
     if let Some(ref atlas) = atlas_opt {
@@ -2309,9 +2514,9 @@ pub fn update_hud_pickup_history_system(
 
     for (slot, mut img_node, mut vis) in &mut slot_query {
         if let Some(entry) = history.entries.get(slot.0) {
-            let fade = ((3.5 - entry.lifetime) / 0.8).clamp(0.0, 1.0);
+            let fade = ((5.0 - entry.lifetime) * 80.0 / 255.0).clamp(0.0, 1.0);
             img_node.image = entry.image.clone();
-            img_node.color = Color::srgba(1.0, 0.72, 0.12, 0.95 * fade);
+            img_node.color = CS_HUD_AMBER.with_alpha(0.85 * fade);
             *vis = Visibility::Inherited;
         } else {
             *vis = Visibility::Hidden;
@@ -2482,6 +2687,8 @@ mod tests {
             flash_full: dummy_img.clone(),
             flash_beam: dummy_img.clone(),
             dollar: dummy_img.clone(),
+            minus: dummy_img.clone(),
+            plus: dummy_img.clone(),
             c4_icon: dummy_img.clone(),
             defuser_icon: dummy_img.clone(),
             buyzone_icon: dummy_img.clone(),
@@ -2570,6 +2777,8 @@ mod tests {
             flash_full: dummy_img.clone(),
             flash_beam: dummy_img.clone(),
             dollar: dummy_img.clone(),
+            minus: dummy_img.clone(),
+            plus: dummy_img.clone(),
             c4_icon: dummy_img.clone(),
             defuser_icon: dummy_img.clone(),
             buyzone_icon: dummy_img.clone(),
@@ -2607,5 +2816,133 @@ mod tests {
         let history = app.world().resource::<HudHistoryResource>();
         assert_eq!(history.entries.len(), 1);
         assert_eq!(history.entries[0].lifetime, 0.0);
+    }
+
+    fn dummy_test_atlas(
+        dummy_img: Handle<Image>,
+        minus_handle: Handle<Image>,
+        plus_handle: Handle<Image>,
+    ) -> HudAtlas {
+        HudAtlas {
+            digits: std::array::from_fn(|_| dummy_img.clone()),
+            divider: dummy_img.clone(),
+            cross: dummy_img.clone(),
+            suit_full: dummy_img.clone(),
+            flash_empty: dummy_img.clone(),
+            flash_full: dummy_img.clone(),
+            flash_beam: dummy_img.clone(),
+            dollar: dummy_img.clone(),
+            minus: minus_handle,
+            plus: plus_handle,
+            c4_icon: dummy_img.clone(),
+            defuser_icon: dummy_img.clone(),
+            buyzone_icon: dummy_img.clone(),
+            rescue_icon: dummy_img.clone(),
+            escape_icon: dummy_img.clone(),
+            vipsafety_icon: dummy_img.clone(),
+            stopwatch: dummy_img.clone(),
+            buckets: std::array::from_fn(|_| dummy_img.clone()),
+            selection_frame: None,
+            sniper_scope: None,
+            scope_bezel: dummy_img,
+            ammo_icons: HashMap::new(),
+            weapon_cards: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_hud_money_delta_animation_show_and_fade() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+
+        let dummy_img = Handle::default();
+        let minus_handle = Handle::weak_from_u128(0x1111_2222);
+        let plus_handle = Handle::weak_from_u128(0x3333_4444);
+        app.insert_resource(dummy_test_atlas(
+            dummy_img,
+            minus_handle.clone(),
+            plus_handle,
+        ));
+
+        let player_ent = app
+            .world_mut()
+            .spawn(PlayerController {
+                money: 10000,
+                ..default()
+            })
+            .id();
+        let delta_root = app
+            .world_mut()
+            .spawn((HudMoneyDeltaRoot, Visibility::Hidden))
+            .id();
+        let delta_sign = app
+            .world_mut()
+            .spawn((HudMoneyDeltaSign, ImageNode::default(), Node::default()))
+            .id();
+        let delta_digit = app
+            .world_mut()
+            .spawn((
+                HudMoneyDeltaDigit(2),
+                ImageNode::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        let dollar_ent = app
+            .world_mut()
+            .spawn((
+                HudMoneyDollar,
+                ImageNode::default().with_color(CS_HUD_AMBER),
+            ))
+            .id();
+
+        app.add_systems(Update, update_hud_money_system);
+        // Frame 1 initializes prev_money without triggering delta popup
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(delta_root).unwrap(),
+            Visibility::Hidden
+        );
+
+        // Penalty deducts $200 -> red delta row + red `$` appears
+        app.world_mut()
+            .get_mut::<PlayerController>(player_ent)
+            .unwrap()
+            .money = 9800;
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(delta_root).unwrap(),
+            Visibility::Inherited
+        );
+        assert_eq!(
+            app.world().get::<ImageNode>(delta_sign).unwrap().image,
+            minus_handle
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(delta_digit).unwrap(),
+            Visibility::Inherited
+        );
+        assert!(
+            app.world()
+                .get::<ImageNode>(dollar_ent)
+                .unwrap()
+                .color
+                .to_srgba()
+                .red
+                > 0.9
+        );
+
+        // Advance past 5.0s fade window -> delta hides and `$` settles back to CS_HUD_AMBER
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(5.1));
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(delta_root).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            app.world().get::<ImageNode>(dollar_ent).unwrap().color,
+            CS_HUD_AMBER
+        );
     }
 }

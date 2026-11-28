@@ -720,10 +720,15 @@ pub fn update_console_and_dev_hud_system(
             .collect::<Vec<_>>()
             .join("\n");
         for mut txt in &mut body_q {
-            (**txt).clone_from(&joined);
+            if **txt != joined {
+                (**txt).clone_from(&joined);
+            }
         }
+        let prompt = format!("] {}_", console.input);
         for mut txt in &mut input_q {
-            **txt = format!("] {}_", console.input);
+            if **txt != prompt {
+                (**txt).clone_from(&prompt);
+            }
         }
     }
 
@@ -732,7 +737,7 @@ pub fn update_console_and_dev_hud_system(
             if let Ok((player, _, weapon)) = player_query.get_single() {
                 let ori = player.sim.current.origin;
                 let w_name = weapon.map_or("Knife", |w| crate::combat::get_weapon_def(w.id).name);
-                **txt = format!(
+                let formatted = format!(
                     "dev 1 | {:?} {:?} t:{:.1} | T:{} CT:{} | {} (${}) | ({:.0},{:.0},{:.0})",
                     rules_state.rules.map_flags.primary_kind(),
                     rules_state.rules.state,
@@ -745,9 +750,14 @@ pub fn update_console_and_dev_hud_system(
                     ori[1],
                     ori[2],
                 );
+                if **txt != formatted {
+                    **txt = formatted;
+                }
             }
-            *vis = Visibility::Inherited;
-        } else {
+            if *vis != Visibility::Inherited {
+                *vis = Visibility::Inherited;
+            }
+        } else if *vis != Visibility::Hidden {
             *vis = Visibility::Hidden;
         }
     }
