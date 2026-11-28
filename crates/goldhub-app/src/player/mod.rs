@@ -126,6 +126,25 @@ impl PlayerController {
         self.center_hud_timer = duration;
     }
 
+    /// Applies CS 1.6 hostage injury/kill cash penalty and center HUD warning (`CHostage::TakeDamage`).
+    pub fn apply_hostage_penalty(&mut self, actual_damage: f32, fatal: bool) {
+        let dmg_i32 = (actual_damage.round() as i32).max(1);
+        let penalty = if fatal {
+            20 * (25 + dmg_i32)
+        } else {
+            20 * dmg_i32
+        };
+        self.money = (self.money - penalty).max(0);
+        self.set_center_message(
+            if fatal {
+                "#Killed_Hostage"
+            } else {
+                "#Injured_Hostage"
+            },
+            3.0,
+        );
+    }
+
     /// Applies flashbang `ScreenFade` parameters matching `CBasePlayer::RadiusFlash` / `PlayerBlind`.
     pub fn apply_flash(&mut self, alpha: f32, fade_time: f32, mut hold_time: f32) {
         let already_holding = self.flash_hold_remaining > 0.0;
@@ -238,6 +257,7 @@ pub struct PlayerFlashlight {
     pub battery: f32, // 1.0 = 100% full, 0.0 = discharged
     pub light_entity: Option<Entity>,
     pub beam_hit_light: Option<Entity>,
+    pub decal_entity: Option<Entity>,
 }
 
 impl Default for PlayerFlashlight {
@@ -247,9 +267,14 @@ impl Default for PlayerFlashlight {
             battery: 1.0,
             light_entity: None,
             beam_hit_light: None,
+            decal_entity: None,
         }
     }
 }
+
+/// Marker component for the projected flashlight wall decal.
+#[derive(Component)]
+pub struct FlashlightDecalMarker;
 
 pub struct PlayerPlugin;
 
@@ -286,7 +311,7 @@ fn aabb_overlaps_player_hull(p_bevy: Vec3, bmin: Vec3, bmax: Vec3) -> bool {
         && (p_bevy.y - 36.0) <= bmax.y
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn player_flashlight_system(
     mut commands: Commands,
     time: Res<Time>,
@@ -297,6 +322,18 @@ fn player_flashlight_system(
         (With<Camera3d>, With<PlayerController>),
     >,
     mut hit_light_query: Query<(&mut Transform, &mut PointLight), Without<PlayerController>>,
+    mut decal_query: Query<
+        (&mut Transform, &mut Visibility),
+        (
+            With<FlashlightDecalMarker>,
+            Without<Camera3d>,
+            Without<PointLight>,
+        ),
+    >,
+    mut sprite_store: Option<ResMut<crate::sprite::SpriteStore>>,
+    mut meshes: Option<ResMut<Assets<Mesh>>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut images: Option<ResMut<Assets<Image>>>,
     search_paths: Option<Res<crate::audio::GameSearchPaths>>,
     mut audio_bank: Option<ResMut<crate::audio::GoldSrcAudioBank>>,
     mut audio_sources: Option<ResMut<Assets<AudioSource>>>,
@@ -305,7 +342,7 @@ fn player_flashlight_system(
     const FLASHLIGHT_DRAIN_SECS: f32 = 120.0;
     const FLASHLIGHT_RECHARGE_SECS: f32 = 20.0;
     const FLASHLIGHT_MAX_DIST: f32 = 2000.0;
-    const FLASHLIGHT_HIT_BASE_INTENSITY: f32 = 4_600_000.0;
+    const FLASHLIGHT_HIT_BASE_INTENSITY: f32 = 3_500.0;
 
     let dt = time.delta_secs();
     let Ok((camera_entity, cam_gt, mut flashlight)) = camera_query.get_single_mut() else {
@@ -322,6 +359,9 @@ fn player_flashlight_system(
             }
             if let Some(hit_light) = flashlight.beam_hit_light.take() {
                 commands.entity(hit_light).despawn_recursive();
+            }
+            if let Some(decal) = flashlight.decal_entity.take() {
+                commands.entity(decal).despawn_recursive();
             }
         }
     } else {
@@ -341,8 +381,9 @@ fn player_flashlight_system(
                 .spawn((
                     SpotLight {
                         color: Color::srgb(1.0, 0.98, 0.94),
-                        intensity: 240_000_000.0,
-                        range: 20_000.0,
+                        intensity: 18_000.0,
+                        range: 2_000.0,
+                        radius: 12.0,
                         inner_angle: 15.0f32.to_radians(),
                         outer_angle: 26.0f32.to_radians(),
                         shadows_enabled: false,
@@ -369,12 +410,44 @@ fn player_flashlight_system(
                 ))
                 .id();
             flashlight.beam_hit_light = Some(hit_pt);
+
+            if let (
+                Some(ref mut store),
+                Some(ref mut m_assets),
+                Some(ref mut mat_assets),
+                Some(ref mut img_assets),
+            ) = (
+                sprite_store.as_mut(),
+                meshes.as_mut(),
+                materials.as_mut(),
+                images.as_mut(),
+            ) {
+                let quad = store.get_or_create_unit_quad(m_assets);
+                let decal_mat = store.get_or_create_flashlight_mat(img_assets, mat_assets);
+                let decal = commands
+                    .spawn((
+                        FlashlightDecalMarker,
+                        Mesh3d(quad),
+                        MeshMaterial3d(decal_mat),
+                        Transform::from_translation(
+                            cam_gt.translation() + cam_gt.forward().as_vec3() * 128.0,
+                        )
+                        .with_scale(Vec3::splat(80.0)),
+                        Visibility::Inherited,
+                        bevy::render::view::RenderLayers::from_layers(&[0, 2]),
+                    ))
+                    .id();
+                flashlight.decal_entity = Some(decal);
+            }
         } else {
             if let Some(light) = flashlight.light_entity.take() {
                 commands.entity(light).despawn_recursive();
             }
             if let Some(hit_light) = flashlight.beam_hit_light.take() {
                 commands.entity(hit_light).despawn_recursive();
+            }
+            if let Some(decal) = flashlight.decal_entity.take() {
+                commands.entity(decal).despawn_recursive();
             }
         }
 
@@ -392,6 +465,14 @@ fn player_flashlight_system(
         && let Some(hit_light_ent) = flashlight.beam_hit_light
         && let Ok((mut lt, mut pl)) = hit_light_query.get_mut(hit_light_ent)
     {
+        let decal_item = if let Some(decal_ent) = flashlight.decal_entity
+            && let Ok((dtf, dvis)) = decal_query.get_mut(decal_ent)
+        {
+            Some((dtf.into_inner(), dvis.into_inner()))
+        } else {
+            None
+        };
+
         project_flashlight_hit(
             cam_gt,
             collision_res.model.as_ref(),
@@ -399,6 +480,7 @@ fn player_flashlight_system(
             FLASHLIGHT_HIT_BASE_INTENSITY,
             &mut lt,
             &mut pl,
+            decal_item,
         );
     }
 }
@@ -410,19 +492,23 @@ fn project_flashlight_hit(
     base_intensity: f32,
     lt: &mut Transform,
     pl: &mut PointLight,
+    decal_tf_vis: Option<(&mut Transform, &mut Visibility)>,
 ) {
     let start = cam_gt.translation();
     let dir = cam_gt.forward().as_vec3();
-    let (hit_pos, hit_dist) = col_model.map_or((start + dir * 256.0, 256.0_f32), |col| {
-        use goldhub_physics::WorldTrace;
-        let bsp = goldhub_physics::BspWorldCollision::new(col);
-        let end = start + dir * max_dist;
-        let tr = bsp.trace_player_hull([start.x, -start.z, start.y], [end.x, -end.z, end.y], 0);
-        let p = Vec3::new(tr.endpos[0], tr.endpos[2], -tr.endpos[1]);
-        let dist = tr.fraction * max_dist;
-        (p - dir * 16.0, dist)
-    });
-    lt.translation = hit_pos;
+    let (hit_pos, _hit_norm, hit_dist) =
+        col_model.map_or((start + dir * 256.0, -dir, 256.0_f32), |col| {
+            use goldhub_physics::WorldTrace;
+            let bsp = goldhub_physics::BspWorldCollision::new(col);
+            let end = start + dir * max_dist;
+            let tr = bsp.trace_player_hull([start.x, -start.z, start.y], [end.x, -end.z, end.y], 0);
+            let p = Vec3::new(tr.endpos[0], tr.endpos[2], -tr.endpos[1]);
+            let norm = Vec3::new(tr.plane_normal[0], tr.plane_normal[2], -tr.plane_normal[1])
+                .normalize_or_zero();
+            let dist = tr.fraction * max_dist;
+            (p, norm, dist)
+        });
+    lt.translation = hit_pos - dir * 16.0;
     if hit_dist >= max_dist - 1.0 {
         pl.intensity = 0.0;
     } else {
@@ -430,19 +516,25 @@ fn project_flashlight_hit(
         let falloff = ((max_dist - hit_dist) / (max_dist * 0.75)).clamp(0.45, 1.0);
         pl.intensity = base_intensity * falloff;
     }
+    if let Some((_, vis)) = decal_tf_vis {
+        *vis = Visibility::Hidden;
+    }
 }
 
 fn setup_speedometer_hud(mut commands: Commands) {
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(46.0),
-            left: Val::Px(0.0),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(46.0),
+                left: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
         .with_children(|parent| {
             parent.spawn((
                 SpeedometerText,
@@ -458,12 +550,18 @@ fn setup_speedometer_hud(mut commands: Commands) {
 
 fn update_speedometer_system(
     player_query: Query<&PlayerController>,
-    mut text_query: Query<&mut Text, With<SpeedometerText>>,
+    mut text_query: Query<(&mut Text, &InheritedVisibility), With<SpeedometerText>>,
 ) {
     if let Ok(player) = player_query.get_single() {
         let spd = player.sim.current.horizontal_speed();
-        for mut text in &mut text_query {
-            **text = format!("spd: {spd:.2} u/s");
+        for (mut text, vis) in &mut text_query {
+            if !vis.get() {
+                continue;
+            }
+            let next = format!("spd: {spd:.2} u/s");
+            if **text != next {
+                **text = next;
+            }
         }
     }
 }
@@ -497,6 +595,7 @@ impl WorldTrace for FallbackFlatWorld {
                 plane_normal: [0.0, 0.0, 1.0],
                 plane_dist: 0.0,
                 hit_entity: None,
+                ..Default::default()
             }
         } else {
             goldhub_physics::TraceResult {
@@ -507,6 +606,7 @@ impl WorldTrace for FallbackFlatWorld {
                 plane_normal: [0.0, 0.0, 1.0],
                 plane_dist: 0.0,
                 hit_entity: None,
+                ..Default::default()
             }
         }
     }
@@ -722,38 +822,33 @@ pub fn player_movement_system(
             player.sim.advance(dt, &cmd, &composite);
         }
 
-        // 4. Fall damage and impact landing sound (`PLAYER_MAX_SAFE_FALL_SPEED = 500.0`)
+        // 4. ReGameDLL authentic fall damage (`PM_PLAYER_MAX_SAFE_FALL_SPEED = 580.0`)
         let pre_land_fvel = player
             .sim
             .previous
             .fall_velocity
             .max(-player.sim.previous.velocity[2]);
-        let just_landed = !player.was_on_ground && player.sim.current.on_ground;
+        let just_landed = !player.sim.previous.on_ground && player.sim.current.on_ground;
         player.was_on_ground = player.sim.current.on_ground;
-        if just_landed && pre_land_fvel > 500.0 {
-            let dmg = ((pre_land_fvel - 500.0) * (100.0 / 600.0) * 1.25).clamp(1.0, 100.0);
+        if just_landed && pre_land_fvel > 580.0 {
+            let dmg =
+                ((pre_land_fvel - 580.0) * (100.0 / (1024.0 - 580.0)) * 1.25).clamp(1.0, 100.0);
             player.health = (player.health - dmg).max(0.0);
+            let pain_idx = ((pre_land_fvel as usize) % 3) + 1;
             let pain_snd = if player.health <= 0.0 {
                 "common/bodysplat.wav"
-            } else if pre_land_fvel > 750.0 {
-                "player/pl_fallpain3.wav"
             } else {
-                "player/pl_fallpain2.wav"
+                match pain_idx {
+                    1 => "player/bhit_flesh-1.wav",
+                    2 => "player/bhit_flesh-2.wav",
+                    _ => "player/bhit_flesh-3.wav",
+                }
             };
             if let Some(h) =
                 audio_bank.get_or_load_sound(pain_snd, &search_paths.dirs, &mut audio_sources)
             {
                 commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
             }
-        } else if just_landed
-            && pre_land_fvel > 320.0
-            && let Some(h) = audio_bank.get_or_load_sound(
-                "player/pl_jumpland2.wav",
-                &search_paths.dirs,
-                &mut audio_sources,
-            )
-        {
-            commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN));
         }
 
         // 5. Interpolate origin & view height for smooth sub-frame rendering
@@ -1102,7 +1197,7 @@ fn spawn_player_character_model_system(
         &model_data,
         1,
         false,
-        None,
+        Some(2),
         &mut meshes,
     );
 
@@ -1244,7 +1339,8 @@ fn update_player_character_model_system(
         && let Some(model_data) =
             model_store.get_or_load(desired_model, paths, &mut images, &mut materials)
     {
-        for &(child, _, _) in &anim.mesh_entities {
+        for &(child, ref mesh_handle, _) in &anim.mesh_entities {
+            meshes.remove(mesh_handle);
             commands.entity(child).despawn_recursive();
         }
         let mesh_children = crate::studio::store::spawn_model_submesh_children(
@@ -1253,7 +1349,7 @@ fn update_player_character_model_system(
             &model_data,
             1,
             false,
-            None,
+            Some(2),
             &mut meshes,
         );
         anim.model_id.clone_from(&desired_norm);
@@ -1434,7 +1530,8 @@ fn update_third_person_weapon_system(
 
     // 2. Check if weapon model needs switching
     if weapon_data.current_weapon_id != Some(current_id) {
-        for &(child, _, _) in &weapon_data.mesh_entities {
+        for &(child, ref mesh_handle, _) in &weapon_data.mesh_entities {
+            meshes.remove(mesh_handle);
             commands.entity(child).despawn_recursive();
         }
         weapon_data.mesh_entities.clear();
@@ -1450,7 +1547,7 @@ fn update_third_person_weapon_system(
                 &model_data,
                 0,
                 false,
-                None,
+                Some(2),
                 &mut meshes,
             );
         }
@@ -1592,5 +1689,24 @@ mod tests {
             player_model_for_team(goldhub_game_cstrike::CsTeam::CounterTerrorist),
             "models/player/urban/urban.mdl"
         );
+    }
+
+    #[test]
+    fn test_hostage_penalty_math_and_center_message() {
+        let mut pc = PlayerController {
+            money: 10000,
+            ..default()
+        };
+        pc.apply_hostage_penalty(25.0, false);
+        assert_eq!(pc.money, 9500);
+        assert_eq!(pc.center_hud_msg, "#Injured_Hostage");
+
+        pc.apply_hostage_penalty(35.0, true);
+        assert_eq!(pc.money, 8300);
+        assert_eq!(pc.center_hud_msg, "#Killed_Hostage");
+
+        pc.money = 100;
+        pc.apply_hostage_penalty(50.0, true);
+        assert_eq!(pc.money, 0);
     }
 }

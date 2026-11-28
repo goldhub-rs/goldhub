@@ -3,7 +3,7 @@
 //! Connects `goldhub-audio` (1-to-1 PM_PlayStepSound, PM_CheckFalling, materials.txt)
 //! with Bevy Audio 3D spatial playback and real CS 1.6 game sound files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -147,6 +147,7 @@ pub fn point_in_polygon_2d(px: f32, py: f32, poly: &[[f32; 2]]) -> bool {
 pub struct GoldSrcAudioBank {
     pub materials: MaterialTable,
     pub sound_cache: HashMap<String, Handle<AudioSource>>,
+    pub missing_paths: HashSet<String>,
 }
 
 impl Default for GoldSrcAudioBank {
@@ -154,6 +155,7 @@ impl Default for GoldSrcAudioBank {
         Self {
             materials: MaterialTable::new(),
             sound_cache: HashMap::new(),
+            missing_paths: HashSet::new(),
         }
     }
 }
@@ -170,6 +172,9 @@ impl GoldSrcAudioBank {
         let clean_path = rel_path.replace('\\', "/");
         if let Some(handle) = self.sound_cache.get(&clean_path) {
             return Some(handle.clone());
+        }
+        if self.missing_paths.contains(&clean_path) {
+            return None;
         }
 
         let all_search_dirs = collect_game_search_dirs(search_dirs);
@@ -206,6 +211,7 @@ impl GoldSrcAudioBank {
         }
 
         tracing::warn!("GoldSrc sound not found on disk: {}", clean_path);
+        self.missing_paths.insert(clean_path);
         None
     }
 }
@@ -289,10 +295,15 @@ pub fn footstep_sound_system(
         player.step_controller.advance_time(dt_ms);
 
         let on_ground = player.sim.current.on_ground;
-        let was_on_ground = player.was_on_ground;
+        let was_on_ground = player.sim.previous.on_ground;
         let on_ladder = player.sim.current.on_ladder;
         let seed_step = player.seed_step & 1;
         let seed_vol = player.seed_vol % 5;
+        let pre_land_fvel = player
+            .sim
+            .previous
+            .fall_velocity
+            .max(-player.sim.previous.velocity[2]);
 
         // Trace ground surface material texture name directly under player origin
         let ground_texture = if on_ladder {
@@ -308,7 +319,7 @@ pub fn footstep_sound_system(
             is_ducking: player.sim.current.is_ducking,
             duck_time_ms: 0.0,
             is_frozen: false,
-            fall_velocity: player.sim.current.fall_velocity,
+            fall_velocity: pre_land_fvel,
             is_dead: false,
             water_pos: WaterPosition::NotInWater,
             ground_texture,

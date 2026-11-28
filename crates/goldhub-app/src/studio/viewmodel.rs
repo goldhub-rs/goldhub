@@ -108,6 +108,8 @@ pub fn spawn_viewmodel_system(
                     clear_color: ClearColorConfig::None,
                     ..default()
                 },
+                bevy::core_pipeline::tonemapping::Tonemapping::None,
+                bevy::render::view::ColorGrading::default(),
                 Projection::Perspective(PerspectiveProjection {
                     fov: 74.0f32.to_radians(),
                     near: 0.5,
@@ -118,23 +120,6 @@ pub fn spawn_viewmodel_system(
             ))
             .id();
         commands.entity(cam_entity).add_child(vm_cam);
-
-        // Soft overlay fill light on Layer 1 so viewmodel speculars remain crisp
-        let vm_light = commands
-            .spawn((
-                PointLight {
-                    color: Color::srgb(1.0, 0.98, 0.95),
-                    intensity: 45_000.0,
-                    range: 200.0,
-                    shadows_enabled: false,
-                    ..default()
-                },
-                Transform::from_xyz(8.0, 12.0, -10.0),
-                RenderLayers::layer(VIEWMODEL_RENDER_LAYER),
-            ))
-            .id();
-        commands.entity(cam_entity).add_child(vm_light);
-
         commands.entity(cam_entity).insert(HasViewModel);
 
         tracing::info!(
@@ -459,7 +444,11 @@ pub fn viewmodel_input_system(
             vm.last_swing = 1 - vm.last_swing;
             vm.last_swing_time = now;
             let target_seq = if vm.last_swing == 0 { 6 } else { 7 };
-            anim.set_sequence(target_seq, 75.0, false);
+            let attack_fps = sequences.get(target_seq).map_or(24.0, |s| s.fps);
+            anim.set_sequence(target_seq, attack_fps, false);
+            if let Ok(mut pc) = player_ctrl_query.get_single_mut() {
+                pc.trigger_third_person_shoot(0.35);
+            }
             vm.attack_cooldown = if matches!(hit, HitTarget::Miss) {
                 0.35
             } else {
@@ -513,8 +502,12 @@ pub fn viewmodel_input_system(
                             &mut vfx.materials,
                             &mut vfx.meshes,
                         );
+                        let was_dead = hostage.is_dead;
                         hostage.health -= damage;
                         if hostage.health > 0.0 {
+                            if !was_dead && let Ok(mut pc) = player_ctrl_query.get_single_mut() {
+                                pc.apply_hostage_penalty(damage, false);
+                            }
                             h_anim.set_sequence(7, 30.0, false); // flinch
                             let pain_idx = ((ctx.time.elapsed_secs() * 100.0) as usize % 6) + 1;
                             let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
@@ -529,8 +522,11 @@ pub fn viewmodel_input_system(
                                     Transform::from_translation(h_t.translation()),
                                 ));
                             }
-                        } else if !hostage.is_dead {
+                        } else if !was_dead {
                             hostage.is_dead = true;
+                            if let Ok(mut pc) = player_ctrl_query.get_single_mut() {
+                                pc.apply_hostage_penalty(damage, true);
+                            }
                             h_anim.set_sequence(31, 24.0, false); // diesimple
                             bounds.mins = Vec3::ZERO;
                             bounds.maxs = Vec3::ZERO;
@@ -621,8 +617,12 @@ pub fn viewmodel_input_system(
                             &mut vfx.materials,
                             &mut vfx.meshes,
                         );
+                        let was_dead = hostage.is_dead;
                         hostage.health -= damage;
                         if hostage.health > 0.0 {
+                            if !was_dead && let Ok(mut pc) = player_ctrl_query.get_single_mut() {
+                                pc.apply_hostage_penalty(damage, false);
+                            }
                             h_anim.set_sequence(7, 30.0, false); // flinch
                             let pain_idx = ((ctx.time.elapsed_secs() * 100.0) as usize % 6) + 1;
                             let pain_snd = format!("hostage/hpain/hpain{pain_idx}.wav");
@@ -637,8 +637,11 @@ pub fn viewmodel_input_system(
                                     Transform::from_translation(h_t.translation()),
                                 ));
                             }
-                        } else if !hostage.is_dead {
+                        } else if !was_dead {
                             hostage.is_dead = true;
+                            if let Ok(mut pc) = player_ctrl_query.get_single_mut() {
+                                pc.apply_hostage_penalty(damage, true);
+                            }
                             h_anim.set_sequence(31, 24.0, false); // diesimple
                             bounds.mins = Vec3::ZERO;
                             bounds.maxs = Vec3::ZERO;

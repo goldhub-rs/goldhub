@@ -19,6 +19,8 @@ pub struct WorldStudioEntity {
     pub model_path: String,
     pub targetname: String,
     pub is_solid: bool,
+    pub home_mins: Vec3,
+    pub home_maxs: Vec3,
 }
 
 /// Bounding box component in Bevy coordinates for physical interaction and ray intersection.
@@ -44,6 +46,7 @@ pub struct HostageEntity {
     pub health: f32,
     pub max_health: f32,
     pub is_dead: bool,
+    pub touched: bool,
     pub pain_cooldown: f32,
     pub state: HostageState,
     pub leader: Option<Entity>,
@@ -313,6 +316,8 @@ pub fn spawn_studio_entity(
                 model_path: model_path.to_string(),
                 targetname: targetname.to_string(),
                 is_solid,
+                home_mins: bounds.mins,
+                home_maxs: bounds.maxs,
             },
             bounds,
             Transform::from_translation(position).with_rotation(rotation),
@@ -320,14 +325,14 @@ pub fn spawn_studio_entity(
         ))
         .id();
 
-    // Spawn child entities for each submesh via shared helper
+    // Spawn child entities for each submesh via shared helper (Layer 2 receives model lights)
     anim_component.mesh_entities = spawn_model_submesh_children(
         commands,
         parent_entity,
         &model_data,
         initial_seq,
         false,
-        None,
+        Some(2),
         meshes,
     );
     commands.entity(parent_entity).insert(anim_component);
@@ -338,6 +343,7 @@ pub fn spawn_studio_entity(
             health: 100.0,
             max_health: 100.0,
             is_dead: false,
+            touched: false,
             pain_cooldown: 0.0,
             state: HostageState::Stand,
             leader: None,
@@ -373,7 +379,7 @@ pub fn hostage_interaction_and_ai_system(
     mut audio_sources: ResMut<Assets<AudioSource>>,
     collision_res: Res<LevelCollisionResource>,
     model_store: Res<StudioModelStore>,
-    player_query: Query<(Entity, &Transform, &crate::player::PlayerController)>,
+    mut player_query: Query<(Entity, &Transform, &mut crate::player::PlayerController)>,
     rescue_query: Query<&crate::entity::HostageRescueZoneEntity>,
     mut hostage_query: Query<
         (
@@ -393,7 +399,7 @@ pub fn hostage_interaction_and_ai_system(
         return;
     }
 
-    let Ok((player_ent, player_t, _)) = player_query.get_single() else {
+    let Ok((player_ent, player_t, mut player_ctrl)) = player_query.get_single_mut() else {
         return;
     };
     let player_pos = player_t.translation;
@@ -405,14 +411,27 @@ pub fn hostage_interaction_and_ai_system(
             continue;
         }
 
+        // Leader death check: If leader died, hostage stops following
+        if hostage.state == HostageState::Follow
+            && hostage.leader == Some(player_ent)
+            && player_ctrl.health <= 0.0
+        {
+            hostage.state = HostageState::Stand;
+            hostage.leader = None;
+            hostage.velocity = Vec3::ZERO;
+        }
+
         let h_pos = h_t.translation;
         // Target hostage chest (~36u above feet) so looking straight ahead interacts cleanly even close up
         let h_chest = h_pos + Vec3::Y * 36.0;
         let chest_delta = h_chest - player_pos;
         let dist = chest_delta.length();
 
-        // 1. +use (E key) toggle between Stand and Follow
-        if use_pressed && dist <= 96.0 {
+        // 1. +use (E key) toggle between Stand and Follow (CS 1.6: Only CT can command hostages)
+        if use_pressed
+            && dist <= 96.0
+            && player_ctrl.team == goldhub_game_cstrike::CsTeam::CounterTerrorist
+        {
             let dir_to_hostage = chest_delta.normalize_or_zero();
             let dot = player_fwd.dot(dir_to_hostage);
             if dot >= 0.45 && hostage.next_use_time <= time.elapsed_secs() {
@@ -426,6 +445,10 @@ pub fn hostage_interaction_and_ai_system(
                 } else {
                     hostage.state = HostageState::Follow;
                     hostage.leader = Some(player_ent);
+                    if !hostage.touched {
+                        hostage.touched = true;
+                        player_ctrl.money = (player_ctrl.money + 150).min(16000);
+                    }
                     tracing::info!(hostage = ?h_ent, "Hostage toggled to FOLLOW player");
                 }
 
@@ -533,6 +556,9 @@ pub fn hostage_interaction_and_ai_system(
                     if let Some(ref mut map_data) = scenario_map {
                         map_data.hostages_rescued += 1;
                     }
+                    if player_ctrl.team == goldhub_game_cstrike::CsTeam::CounterTerrorist {
+                        player_ctrl.money = (player_ctrl.money + 1000).min(16000);
+                    }
 
                     if let Some(h) = audio_bank.get_or_load_sound(
                         "radio/rescued.wav",
@@ -567,6 +593,7 @@ pub fn handle_round_reset_hostages_system(
     for (mut hostage, mut h_t, mut h_anim, mut bounds, mut vis) in &mut hostage_query {
         hostage.health = hostage.max_health;
         hostage.is_dead = false;
+        hostage.touched = false;
         hostage.pain_cooldown = 0.0;
         hostage.state = HostageState::Stand;
         hostage.leader = None;
